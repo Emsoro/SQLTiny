@@ -7,9 +7,9 @@
 
 namespace sqltiny::core {
 
-// 全局执行锁: server 多线程时串行化 SQL 执行
-// M6 P0 完成后: 这把锁将退化为 fallback, 事务边界用 TransactionManager.writeLock_
-static std::mutex g_execute_mutex;
+// M6: 全局锁已移除! 靠 TransactionManager.writeLock_ + 行锁 + WalManager.mu_ 保护
+// 若并发 crash 可临时恢复为 fallback
+// static std::mutex g_execute_mutex;
 
 Database& Database::instance() {
     static Database db;
@@ -92,7 +92,8 @@ void Session::unlockRowWrite(storage::Table& tbl, int64_t rowId) {
 // Session::execute — M6 改 autocommit + 事务边界
 // ============================================================
 executor::ResultSet Session::execute(const std::string& sql) {
-    std::lock_guard<std::mutex> lock(g_execute_mutex);
+    // M6: 全局锁已移除, 靠 TransactionManager + 行锁 + WAL 内部锁保护
+    // std::lock_guard<std::mutex> lock(g_execute_mutex);
 
     executor::ResultSet last;
     try {

@@ -8,6 +8,7 @@
 #include <optional>
 #include <map>
 #include <memory>
+#include <mutex>
 
 namespace sqltiny::storage {
 
@@ -87,6 +88,9 @@ private:
 
     // M5.6 MVCC:row_id → 版本元信息
     std::map<int64_t, VersionInfo> versions_;
+
+    // M6: 表级 mutex, 保护 row_map_ / versions_ / AVL 索引并发访问
+    mutable std::mutex mu_;
 
     // 主键 AVL 索引 —— key 是 PK 列值按顺序拼接
     std::unique_ptr<IndexAvl> pk_index_;

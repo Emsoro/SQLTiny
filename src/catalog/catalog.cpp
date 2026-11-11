@@ -1,6 +1,7 @@
 #include "catalog/catalog.h"
 #include <fmt/format.h>
 #include <algorithm>
+#include <mutex>
 
 namespace sqltiny::catalog {
 
@@ -40,6 +41,7 @@ const Catalog::DbTables* Catalog::current_db() const {
 // ---------- Database ----------
 
 bool Catalog::create_database(const std::string& name, bool if_not_exists) {
+    std::lock_guard<std::mutex> lock(mu_);
     std::string low = lower_name(name);
     if (databases_.count(low)) {
         if (if_not_exists) return true;
@@ -50,6 +52,7 @@ bool Catalog::create_database(const std::string& name, bool if_not_exists) {
 }
 
 bool Catalog::drop_database(const std::string& name, bool if_exists) {
+    std::lock_guard<std::mutex> lock(mu_);
     std::string low = lower_name(name);
     auto it = databases_.find(low);
     if (it == databases_.end()) {
@@ -65,10 +68,12 @@ bool Catalog::drop_database(const std::string& name, bool if_exists) {
 }
 
 bool Catalog::database_exists(const std::string& name) const {
+    std::lock_guard<std::mutex> lock(mu_);
     return databases_.count(lower_name(name)) > 0;
 }
 
 bool Catalog::switch_database(const std::string& name) {
+    std::lock_guard<std::mutex> lock(mu_);
     std::string low = lower_name(name);
     if (!databases_.count(low)) return false;
     current_database_ = low;
@@ -86,6 +91,7 @@ std::vector<std::string> Catalog::list_databases() const {
 // ---------- Table ----------
 
 bool Catalog::create_table(const ast::CreateTableStmt& stmt) {
+    std::lock_guard<std::mutex> lock(mu_);
     // 解析 db.table 格式:指定了 db 就到那个库建,没指定就到 current_database
     std::string db_name = current_database_;
     std::string table_name = stmt.table_name;
@@ -114,6 +120,7 @@ bool Catalog::create_table(const ast::CreateTableStmt& stmt) {
 }
 
 bool Catalog::drop_table(const std::string& name, bool if_exists) {
+    std::lock_guard<std::mutex> lock(mu_);
     // 支持 db.table 格式
     std::string db_name = current_database_;
     std::string table_name = name;
@@ -136,6 +143,7 @@ bool Catalog::drop_table(const std::string& name, bool if_exists) {
 }
 
 bool Catalog::table_exists(const std::string& name) const {
+    std::lock_guard<std::mutex> lock(mu_);
     const DbTables* db = current_db();
     if (!db) return false;
     return db->tables.count(lower_name(name)) > 0;
@@ -210,6 +218,7 @@ std::vector<std::string> Catalog::table_names() const {
 }
 
 void Catalog::for_each_database(const std::function<void(const std::string&)>& cb) const {
+    std::lock_guard<std::mutex> lock(mu_);
     std::vector<std::string> names;
     for (auto& [name, _] : databases_) names.push_back(name);
     std::sort(names.begin(), names.end());
@@ -218,6 +227,7 @@ void Catalog::for_each_database(const std::function<void(const std::string&)>& c
 
 void Catalog::for_each_table_in(const std::string& db_name,
                                 const std::function<void(const std::string&, const storage::Table*)>& cb) const {
+    std::lock_guard<std::mutex> lock(mu_);
     const DbTables* db = get_db(db_name);
     if (!db) return;
     std::vector<std::string> names;
@@ -227,6 +237,7 @@ void Catalog::for_each_table_in(const std::string& db_name,
 }
 
 void Catalog::clear_all_except_default() {
+    std::lock_guard<std::mutex> lock(mu_);
     // 保留 default 及其 tables (如果有),其他库全部清掉
     auto def_it = databases_.find("default");
     DbTables default_backup;

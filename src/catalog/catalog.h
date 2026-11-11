@@ -50,6 +50,7 @@ private:
         std::map<std::string, std::unique_ptr<storage::Table>> tables;
     };
     std::map<std::string, DbTables> databases_;
+    mutable std::mutex mu_;  // M6: 保护 Catalog 所有多线程访问
 
     /// 取当前库的 tables map
     DbTables* current_db();
