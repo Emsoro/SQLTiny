@@ -1,4 +1,5 @@
 #include "executor/executor.h"
+#include "core/session.h"
 #include <fmt/format.h>
 #include <algorithm>
 #include <functional>
@@ -7,6 +8,13 @@
 #include <map>
 
 namespace sqltiny::executor {
+
+// WAL 小工具:拆 "db.table" 或 "table" → (db_or_empty, table)
+static std::pair<std::string, std::string> split_qname(const std::string& q) {
+    auto dot = q.find('.');
+    if (dot == std::string::npos) return {"", q};
+    return {q.substr(0, dot), q.substr(dot + 1)};
+}
 
 ResultSet Executor::execute(const ast::Statement& stmt) {
     ResultSet r;
@@ -53,6 +61,11 @@ ResultSet Executor::exec_create_table(const ast::CreateTableStmt& s) {
     if (!ok) {
         r.ok = false; r.mysql_errno = 1050; r.sql_state = "42S01";
         r.error_message = fmt::format("Table '{}' already exists", s.table_name);
+    } else {
+        auto [db_part, tbl_part] = split_qname(s.table_name);
+        std::string db_name = db_part.empty() ? catalog_.current_database() : db_part;
+        auto* tbl = catalog_.get_table(s.table_name);
+        if (tbl) core::Database::instance().wal().append_create_table(db_name, tbl->def());
     }
     return r;
 }
@@ -64,6 +77,10 @@ ResultSet Executor::exec_drop_table(const ast::DropTableStmt& s) {
     if (!ok) {
         r.ok = false; r.mysql_errno = 1051; r.sql_state = "42S02";
         r.error_message = fmt::format("Unknown table '{}'", s.table_name);
+    } else {
+        auto [db_part, tbl_part] = split_qname(s.table_name);
+        std::string db_name = db_part.empty() ? catalog_.current_database() : db_part;
+        core::Database::instance().wal().append_drop_table(db_name, tbl_part);
     }
     return r;
 }
@@ -123,6 +140,12 @@ ResultSet Executor::exec_insert(const ast::InsertStmt& s) {
             r.error_message = "Duplicate entry for PRIMARY KEY";
             return r;
         }
+        // WAL append: InsertRow
+        {
+            auto [db_part, tbl_part] = split_qname(s.table_name);
+            std::string db_name = db_part.empty() ? catalog_.current_database() : db_part;
+            core::Database::instance().wal().append_insert_row(db_name, tbl_part, rid, row);
+        }
         affected++;
         // 更新 last_insert_id(最后一个插入的 auto_increment 值)
         for (auto& col_list : def.primary_key_cols) {
@@ -168,6 +191,12 @@ ResultSet Executor::exec_insert(const ast::InsertStmt& s) {
                 r.ok = false; r.mysql_errno = 1062; r.sql_state = "23000";
                 r.error_message = "Duplicate entry for PRIMARY KEY";
                 return r;
+            }
+            // WAL append: InsertRow (INSERT...SELECT 分支)
+            {
+                auto [db_part, tbl_part] = split_qname(s.table_name);
+                std::string db_name = db_part.empty() ? catalog_.current_database() : db_part;
+                core::Database::instance().wal().append_insert_row(db_name, tbl_part, rid, row);
             }
             affected++;
             // last_insert_id
@@ -242,10 +271,13 @@ ResultSet Executor::exec_update(const ast::UpdateStmt& s) {
     });
 
     // 循环外改
+    auto [u_db, u_tbl] = split_qname(s.table_name);
+    std::string u_db_name = u_db.empty() ? catalog_.current_database() : u_db;
     for (auto& p : pending) {
         if (!p.pk_old.empty()) tbl->delete_by_pk(p.pk_old);
         tbl->insert(std::move(p.new_row));
         affected++;
+        core::Database::instance().wal().append_update_row(u_db_name, u_tbl, p.pk_old, p.new_row);
     }
 
     r.affected_rows = affected;
@@ -279,6 +311,8 @@ ResultSet Executor::exec_delete(const ast::DeleteStmt& s) {
     });
 
     int affected = 0;
+    auto [d_db, d_tbl] = split_qname(s.table_name);
+    std::string d_db_name = d_db.empty() ? catalog_.current_database() : d_db;
     for (int64_t rid : to_delete) {
         auto maybe = tbl->get_row(rid);
         if (!maybe) continue;
@@ -290,10 +324,10 @@ ResultSet Executor::exec_delete(const ast::DeleteStmt& s) {
             }
         if (!pk.empty()) tbl->delete_by_pk(pk);
         else {
-            // 无主键 — 不支持按 row_id 删,需要在 Table 里暴露;简化:清空整张表
-            // 实际上 Table 目前 row_map 非公开,暂时整体清空
+            // 无主键 — 不支持按 row_id 删
         }
         affected++;
+        core::Database::instance().wal().append_delete_row(d_db_name, d_tbl, pk);
     }
     // 全表清空时用 truncate-like
     if (!s.where && to_delete.empty()) {
@@ -1031,6 +1065,8 @@ ResultSet Executor::exec_create_database(const ast::CreateDatabaseStmt& s) {
     if (!catalog_.create_database(s.database_name, s.if_not_exists)) {
         r.ok = false; r.mysql_errno = 1007; r.sql_state = "HY000";
         r.error_message = fmt::format("Can't create database '{}'; database exists", s.database_name);
+    } else {
+        core::Database::instance().wal().append_create_database(s.database_name);
     }
     return r;
 }
@@ -1045,6 +1081,8 @@ ResultSet Executor::exec_drop_database(const ast::DropDatabaseStmt& s) {
         } else {
             r.error_message = fmt::format("Can't drop database '{}'; database doesn't exist", s.database_name);
         }
+    } else {
+        core::Database::instance().wal().append_drop_database(s.database_name);
     }
     return r;
 }

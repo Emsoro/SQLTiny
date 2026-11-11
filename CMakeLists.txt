@@ -19,6 +19,8 @@ set(SQLTINY_SOURCES
   src/parser/ast.cpp
   src/storage/index_avl.cpp
   src/storage/table.cpp
+  src/storage/persist.cpp
+  src/storage/wal_manager.cpp
   src/catalog/catalog.cpp
   src/core/session.cpp
   src/executor/expr.cpp
@@ -52,6 +54,7 @@ add_smoke_test(smoke_m2       tests/smoke_m2.cpp)
 add_smoke_test(smoke_m3       tests/smoke_m3.cpp)
 add_smoke_test(smoke_m4       tests/smoke_m4.cpp)
 add_smoke_test(smoke_m25_e2e  tests/smoke_m25_e2e.cpp)
+add_smoke_test(smoke_m5_wal   tests/smoke_m5_wal.cpp)
 
 if(GTest_FOUND)
   function(add_sqltiny_test name source)

@@ -3,6 +3,7 @@
 #include "catalog/catalog.h"
 #include "executor/executor.h"
 #include "parser/parser.h"
+#include "storage/wal_manager.h"
 #include <string>
 #include <vector>
 #include <memory>
@@ -16,10 +17,20 @@ public:
     static Database& instance();
 
     catalog::Catalog& catalog() { return catalog_; }
+    WalManager& wal() { return wal_; }
+
+    /// 启动时调用:打开 WAL 并 replay 到 catalog
+    /// data_dir 为空则持久化禁用
+    bool open(const std::string& data_dir);
+
+    /// 优雅关闭
+    void shutdown();
 
 private:
     Database() = default;
     catalog::Catalog catalog_;
+    WalManager wal_;
+    std::string wal_path_;  // 给 session.cpp::open 用
 };
 
 /// 会话 —— 一条 SQL 入口

@@ -1,11 +1,35 @@
 #include "core/session.h"
 #include <fmt/format.h>
+#include <cstdio>
+#include <string>
 
 namespace sqltiny::core {
 
 Database& Database::instance() {
     static Database db;
     return db;
+}
+
+bool Database::open(const std::string& data_dir) {
+    if (data_dir.empty()) {
+        fmt::print("[SQLTiny] data-dir not set — running in memory-only mode (no persistence)\n");
+        wal_path_.clear();
+        return true;
+    }
+    // 确保目录存在
+#ifdef _WIN32
+    std::string sys_cmd = "mkdir \"" + data_dir + "\" 2>NUL";
+    (void)std::system(sys_cmd.c_str());
+#else
+    std::string sys_cmd = "mkdir -p \"" + data_dir + "\"";
+    (void)std::system(sys_cmd.c_str());
+#endif
+    wal_path_ = data_dir + "/sql.wal";
+    return wal_.open(wal_path_, catalog_);
+}
+
+void Database::shutdown() {
+    wal_.close();
 }
 
 Session::Session() = default;
@@ -28,6 +52,8 @@ executor::ResultSet Session::execute(const std::string& sql) {
                     return u;
                 }
                 current_database = name;
+                // WAL 记录 USE
+                Database::instance().wal().append_use_database(name);
                 executor::ResultSet u;
                 u.ok = true; u.affected_rows = 0;
                 return u;
