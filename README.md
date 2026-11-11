@@ -143,11 +143,40 @@ python -c "import pymysql; c=pymysql.connect(host='127.0.0.1',port=3306,user='ro
 ### CLI 参数
 
 ```
-sqltiny_server [--port <n>] [--user <name>] [--password <pwd>]
+sqltiny_server [--port <n>] [--user <name>] [--password <pwd>] [--data-dir <DIR>]
                默认 --port 3306 --user root
+               --data-dir  缺省 = 内存模式(无持久化,重启丢数据)
 ```
 
-> **开发期简化**: `mysql_native_password` 不校验密码,只要 user=root 就放行。caching_sha2_password 由 M5 实现。
+> **开发期简化**: `mysql_native_password` 不校验密码,只要 user=root 就放行。
+
+### 数据存储位置
+
+SQLTiny 通过 `--data-dir` 指定持久化目录,目录下生成两个文件:
+
+| 文件 | 说明 |
+|---|---|
+| `sql.wal` | 写前日志(WAL),所有 INSERT / UPDATE / DELETE / DDL 实时追加。Server 启动时先读 `sql.data` 再 replay 这个 WAL |
+| `sql.data` | Snapshot 快照,由 checkpoint 时从 Catalog 全量 dump 生成。Server 正常 shutdown 自动做 checkpoint |
+
+**三种运行模式**:
+
+```powershell
+# 1. 内存模式 (默认,不传 --data-dir)
+#    不写磁盘,重启丢数据,适合开发调试
+.\build\Debug\sqltiny_server.exe --port 3306 --user root
+
+# 2. 指定持久化目录 (最常用)
+#    第一次启动自动创建目录,生成 sql.wal + sql.data
+.\build\Debug\sqltiny_server.exe --port 3306 --user root --data-dir D:\SQLTiny\data
+
+# 3. 自定义位置 (相对或绝对路径都可以)
+.\build\Debug\sqltiny_server.exe --port 3306 --user root --data-dir .\sqltiny_data
+```
+
+**修改存储位置**:停 server → 换 `--data-dir` 参数重启即可。新目录自动创建并初始化空 WAL。如果想迁移旧数据,直接把旧目录下的 `sql.wal` / `sql.data` 复制到新目录,Server 启动时会自动 replay。
+
+> 注意:Server 正在运行时不要手动删除或修改 `sql.wal` / `sql.data`,会导致下次启动数据丢失或损坏。
 
 ### 当前支持的 SQL 子集
 
