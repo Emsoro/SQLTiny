@@ -2,8 +2,48 @@
 
 > 目标:用现代 C++ (C++20) 重写 HSQLDB 核心引擎,构建一个轻量级嵌入式数据库 **SQLTiny**,同时暴露 **MySQL 客户端协议** 兼容端口——让标准 MySQL 客户端(mysql CLI、Navicat、JDBC Connector/J、Go sql.Open("mysql",...) 等)直接连接 SQLTiny。
 >
-> 源码输入:`d:\Work\CPlusPlus\SQLTiny\hsqldb\src\org\hsqldb`(约 200+ Java 源文件)
-> 输出目录:`d:\Work\CPlusPlus\SQLTiny\src\`
+> 源码输入:HSQLDB 2.7.4 `org.hsqldb`(Session / TransactionManagerMVCC / RowAction / persist)
+> 当前工作区:`d:\Cplusplus\SQLTiny`
+
+---
+
+## 0. 当前状态(2026-11-11)
+
+> 下文 M1–M5 为原始规划、M6 各节含设计稿伪代码,均保留供追溯。**落地状态以本节与各节 ✅ 标记为准;实际目录与运行方式见 `README.md`,架构图见 `architecture.svg`。**
+
+### 交付进度
+
+| 里程碑 | 状态 | 说明 |
+|---|---|---|
+| M1 / M2 / M2.5 / M3 | ✅ | 类型/AVL/Lexer、DDL/DML、MySQL 协议接入、子查询与 JOIN |
+| M4 | ✅ | SHOW 系列、多库 Catalog、协议字段类型推断(`DESCRIBE` / `SHOW FULL TABLES` 仍缺) |
+| M5 | ✅ | WAL + Snapshot + Replay、AUTO_INCREMENT、并发安全 |
+| **M6 P0** | ✅ | 行锁 + `TransactionManager` + `Table.shared_mutex`,SELECT 走 MVCC 快照不加行锁 |
+| **M6 P1 事务部分** | ✅ | 四隔离级别、autocommit、SAVEPOINT、WAL 事务缓冲、协议状态位 |
+| M6 P1 边缘项 | ⬜ | `DESCRIBE` / `SHOW FULL TABLES`、`FOR UPDATE` / `LOCK IN SHARE MODE`、死锁检测 |
+| M6 P2 / P3 / P4 | ⬜ | JOIN 优化、Prepared Statement / 认证、复制与更大测试覆盖 |
+
+### 本轮交付(M6 事务 + 四隔离级别,参考 HSQLDB 2.7.4)
+
+- **隔离级别**:`ast::IsolationLevel` 1/2/4/8;`SET [SESSION] TRANSACTION ISOLATION LEVEL`、`START TRANSACTION ... LEVEL`、`SET tx_isolation=` 真实生效;`@@tx_isolation` / `SHOW VARIABLES` 返回会话真实值。
+- **HSQLDB 提升规则**:`READ UNCOMMITTED → READ COMMITTED`(下一事务级附加只读 25006)、`REPEATABLE READ → SERIALIZABLE`;四个级别都不允许脏读。
+- **MVCC**:`VersionInfo` 增加 `pendingTxn / pendingInsert / pendingDelete`,未提交行只对所属事务可见;**commit 才 `finalize_commit` 发布版本**。RC 用语句级 SCN,RR/SER 用事务级 SCN;RR/SER 陈旧写与并发写冲突返回 40001(MySQL errno 1213)。
+- **事务边界**:autocommit 语句级隐式 begin+commit、`SET AUTOCOMMIT=0/1`、`BEGIN` / `COMMIT` / `ROLLBACK`、`SAVEPOINT` / `ROLLBACK TO` / `RELEASE`、事务结束恢复会话默认隔离级别。
+- **持久化修复**:未提交行 DML 进入会话级 `wal_buffer_`,commit 整体 flush、rollback 整体丢弃;checkpoint 只写已提交且未删除的行;修复回滚后重启复活数据。
+- **配套修复**:UPDATE 两条 `RowAction` 的 rowId 错配、回滚主键索引恢复、`committed_queue_` 的 commitSCN 失效、OK/EOF 包 `SERVER_STATUS_AUTOCOMMIT` / `SERVER_STATUS_IN_TRANS` 硬编码。
+- **架构图**:`architecture.svg` 改为靛蓝/青绿/琥珀/灰蓝四色语义化主题色,并同步到当前事务数据流。
+
+### 验证基线
+
+| 测试 | 结果 |
+|---|---|
+| `ctest -C Debug` | 8/8(含 `smoke_m6_isolation` 与 `smoke_m6_hsqldb_matrix`) |
+| `smoke_m6_isolation` | 451/451 PASS — 四级别、脏读、快照、冲突、autocommit、SAVEPOINT、DML 回滚 |
+| `smoke_m6_hsqldb_matrix` | 56 PASS / 4 GAP — HSQLDB 可移植 SQL 语义矩阵;GAP 见 §8.4 |
+| `test_txn_vs_sqlite.py` | 70/70 与 SQLite 一致 + 2 项预期差异(RC 事务内语义、RU 提升 vs SQLite 脏读) |
+| `test_full_flow.py` / `test_vs_sqlite.py` | 47 PASS / 0 FAIL / 1 GAP(GAP 见 §8.4)/ 全场景一致 |
+| `test_wal_recovery.py` / `test_concurrency.py` | 重启恢复全通过 / 5 线程 15s 无 crash |
+| `test_sqlalchemy.py` | 29 PASS / 0 FAIL / 4 GAP(方言与反射限制,见 §8.4 #5–#8) |
 
 ---
 
@@ -63,6 +103,21 @@
 | **网络** | `server/Server.java`, `ClientConnection` | `net/mysql_server.{h,cpp}`, `net/mysql_proto.{h,cpp}` | 新写,非移植 |
 | **错误/日志** | `error/Error.java`, `HsqlException` | `core/error.h` | `Result<T, SqlError>` 返回风格 |
 
+### 落地偏差说明(以实际代码为准)
+
+上表是立项时的目标路径,部分模块并未按该粒度拆分。`core/database.*` / `txn/mvcc.*` / `executor/stmt.*` / `executor/dml.*` / `net/auth_native.cpp` 未单独存在,职责集中在 `core/session.*`、`core/transaction.*`、`storage/table.*`、`executor/executor.*`、`net/mysql_proto.*`。M6 之后 HSQLDB 2.7.4 的隔离级别/事务语义映射为:
+
+| HSQLDB 2.7.4 参考 | 实际落地 |
+|---|---|
+| `SessionInterface.TX_*`、`Session.setIsolation()` | `parser/ast.h` `IsolationLevel` + `core/session.cpp` `setIsolation()` / `readSCN()` |
+| `RowAction.canRead()` | `storage/table.cpp` `row_visible()` / `for_each_visible(querySCN, readerTxn)` |
+| `TransactionManagerMVCC` 提交与冲突检测 | `core/transaction.cpp` `commit_transaction()` / `has_snapshot_conflict()` |
+| `Session.savepoints` / `rollbackSavepoint` | `core/session.h` `Savepoint{action_index, wal_count}` + `rollback_to_savepoint()` |
+| `TransactionManagerCommon` SCN 分配 | `storage/wal_manager.cpp` `next_scn()`(全局单一计数器,不另设一套 SCN) |
+| `persist/*` | `storage/wal_manager.cpp` + `storage/snapshot.cpp` |
+
+> 上表"第一版支持 READ COMMITTED" 已过期:现已支持四个级别(RU→RC、RR→SER 按 HSQLDB 规则提升),详见 §0 当前状态与 §4 里程碑 M6 P1。
+
 ### 不移植的模块(第一版)
 - JDBC 驱动(java.sql 接口)
 - `jdbc/*` 整包 — C++ 端直接提供原生 C++ API
@@ -73,69 +128,55 @@
 
 ---
 
-## 3. 目录结构(产物)
+## 3. 目录结构(实际产物)
+
+> 立项时的设计稿路径见 §2 落地偏差说明。以下为 `d:\Cplusplus\SQLTiny` 当前真实结构。
 
 ```
-d:\Work\CPlusPlus\SQLTiny\
-├── CMakeLists.txt                  # 顶层构建
+SQLTiny/
+├── CMakeLists.txt              顶层构建 + CTest 注册
+├── CODEPLAN.md                 完整项目规划(架构映射 + 里程碑)
+├── architecture.svg            系统架构图(四隔离级别 + 事务数据流)
+├── README.md                   使用说明 / 测试入口 / SQL 子集
+├── vcpkg.json                  vcpkg manifest(仅依赖 fmt)
 ├── src/
-│   ├── core/
-│   │   ├── database.{h,cpp}        # Database 实例
-│   │   ├── session.{h,cpp}         # 会话上下文
-│   │   ├── error.h                 # SqlError / Result<T,E>
-│   │   └── logger.h                # 简单日志
-│   ├── types/
-│   │   ├── type.h                  # SqlType 枚举
-│   │   ├── value.{h,cpp}           # 运行时值(monostate / i64 / double / string / blob / time / null)
-│   │   └── column.h                # 列元数据
-│   ├── parser/
-│   │   ├── lexer.{h,cpp}           # Tokenizer
-│   │   ├── token.h
-│   │   ├── ast.h                   # AST 节点定义(Variant/Visitor)
-│   │   └── parser.{h,cpp}          # 递归下降入口
-│   ├── catalog/
-│   │   ├── catalog.{h,cpp}         # Schema 注册中心
-│   │   └── objects.h               # TableDef / IndexDef / SequenceDef / UserDef
-│   ├── storage/
-│   │   ├── row.h
-│   │   ├── table.{h,cpp}           # 表 + 行集合
-│   │   ├── index_avl.{h,cpp}       # AVL 内存索引
-│   │   └── persist.{h,cpp}         # WAL / 数据文件(里程碑 5)
-│   ├── txn/
-│   │   ├── txn.{h,cpp}             # Transaction / SCN 分配器
-│   │   └── mvcc.{h,cpp}            # 可见性判断
-│   ├── executor/
-│   │   ├── expr.{h,cpp}            # 表达式求值
-│   │   ├── stmt.{h,cpp}            # AST → 执行
-│   │   ├── dml.{h,cpp}             # SELECT/INSERT/UPDATE/DELETE
-│   │   └── builtin_funcs.cpp
-│   ├── net/                        # 里程碑 4 启动
-│   │   ├── mysql_proto.{h,cpp}     # 编解码
-│   │   ├── mysql_server.{h,cpp}    # TCP 监听 + 连接管理
-│   │   └── auth_native.cpp         # mysql_native_password 验证
-│   └── main.cpp                    # 服务器入口(里程碑 4)
-├── tests/
-│   ├── test_lexer.cpp
-│   ├── test_parser.cpp
-│   ├── test_value.cpp
-│   ├── test_avl.cpp
-│   ├── test_mvcc.cpp
-│   ├── test_dml.cpp                # SQL 级集成测试
-│   └── test_mysql_proto.cpp
-└── docs/
-    └── mysql_protocol_notes.md     # 协议抓包记录(里程碑 4)
+│   ├── types/                  type.h · value.{h,cpp}
+│   ├── parser/                 lexer.{h,cpp} · ast.{h,cpp} · parser.{h,cpp}
+│   ├── catalog/                catalog.{h,cpp} — 多库 databases_[db].tables_
+│   ├── storage/                table.{h,cpp} · index_avl.{h,cpp} · persist.{h,cpp}
+│   │                           wal_manager.{h,cpp} · snapshot.{h,cpp}
+│   ├── core/                   session.{h,cpp} · transaction.{h,cpp}
+│   ├── executor/               executor.{h,cpp} · expr.cpp
+│   ├── net/                    mysql_proto.{h,cpp} · mysql_server.{h,cpp}
+│   └── main.cpp                server 入口
+└── tests/
+    ├── smoke_m1.cpp            Value / AVL / Lexer
+    ├── smoke_m2.cpp            CRUD / 聚合 / 表达式 / DDL / NULL
+    ├── smoke_m3.cpp            GROUP BY / HAVING / 子查询 IN / INSERT SELECT
+    ├── smoke_m4.cpp            多库 / USE / SHOW / SET
+    ├── smoke_m25_e2e.cpp       Winsock 直连 server E2E
+    ├── smoke_m5_wal.cpp        WAL Replay + CRC + Checkpoint
+    ├── smoke_m6_isolation.cpp  四隔离级别 + 事务 / 保存点 / 冲突
+    ├── smoke_m6_hsqldb_matrix.cpp  HSQLDB 可移植 SQL 语义矩阵
+    ├── test_full_flow.py       PyMySQL 全链路(双连接,含事务/隔离级别)
+    ├── test_sqlalchemy.py      SQLAlchemy 2.x Engine/Core/ORM/Inspector
+    ├── test_vs_sqlite.py       SQLTiny vs SQLite 行为对比
+    ├── test_txn_vs_sqlite.py   四隔离级别 + 事务结果与 SQLite 对比 / WAL 重启
+    ├── test_wal_recovery.py    server 重启恢复
+    ├── test_perf_vs_sqlite.py  大数据量 INSERT + JOIN 性能对比
+    └── test_concurrency.py     多线程并发读写
 ```
 
 ---
 
 ## 4. 里程碑与验收标准
 
-遵循"先核心后边缘、先进程内后网络"的顺序。每个里程碑结束都要跑 HSQLDB 自带 TestSelf*.txt 子集 + MySQL 客户端手动验证。
+遵循"先核心后边缘、先进程内后网络"的顺序。**实际验收**以自写 C++ smoke(CTest)+ PyMySQL / SQLAlchemy / SQLite 对比脚本为准;HSQLDB `TestSelf*.txt` 仅作语义参考,未直接运行其测试框架。各节下方的验收描述保留为当时的规划口径。
 
-### M1 · 基础骨架与类型系统(预计 1 周)
+### M1 · 基础骨架与类型系统 ✅
 **目标**:`Value` 类型可用,`AVL` 索引独立通过测试,`Lexer` 能把简单 SQL 切成 Token。
 
-- [x] CMake + vcpkg 依赖约定(fmtlib、spdlog、gtest)
+- [x] CMake + vcpkg 依赖约定(实际仅 fmtlib;测试用自写 smoke + CTest,未引入 spdlog/gtest)
 - [x] `types/type.h` — SqlType 枚举(INT/BIGINT/DECIMAL/VARCHAR/TEXT/BLOB/DATE/DATETIME/BOOLEAN)
 - [x] `types/value.{h,cpp}` — `using Value = std::variant<std::monostate, int64_t, double, std::string, Blob, DateTime>`,含比较/转换/toString
 - [x] `storage/index_avl.{h,cpp}` — AVL 树,支持 insert/find/remove/range-scan,单元测试 > 100 cases
@@ -146,7 +187,7 @@ d:\Work\CPlusPlus\SQLTiny\
 
 ---
 
-### M2 · Catalog + 简单 DDL/DML(预计 1.5 周)
+### M2 · Catalog + 简单 DDL/DML ✅
 **目标**:内存表可 CREATE/INSERT/SELECT/UPDATE/DELETE,支持主键和索引。
 
 - [x] `catalog/objects.h` — `TableDef`(列列表 + 主键 + 索引定义),`IndexDef`,`UserDef`
@@ -173,31 +214,7 @@ DROP TABLE users;
 
 ---
 
-### M3 · MVCC 事务 + 子查询(预计 1.5 周)
-**目标**:事务隔离 READ COMMITTED,支持子查询、UNION、LEFT JOIN。
-
-- [x] `txn/txn.{h,cpp}` — SCN 全局递增;BEGIN / COMMIT / ROLLBACK / SAVEPOINT
-- [x] `txn/mvcc.{h,cpp}` — 每行保存 createSCN / deleteSCN;可见性规则(读 committed)
-- [x] SELECT 增强:LEFT JOIN / RIGHT JOIN / FULL JOIN / CROSS JOIN / 子查询(WHERE IN / WHERE = / FROM 子查询) / UNION [ALL] / DISTINCT
-- [x] `INSERT … SELECT …`
-- [x] 聚合函数 + GROUP BY + HAVING 正确处理 NULL 组
-- [x] 简单约束:NOT NULL,UNIQUE,CHECK,FOREIGN KEY(MATCH SIMPLE,RESTRICT/NO ACTION)
-- [x] `tests/test_mvcc.cpp` — 两线程并发读写验证隔离级别
-
-**验收**:`test_mvcc.cpp` 并发测试无脏读无不可重复读;下列 SQL 正确:
-```sql
-SELECT u.name, COUNT(o.id) AS cnt
-FROM users u LEFT JOIN orders o ON o.user_id = u.id
-WHERE u.age > 20
-GROUP BY u.id
-HAVING cnt > 1
-ORDER BY cnt DESC
-LIMIT 10;
-```
-
----
-
-### M2.5 · 最小可用 MySQL 协议适配器(预计 0.5-1 周)
+### M2.5 · 最小可用 MySQL 协议适配器 ✅
 **目标**:mysql CLI 能连上,跑通 M2 的全部 SQL;尽早暴露 MySQL 方言兼容性问题。
 
 > 为什么放在 M2 之后?协议层是纯独立模块,不依赖 MVCC/子查询;尽早让真实客户端介入,SQL 方言调优和边界 case 暴露远比单元测试有效。
@@ -224,7 +241,7 @@ Navicat / DBeaver 也能连上执行。**但暂不支持**:Prepared Statement、
 
 ---
 
-### M3 · MVCC 事务 + 子查询(预计 1.5 周)
+### M3 · MVCC 事务 + 子查询 ✅
 **目标**:事务隔离 READ COMMITTED,支持子查询、UNION、LEFT JOIN;MySQL 客户端此刻已能连上,直接验证引擎升级。
 
 - [x] `txn/txn.{h,cpp}` — SCN 全局递增;BEGIN / COMMIT / ROLLBACK / SAVEPOINT
@@ -254,14 +271,14 @@ LIMIT 10;
 - [x] `SHOW TABLES` / `SHOW CREATE TABLE` / `SHOW DATABASES` / `SHOW STATUS` / `SHOW VARIABLES`(含 LIKE pattern 过滤)
 - [x] `USE db`, `CREATE DATABASE`, `DROP DATABASE`
 - [x] Catalog 多库化:库级独立表注册 `databases_[db].tables_`
-- [x] SQLAlchemy 2.x 兼容:13 个硬编码系统变量(`@@tx_isolation`、`@@autocommit`、`@@character_set_*` 等)、`VERSION()` / `SCHEMA()` 函数、`COMMIT` / `ROLLBACK` / `BEGIN` 占位
+- [x] SQLAlchemy 2.x 兼容:系统变量、`VERSION()` / `SCHEMA()` 函数、`COMMIT` / `ROLLBACK` / `BEGIN` 占位(M4 时均为占位;M6 P1 后 `@@tx_isolation` / `@@autocommit` 返回会话真实值,事务语句换成真实语义)
 - [x] MySQL wire protocol 字段类型动态推断(DECIMAL/VARCHAR/INT/DOUBLE 正确 field_type)
 - [ ] `COM_STMT_PREPARE` / `COM_STMT_EXECUTE` — 二进制协议(→ M6 P3)
 - [ ] `INFORMATION_SCHEMA` 视图(→ M6)
 - [ ] `caching_sha2_password` 认证(→ M6)
 - [ ] `CLIENT_SSL` 握手(→ M6)
 
-**验收**:Navicat 打开连接不弹警告,能列出数据库/表/列;SQLAlchemy 8/10 核心路径 PASS。
+**验收**:Navicat 打开连接不弹警告,能列出数据库/表/列;SQLAlchemy 8/10 核心路径 PASS(现按断言计 29 PASS / 0 FAIL / 4 GAP,后两项见 M6 P1 1.2 与 §8.4 #5–#8)。
 
 ---
 
@@ -271,9 +288,9 @@ LIMIT 10;
 - [x] **WAL + Replay**:启动时先读 `sql.data` snapshot 再 replay 增量 `sql.wal`
 - [x] **Checkpoint + Snapshot**:写 `sql.data`(metadata section + row records),truncate WAL;shutdown 自动 do_checkpoint
 - [x] `INTEGER AUTO_INCREMENT`(MySQL 风格,对应 HSQLDB IDENTITY)
-- [x] **MVCC SCN**:全局原子递增 SCN,Row 保存 `createSCN` / `deleteSCN`
-- [x] `for_each_visible(querySCN)`:READ COMMITTED 可见性过滤
-- [x] **并发安全**:Session::execute 入口加全局 `std::mutex`(当前是粗粒度串行化;行级锁 → M6 P0)
+- [x] **MVCC SCN**:全局原子递增 SCN,Row 保存 `createSCN` / `deleteSCN`(M6 起统一由 `WalManager::next_scn()` 分配)
+- [x] `for_each_visible(querySCN)`:READ COMMITTED 可见性过滤(M6 起增加 `readerTxn` / `pendingTxn`,commit 才发布版本)
+- [x] **并发安全**:Session::execute 入口加全局 `std::mutex`(M5 时的粗粒度串行化;M6 P0 已改为行锁 + `Table.shared_mutex` + `TransactionManager.writeLock_`)
 - [x] **SQLAlchemy 2.x**:Engine/Core/ORM/Inspector 核心路径 8/10 PASS,`DESCRIBE` / `SHOW FULL TABLES` 留待 M6
 - [x] **4 个集成测试**:
   - `test_sqlalchemy.py` — SQLAlchemy 全场景(8/10 PASS,2 非核心 FAIL)
@@ -287,10 +304,30 @@ LIMIT 10;
 
 ### M6 · 行锁 + 事务 + JOIN 优化 + 存储过程(按优先级)
 
+> **进度(2026-11-11)**:P0 ✅ 已完成 · P1 事务语义 ✅ 已完成,边缘项 ⬜ 待办 · P2 / P3 / P4 ⬜ 未启动。详见 §0 当前状态。
+
 ---
 
-#### P0 · 行级锁 + 事务管理器(参考 HSQLDB TransactionManagerMVCC + Derby LockManager)
-> 当前 `Session::execute` 用全局 `std::mutex` 串行化所有 SQL,语义正确但吞吐为 1。HSQLDB 同一架构(MVCC + AVL + WAL)用 `ReentrantReadWriteLock` 全局 writeLock 保护事务边界,但 **SELECT 不持锁**(快照隔离天然支持)。Derby 用传统 2PL,行锁 + 锁表 + 死锁检测。SQLTiny 走 HSQLDB 路线(已用 MVCC SCN),但需要补齐事务基础设施。
+#### P0 · 行级锁 + 事务管理器 ✅ 已完成(参考 HSQLDB TransactionManagerMVCC + Derby LockManager)
+
+> **【2026-11-11 更新】** 本节 0.0–0.5 与下方伪代码保留为立项设计稿;**实际实现以 `src/core/transaction.*`、`src/core/session.*`、`src/storage/table.*` 为准**。设计稿里"当前全局 mutex 串行化"的描述是 M5 时的状态,M6 P0 已移除。
+
+> 原问题描述(M5 时):当前 `Session::execute` 用全局 `std::mutex` 串行化所有 SQL,语义正确但吞吐为 1。HSQLDB 同一架构(MVCC + AVL + WAL)用 `ReentrantReadWriteLock` 全局 writeLock 保护事务边界,但 **SELECT 不持锁**(快照隔离天然支持)。Derby 用传统 2PL,行锁 + 锁表 + 死锁检测。SQLTiny 走 HSQLDB 路线(已用 MVCC SCN),但需要补齐事务基础设施。
+
+**落地结论(与设计稿的差异)**
+
+| 设计稿 | 实际落地 |
+|---|---|
+| `row_id → vector<RowVersion>` 多版本链 | 单版本 `row_map_` + `VersionInfo{createSCN, deleteSCN, pendingTxn, pendingInsert, pendingDelete}`;靠 SCN 与 pending 标记做快照,不保留历史版本链 |
+| `TransactionManager` 自带 `atomic nextSCN_` | 复用 `WalManager::next_scn()` 单一计数器,避免两套 SCN 造成可见性错乱 |
+| `committedQueue_` 存 `vector<RowAction*>`,仅用于 merge | `CommittedTxn{commitSCN, owner, actions}`,同时供 RR/SER 提交时 `has_snapshot_conflict()` 检测;无活跃事务时由 `merge_expired_transactions()` 清理 |
+| 行锁放 `Table::row_locks_` | `TransactionManager::table_locks_`(按 Table* 索引的 `TableLockEntry`),锁生命周期与 Table 解耦 |
+| 回滚 INSERT 靠 createSCN、回滚 DELETE 靠清 deleteSCN | `Table::erase_row()` 物理删除并摘除主键索引、`restore_row()` 恢复可见并回补索引;**逆序**撤销所有 action |
+| commit 时追加 WAL | 未提交行 DML 先进会话 `wal_buffer_`,commit 整体 `flush_txn_buffer()`、rollback 整体丢弃;checkpoint 快照只写已提交且未删除行 |
+| SELECT 完全不加锁 | 不加行锁 / writeLock,但仍由 `Table.mu_` shared_lock 保护容器遍历 |
+| 行锁冲突即 abort | 冲突立即 40001(1213)中止;RR/SER 额外做提交时的陈旧写冲突检测 |
+
+**验证**:`smoke_m6_isolation` 451/451 PASS、`test_txn_vs_sqlite.py` 70/70 与 SQLite 一致,`ctest` 7/7。
 
 **参考源码**(本地已有):
 - HSQLDB:`hsqldb/src/org/hsqldb/TransactionManagerMVCC.java`、`RowAction.java`、`TransactionManagerCommon.java`
@@ -469,6 +506,8 @@ bool Table::try_lock_row_write(int64_t rowId, Session* s) {
 
 ##### 0.4 `Session::execute` 流程(P0 之后替换 g_execute_mutex)
 
+> 以下仍是设计稿伪代码(其中的 `Begin` / `Commit` 提前 return 会丢弃同批次语句,异常时也会误回滚显式事务)。实际实现见 `src/core/session.cpp`,要点列在本节末尾。
+
 ```cpp
 ResultSet Session::execute(const std::string& sql) {
     parser::Parser p(sql);
@@ -510,6 +549,14 @@ ResultSet Session::execute(const std::string& sql) {
 }
 ```
 
+**实际 `Session::execute` 流程(M6 P1 后)**
+
+1. `SET` / `BEGIN` / `START TRANSACTION` / `COMMIT` / `ROLLBACK` / `SAVEPOINT` 系列在会话层拦截,不进入 Executor。
+2. 普通语句:autocommit 时 `begin → execute → commit` 逐语句;`SET AUTOCOMMIT=0` 时隐式 begin 并保持到显式 COMMIT/ROLLBACK。
+3. 读 SCN 由 `Session::readSCN()` 给出:RC 取最新已提交 SCN,RR/SER 取 `transactionSCN`;Executor 传给 `for_each_visible(querySCN, readerTxn)`,DML 传 `writerTxn`。
+4. 语句失败只回滚本语句的隐式事务,显式事务保持开启;RR/SER 冲突时 `commitTransaction()` 返回 false 并整体回滚,对外 40001。
+5. `finishTransaction()` 统一 flush/丢弃 `wal_buffer_`、清空 `row_actions_` / `savepoints_`、恢复会话默认隔离级别;`WalBufferScope` 保证多 Session 交错调用时缓冲归属正确。
+
 ##### 0.5 死锁检测(参考 Derby)
 
 SQLTiny 第一版可以简化:
@@ -519,50 +566,58 @@ SQLTiny 第一版可以简化:
 
 ---
 
-#### P1 · SQL 标准事务完整化 + SQLAlchemy 最后 2 个 FAIL
-> P0 做完后事务基础设施有了,P1 补 SQL 层的边界语义。
+#### P1 · SQL 标准事务完整化 + SQLAlchemy 最后 2 个 FAIL(事务部分 ✅ / 边缘项 ⬜)
 
-##### 1.1 需实现的事务功能
+> **【2026-11-11 更新】** 事务语义部分已完成并验证;下表 ✅ 为已落地、⬜ 为仍待办。`DESCRIBE` / `SHOW FULL TABLES` 两项 SQLAlchemy FAIL 仍未修复。
 
-| 功能 | 说明 | HSQLDB 对应 |
-|---|---|---|
-| `BEGIN` / `START TRANSACTION` | 显式开始事务,关闭 autocommit | `Session.begin()` |
-| `COMMIT` | 提交当前事务,释放所有行锁,更新可见性边界 | `TransactionManager.commitTransaction` |
-| `ROLLBACK` [TO SAVEPOINT] | 回滚当前事务(或到 savepoint) | `TransactionManager.rollback` / `rollbackSavepoint` |
-| `SAVEPOINT name` / `RELEASE SAVEPOINT` | 中间保存点 | `Session.savepoints` 队列 |
-| `SET autocommit = ON/OFF` | autocommit 模式切换 | `Session.autocommit` 字段 |
-| `FOR UPDATE` 子句 | SELECT 时对匹配行加 EXCLUSIVE 锁 | Derby 的 `FOR UPDATE` 拿行锁 |
-| `SELECT ... LOCK IN SHARE MODE` | SELECT 时对匹配行加 SHARED 锁 | MySQL 兼容 |
-| `SET TRANSACTION ISOLATION LEVEL ...` | 隔离级别设置 | HSQLDB `SET DATABASE TRANSACTION CONTROL` |
-| 隔离级别:READ COMMITTED(默认) / REPEATABLE READ | 当前 SCN snapshot vs 事务开始 SCN snapshot | HSQLDB `Session.isolationLevel` |
+##### 1.1 事务功能落地状态
 
-##### 1.2 SQLAlchemy 最后 2 个 FAIL
+| 功能 | 状态 | 实际行为 | HSQLDB 对应 |
+|---|---|---|---|
+| `BEGIN` / `START TRANSACTION` | ✅ | 显式开启;重复 BEGIN 隐式提交当前事务;`START TRANSACTION ISOLATION LEVEL` 只对该事务生效 | `Session.begin()` |
+| `COMMIT` | ✅ | 冲突检测 → commitSCN → finalize 行版本 → flush WAL → 释放行锁 | `TransactionManager.commitTransaction` |
+| `ROLLBACK` / `ROLLBACK TO SAVEPOINT` | ✅ | 逆序撤销 action;保存点只撤销尾部 action 并截断 WAL 缓冲 | `TransactionManager.rollback` / `rollbackSavepoint` |
+| `SAVEPOINT name` / `RELEASE SAVEPOINT` | ✅ | 记录 `action_index` + `wal_count`;同名取最近一个,RELEASE 后不存在返回 1305 | `Session.savepoints` |
+| `SET AUTOCOMMIT=0/1` | ✅ | OFF 时隐式开启事务,ON 时提交当前事务;`@@autocommit` 与 OK/EOF 状态位同步 | `Session.autocommit` |
+| `SET [SESSION] TRANSACTION ISOLATION LEVEL` | ✅ | 四个级别;会话默认 vs 仅下一事务;事务中已写时拒绝(25001) | `Session.setIsolation()` |
+| 四个隔离级别 + HSQLDB 提升规则 | ✅ | RU→RC(+只读 25006)、RC 语句快照、RR→SER、SER 事务快照 + 40001 | `Session.isolationLevel` / `RowAction.canRead()` |
+| `FOR UPDATE` | ⬜ | 未实现 | Derby `FOR UPDATE` 行锁 |
+| `SELECT ... LOCK IN SHARE MODE` | ⬜ | 未实现 | MySQL 兼容 |
+| 死锁检测 / 等待队列 | ⬜ | 当前冲突立即 40001 中止,不做等待与循环检测 | Derby 死锁检测 |
+
+##### 1.2 SQLAlchemy 反射类语句(仍待办)
+
+> **【2026-11-11 更新】** `test_sqlalchemy.py` 补全至 15 组 33 项断言后,当前为 **29 PASS / 0 FAIL / 4 GAP**:`DESCRIBE` / `SHOW FULL TABLES` 仍不支持,但已由测试侧改为 GAP 标记(测试通过 raw DDL / `get_table_names` 异常分支绕行),不再计入 FAIL。新发现的两项 server 缺陷见 §8.4 #6/#7(握手 database 忽略、current db 全局共享),优先级高于本表。
 
 | FAIL | 修复 |
 |---|---|
 | `DESCRIBE table` | parser 加 `DESCRIBE` 关键字解析 → 内部转调 `SHOW COLUMNS FROM table`(一行 map) |
 | `SHOW FULL TABLES FROM db` | parser 加可选 `FULL` 关键字,executor `exec_show_tables` 返回额外一列 `table_type`(BASE TABLE / VIEW) |
 
-##### 1.3 基于 HSQLDB TestSelfTransaction 的测试项
+> 另:`SHOW COLUMNS` 返回的类型名(`BIGINT`/`VARCHAR`)SQLAlchemy 反射层报 `Did not recognize type` → `NullType()` 构造错误,属类型名规范化问题,随 `DESCRIBE` 一并修。
 
-> HSQLDB 的测试框架 `.txt` 格式:`/*u1*/insert /*c2*/select ... /*r预期*/`,SQLTiny 用 smoke C++ 测试 + Python 并发测试组合覆盖。
+##### 1.3 事务与隔离级别测试项(自设计)
 
-| 测试 | 类型 | 说明 | HSQLDB 参考 |
+> **勘误**:`testrun/hsqldb/TestSelfTransaction.txt` 实际测的是外键 `ON DELETE SET NULL/CASCADE` + autocommit/rollback,74 个脚本中并没有隔离级别 / SAVEPOINT / MVCC 用例。脚本格式(`/*uN*/`、`/*cN*/`、`/*r…*/`、`/*e*/`)与分类见 §8。下表用例参考 HSQLDB Java 层 `Session` / `TransactionManagerMVCC` / `RowAction` 语义**自行设计**,由 `smoke_m6_isolation.cpp` 与 `test_txn_vs_sqlite.py` 覆盖。
+
+| 状态 | 测试 | 说明 | 覆盖位置 |
 |---|---|---|---|
-| **P0-01**:行锁互斥(写-写冲突 abort) | C++ smoke | Session A INSERT 一行,Session B 同主键 INSERT → B 应该被 abort 或阻塞后重试(第一版直接 abort) | `TestSelfTransaction.txt` insert 冲突 |
-| **P0-02**:写-读 快照隔离 | C++ smoke | Session A BEGIN 后 INSERT,Session B 同时 SELECT → B 用自己的 querySCN 看不到 A 未提交的行 | `TestSelfTransaction.txt` read committed |
-| **P0-03**:读-读 不阻塞 | C++ smoke | 多 session 并发 SELECT 同一表(无锁!)— 这是 MVCC 的关键验证(对比之前全局 mutex 会串行化) | HSQLDB MVCC 多 session 并发读 |
-| **P0-04**:写-写 同事务内重入 | C++ smoke | 一个事务内 UPDATE 同一行两次(应该 OK,因为 RowLock 重入) | — |
-| **P1-01**:autocommit 模式 | Python | 默认 autocommit=true,每条 SQL 隐式 begin+commit;SET autocommit=OFF 后显式 BEGIN/COMMIT | `TestSelfTransaction.txt` autocommit on/off |
-| **P1-02**:ROLLBACK 恢复 | Python | BEGIN → INSERT 3 行 → ROLLBACK → SELECT COUNT(*) = 0 | `TestSelfTransaction.txt` rollback 恢复 |
-| **P1-03**:SAVEPOINT | Python | BEGIN → INSERT → SAVEPOINT s1 → INSERT → ROLLBACK TO s1 → SELECT 只看到第一行 | `TestSelfTransaction.txt` savepoint 回滚 |
-| **P1-04**:SELECT FOR UPDATE 行锁 | Python | BEGIN → SELECT ... FOR UPDATE → 另一 session INSERT 同主键 → 应该冲突 | Derby 锁场景 |
-| **P1-05**:隔离级别 READ COMMITTED vs REPEATABLE READ | C++ | RC:两次 SELECT 之间其他 session 提交了 INSERT,第二次能看到;RR:两次 SELECT 结果一致(同一 SCN 快照) | HSQLDB `Session.isolationLevel` |
-| **P1-06**:死锁检测(两行循环锁) | C++ | Session A:lock row 1 → wait row 2;Session B:lock row 2 → wait row 1 → 其中一个 abort | Derby 死锁检测 |
-| **P1-07**:并发 UPDATE 同一行(40001) | C++ smoke | 多线程并发 UPDATE 同一行(不同值)— 至少一个被 abort,其他重试成功 | HSQLDB row write conflict |
-| **P1-08**:大表并发读写压测 | Python 多线程 | 10 threads × 1000 ops:SELECT / INSERT / UPDATE / DELETE 随机组合,最终 COUNT(*) 正确 | HSQLDB multithread tests |
-| **P1-09**:DESCRIBE / SHOW FULL TABLES(SQLAlchemy 最后 2 FAIL) | Python | SQLAlchemy Engine `.connect()` → `meta.create_all()` → 不再 FAIL | 当前已知 FAIL |
-| **P1-10**:WAL shutdown + restart 恢复事务状态 | C++ smoke | BEGIN → INSERT → shutdown(异常无 commit) → restart → SELECT COUNT(*) 不应该有那行(insert 没 commit,rollback 了) | WAL recovery + undo-log |
+| ✅ | **P0-01** 行锁互斥 / 写-写冲突 | 并发 UPDATE 同一行,一个成功一个 40001;对应 `TestSelfTransaction.txt` insert 冲突 | `smoke_m6_isolation` t5、`test_txn_vs_sqlite` ww_* |
+| ✅ | **P0-02** 写-读快照隔离 / 无脏读 | 四个级别均看不到未提交 INSERT / DELETE,自己可见自己的写 | `smoke_m6_isolation` t2、`test_txn_vs_sqlite` dirty_* |
+| ✅ | **P0-03** 读-读不阻塞 | SELECT 不加行锁,`Table.mu_` shared_lock 允许多读者;2 个读线程并发无 crash(未做锁竞争断言) | `test_concurrency.py` |
+| ✅ | **P0-04** 写-写同事务重入 | 同一事务内两次 UPDATE 同一行均成功 | `smoke_m6_isolation` t5 |
+| ✅ | **P1-01** autocommit 模式 | ON 逐语句提交、OFF 事务持续、COMMIT 后其它会话可见;`@@autocommit` 真实反映 | `smoke_m6_isolation` t7 |
+| ✅ | **P1-02** ROLLBACK 恢复 | 行数、原值、主键索引全部恢复;对应 `TestSelfTransaction.txt` rollback 恢复 | `smoke_m6_isolation` t8 |
+| ✅ | **P1-03** SAVEPOINT | 回滚到 s1 只保留第一行;RELEASE 后返回 1305 | `smoke_m6_isolation` t9 |
+| ⬜ | **P1-04** SELECT FOR UPDATE 行锁 | 依赖 P1 边缘项 `FOR UPDATE`,尚未实现 | — |
+| ✅ | **P1-05** 四个隔离级别 RC / RR / SER | RC 语句快照可见新提交,RR/SER 事务快照不可见;与 SQLite 两种模式逐项比对 | `smoke_m6_isolation` t3/t4、`test_txn_vs_sqlite` 70 项 |
+| ⬜ | **P1-06** 死锁检测(两行循环锁) | 当前无等待队列,冲突立即 40001 中止,不存在循环等待 | — |
+| ✅ | **P1-07** 并发 UPDATE 同一行(40001) | 两会话同一行:一个 OK、一个 errno 1213 | `smoke_m6_isolation` t5/t6、`test_txn_vs_sqlite` ww_c2 |
+| ✅ | **P1-08** 并发读写压测 | 5 线程(2W+2R+1D)15s 无 crash,最终状态完整可查询 | `test_concurrency.py` |
+| ⬜ | **P1-09** DESCRIBE / SHOW FULL TABLES | 测试侧已改 GAP 标记绕行(见 1.2),server 端仍未实现 | `test_sqlalchemy.py` |
+| ✅ | **P1-10** 重启不复活未提交数据 | 回滚/提交后重启,SQLTiny 与 SQLite 状态一致;WAL 事务缓冲 + 快照只写已提交可见行 | `test_txn_vs_sqlite.py` WAL 段、`smoke_m5_wal` |
+
+> 本轮新增 `tests/smoke_m6_isolation.cpp`(451 项进程内断言)与 `tests/test_txn_vs_sqlite.py`(70 项 SQLTiny/SQLite 对比 + WAL 重启),覆盖上表绝大多数 ✅ 项;前者已注册 `CTest`。
 
 ---
 
@@ -596,46 +651,152 @@ SQLTiny 第一版可以简化:
 |---|---|---|
 | 语言标准 | C++20 | concepts、ranges、std::variant、std::jthread,让接口更干净 |
 | 构建 | CMake 3.20+ + vcpkg | 跨平台,Windows/VS2022 友好 |
-| 测试 | GoogleTest + GMock | 单测 + 集成测试 |
-| 日志 | spdlog | 低开销 |
-| 格式化 | fmtlib | 不依赖 iostream |
-| JSON | nlohmann/json (可选) | SHOW CREATE TABLE 将来可能需要 |
-| 网络 | `std::socket` (C++23) 或 Boost.Beast / asio | 里程碑 4 再决定;先用 Windows `WSA`/Linux `sys/socket.h` 直接写也可 |
-| 并发 | `std::mutex`, `std::shared_mutex`, `std::jthread`, lock-free SCN 原子递增 | 避免重型依赖 |
+| 测试 | 自写 smoke(C++) + CTest + PyMySQL / SQLAlchemy / sqlite3 对比脚本 | 实际未引入 GoogleTest / GMock;7 个 CTest 目标 + 8 个 Python 端到端脚本 |
+| 日志 | `fmt::print` 输出到 stdout | 实际未引入 spdlog,保持单一外部依赖 |
+| 格式化 | fmtlib | 不依赖 iostream(vcpkg.json 中唯一的依赖) |
+| JSON | 未引入 | `nlohmann/json` 仍是可选,当前 SHOW CREATE TABLE 直接拼字符串 |
+| 网络 | 直接写 Winsock / POSIX socket | 未引入 asio / Boost;`net/mysql_server.cpp` accept + 每连接 `std::thread` |
+| 并发 | `std::mutex` / `std::shared_mutex` / `std::thread` | SCN 由 `WalManager` 在锁内单调分配(非 lock-free),与 WAL 共用一套计数器 |
 | 编码 | UTF-8 贯穿;字符串内部 `std::string`(UTF-8),对外按 MySQL 协议转码 | MySQL 默认 utf8mb4 |
 
 ### 故意不引入的依赖
 - 不使用 SQLite / RocksDB / LevelDB 作存储后端 —— 自己写,保持轻量
 - 不使用 LLVM / bytecode 解释器 —— AST 直接解释执行足够快
 - 不使用 Protobuf / FlatBuffers —— MySQL 协议自有编解码,手写即可
+- 未引入 GoogleTest / GMock / spdlog / Boost.asio / nlohmann-json —— 测试用自写 smoke + CTest,日志用 fmt,网络用原生 socket
+- SQLite 仅作为 `test_txn_vs_sqlite.py` / `test_vs_sqlite.py` 的行为对比基准,**不是**存储后端
 
 ---
 
 ## 6. 风险与对策
 
-| 风险 | 概率 | 对策 |
+| 风险 | 概率 | 现状 / 对策 |
 |---|---|---|
-| HSQLDB 某些边界行为难以复刻 | 中 | 先对齐主流 SQL,保留 `HsqlException`→`SqlError` 的错误码映射;测试以 MySQL 兼容性为主,HSQLDB 行为作为回归基准 |
-| MySQL 协议版本碎片化 | 低 | 仅支持 8.0 主流版(Client 41 + caching_sha2_password),老版按需追加 |
-| 并发 MVCC 在 C++ 下死锁 | 中 | 先单线程正确,再 M3 引入多线程;`TransactionManager` 集中加锁点,避免分散 |
-| AVL 大表性能不如 B+Tree | 低 | 里程碑 1-3 用 AVL 先跑通,里程碑 6 再替换索引结构,对外 `Index` 接口不变 |
+| HSQLDB 某些边界行为难以复刻 | 中 | 已对齐四隔离级别的提升规则与 MVCC 可见性;测试以 MySQL 兼容性为主,HSQLDB 行为作为回归基准 |
+| MySQL 协议版本碎片化 | 低 | 当前模拟 5.7 协议(`5.7.0-SQLTiny`)+ `mysql_native_password`;`caching_sha2_password` / SSL 列在 M6 P3 |
+| 并发 MVCC 冲突 | 中 | M6 P0/P1 已落地行锁 + 事务边界 + 40001;**剩余**:无等待队列,高冲突场景需客户端重试;`versions_` 未做压缩,长事务下内存增长 |
+| JOIN 纯嵌套循环 O(N×M) | 高 | 已知瓶颈(200/800 数据量的 INNER JOIN+GROUP BY 约 12s);M6 P2 计划 Index Nested Loop / Hash Join |
+| SQLAlchemy inspector 兼容 | 中 | `DESCRIBE` / `SHOW FULL TABLES` / `SHOW COLUMNS` 类型名规范化待补(测试侧已 GAP 绕行);新发现的握手 database 忽略与 current db 全局共享见 §8.4 #6/#7 |
+| AVL 大表性能不如 B+Tree | 低 | 当前继续用 AVL,替换计划列在 M6 P3,对外 `Index` 接口不变 |
 | 磁盘持久化二进制兼容未来升级 | 中 | 文件头 magic + version 字段,启动时检查;不承诺跨大版本兼容 |
 
 ---
 
-## 7. 里程碑交付节奏总览
+## 7. 里程碑交付节奏总览(实际)
 
 ```
-        本 CodePlan 生成
-             │
-    ┌────────┼────────┬────────┬────────┬────────┬────────┐
-    ▼        ▼        ▼        ▼        ▼        ▼        ▼
-   M1       M2       M3       M4       M5       M6
-  类型+     DDL/DML  MVCC/    MySQL   持久化   性能/
-  AVL+      +Catalog 子查询   协议    WAL     边缘兼容
-  Lexer
- 1周        1.5周    1.5周    2周      2周      持续
- ──────────────────────────────────────────────────────────────▶
+  M1 ──► M2 ──► M2.5 ──► M3 ──► M4 ──► M5 ──► M6 P0 ──► M6 P1(事务)
+ 类型/   DDL/    协议    子查询   SHOW/    WAL     行锁 +    四隔离级别
+ AVL/    DML/    接入    JOIN     多库     快照    事务管理  autocommit
+ Lexer   Catalog                                  savepoint  WAL 缓冲
+  ✅      ✅       ✅      ✅       ✅      ✅       ✅         ✅
+ ─────────────────────────────────────────────────────────────────────►
+  已完成:M1–M5 全部交付,M6 P0 与 P1 事务语义完成并纳入 CTest / Python 回归
+  待办:  M6 P1 边缘项 → P2 JOIN 优化 → P3 协议/认证 → P4 远期
 ```
 
-**立即可启动:** M1。从 `src/types/value.h` 和 `src/storage/index_avl.h` 两个模块并行起步,因为它们没有外部依赖,单元测试先行。
+**下一步优先级(2026-11-11)**
+
+1. **协议层缺陷**:握手 `database` 字段被忽略(§8.4 #6)与 current db 全局共享(§8.4 #7)——影响所有按库连接的客户端,优先于边缘语法项;随后 `DESCRIBE` / `SHOW FULL TABLES`、`FOR UPDATE` / `LOCK IN SHARE MODE`、等待队列与死锁检测。
+2. **M6 P2**:JOIN 从 O(N×M) 升级为 Index Nested Loop / Hash Join,补 `EXPLAIN`。
+3. **版本回收**:`merge_expired_transactions()` 目前只清理冲突检测队列,`versions_` 不做压缩,长事务/长生命周期进程内存会增长,需补表压缩。
+4. **HSQLDB 语义 GAP**:补齐 §8.4 的三值逻辑、空集聚合、`COALESCE(SUM(...))` 与「SELECT 列表无聚合时的 GROUP BY/HAVING」,并按 §8.3 待补清单扩展 `TestSelfNot.txt` 真值表与解析器负向用例。
+5. **M6 P3 / P4**:Prepared Statement、`caching_sha2_password` / SSL、`INFORMATION_SCHEMA`、B+Tree、复制与更大的 HSQLDB TestSelf* 覆盖。
+
+---
+
+## 8. 测试体系:用例分类与测试点
+
+> 参考基线:`hsqldb-2.7.4/hsqldb/testrun/hsqldb/` 下 **74 个** `TestSelf*.txt` / `TestText*.txt` / `TestTriggers.txt` 脚本,由 `org.hsqldb.test.TestUtil.testScript()` 驱动。本节把它们按域归类,再对照 SQLTiny 现有用例整理分类、测试点与缺口。
+
+### 8.1 HSQLDB 参考套件的格式与分类
+
+| 标记 | 含义 |
+|---|---|
+| `/*uN*/` | 期望 DML 影响行数 `N` |
+| `/*cN*/` | 期望结果集行数 `N`(不校验内容) |
+| `/*r…*/` | 期望结果集内容(单行内联或多行精确比对,含 `NULL` 字面量) |
+| `/*e*/` | 期望抛出 `SQLException`(这 74 个脚本里均未指定 SQLState,只判"必须报错") |
+| `/*s*/` / `/*d*/` / `/*o*/` | 静默执行吞异常 / 只打印不执行 / 打印结果集 |
+
+| 组 | 功能域 | 代表脚本(数量) | SQLTiny 可借鉴性 |
+|---|---|---|---|
+| G0 | 综合回归 / 语法与异常预期 | `TestSelf.txt`(53 KB)、`TestSelfIssues.txt`(2) | ✅ 可移植池 |
+| G1 | 事务 / 提交回滚 / 崩溃恢复 | `TestSelfTransaction.txt`、`TestSelfImmediateShutdown*.txt`、`TestSelfNoDmlBug1/2.txt`(5) | ✅ 部分(脚本测的是 FK 级联 + autocommit,非隔离级别) |
+| G2 | DDL / Schema / 持久化 / 名称解析 | `TestSelfCreate/Modify/Verify/AlterColumn.txt`、`Schema*`、`PersSchem*`、`SysTables.txt`、`3PartNames.txt` 等(23) | ⚠️ 抽象成多库 Catalog + 重启元数据 |
+| G3 | 主键 / 唯一 / CHECK / 外键 / 字段限制 | `TestSelfPrimaryKeys/Constraints/CheckConstraints/FKModes/FieldLimits/Queries.txt`(6) | ✅ 可移植池 |
+| G4 | 表达式 / NULL 三值逻辑 / 转换 / 函数 | `TestSelfNot.txt`(38 KB)、`Arithmetic/Casewhen/Conversions/InPredicateReferencing.txt` 等(8) | ✅ 最值得移植(8 类型 × 真值表) |
+| G5 | 聚合 / GROUP BY / HAVING | `TestSelfGroupBy.txt`(1) | ✅ 可移植池 |
+| G6 | JOIN | `TestSelfJoins.txt`、`TestSelfLeftJoin.txt`(2) | ✅ 可移植池 |
+| G7 | 子查询 / UNION / 集合运算 | `TestSelfSubselects.txt`、`TestSelfUnions.txt`(2) | ✅ 部分 |
+| G8 | DML 语法 | `TestSelfInsertDeleteQueries.txt`(1) | ✅ 可移植池 |
+| G9 | 权限 / 用户 / 角色 / 序列授权 | `TestSelfGrantees/ColGrant/MultiGrants/RoleNesting/SeqRights*.txt` 等(9) | ❌ 超出范围 |
+| G10 | 触发器 / 视图 | `TestTriggers.txt`、`TestSelfTriggers*.txt`、`TestSelfViews.txt` 等(6) | ❌ 超出范围 |
+| G11 | 存储过程 / 函数 / 数组 / INTERVAL | `TestSelfStoredProcedure*.txt`、`Arrays.txt`、`Interval.txt` 等(5) | ❌ 超出范围 |
+| G12 / G13 | 临时表 / TEXT 外部表 | `TestSelfTempTable1/2.txt`、`TestText01/02.txt`(4) | ❌ 超出范围 |
+
+> **重要澄清**:这 74 个脚本里 **没有** `SAVEPOINT`、`SET … ISOLATION LEVEL`、`READ UNCOMMITTED/COMMITTED`、MVCC 并发用例,也**没有 MySQL 协议用例**;`TestSelfTransaction.txt` 实际测的是外键 `ON DELETE SET NULL/CASCADE` 与 `SET AUTOCOMMIT` / `ROLLBACK`。因此 §4 M6 P1 的事务/隔离级别用例并非移植自该脚本,而是参考 HSQLDB Java 层 `Session` / `TransactionManagerMVCC` / `RowAction` 语义**自行设计**,并与 SQLite 的两种快照模式逐项对比。
+
+### 8.2 SQLTiny 现有用例分类矩阵
+
+| 编号 | 分类 | 用例 | 主要测试点 | 结果 |
+|---|---|---|---|---|
+| C01 | 类型 / 值 / 索引 / Lexer | `smoke_m1.cpp` | `Value` 比较与转换、AVL insert/find/remove/range、Tokenizer 关键字与引号 | ✅ |
+| C02 | DDL / 多库 Catalog | `smoke_m4.cpp`、`test_full_flow.py` | CREATE/DROP DATABASE/TABLE、`USE`、SHOW 系列、两段式 `db.table`、未知库 1049 | ✅ |
+| C03 | DML / 表达式 / NULL / 全链路 | `smoke_m2.cpp`、`test_full_flow.py`、`test_vs_sqlite.py` | CRUD、WHERE/ORDER/LIMIT、聚合、内置函数、NULL 列、LIKE、错误码;`test_full_flow.py` 另跨 C02/C06/C08 覆盖 DDL、事务、四隔离级别、多库 | ✅ 47 PASS / 1 GAP、全场景一致 |
+| C04 | 聚合 / 子查询 / JOIN | `smoke_m3.cpp` | GROUP BY / HAVING / 子查询 IN / `INSERT…SELECT` / 各类 JOIN | ✅ |
+| C05 | HSQLDB 可移植 SQL 语义矩阵 | `smoke_m6_hsqldb_matrix.cpp` | A NULL 三值、B 空集聚合、C JOIN 基数、D 主键与语句原子性、E 多库隔离、F 事务内可见性 | ✅ 56 PASS / 4 GAP |
+| C06 | 事务 / 四隔离级别 / MVCC | `smoke_m6_isolation.cpp`、`test_txn_vs_sqlite.py` | 四级别提升、无脏读、不可重复读、40001 冲突、autocommit、SAVEPOINT、DML 回滚、WAL 重启 | ✅ 451/451、70/70 对比 |
+| C07 | WAL / 快照 / 恢复 | `smoke_m5_wal.cpp`、`test_wal_recovery.py` | Replay、CRC 截断、Checkpoint、重启后数据与 UPDATE/DELETE 状态 | ✅ |
+| C08 | MySQL 协议 / 客户端兼容 | `smoke_m25_e2e.cpp`、`test_sqlalchemy.py` | 握手与 packet、COM_QUERY、OK/EOF/ERR;SQLAlchemy 15 组:Engine、Core DDL/CRUD、聚合、ORM、2.0 风格 select/insert/update/delete、`text():param`、Session rollback、relationship 级联、`engine.begin()` 事务块、类型映射(DateTime/Boolean/Float)、Inspector | ✅ 29 PASS / 0 FAIL / 4 GAP(§8.4 #5–#8) |
+| C09 | 并发 / 性能 | `test_concurrency.py`、`test_perf_vs_sqlite.py` | 5 线程 15s 读写一致性、大数据量 INSERT + JOIN 对比 | ✅ 无 crash |
+
+**分层**:C01–C07 为进程内 C++ smoke(无需 server,纳入 `CTest`);C08–C09 需要 server(端口 3306 或由脚本自动起停的随机端口);`test_txn_vs_sqlite.py` 自带 server 生命周期管理。当前 `ctest` **8/8**。
+
+### 8.3 参考 HSQLDB 补充的测试点
+
+**已补进 C05(`smoke_m6_hsqldb_matrix.cpp`)**
+
+| 组 | HSQLDB 来源 | 补充的测试点 |
+|---|---|---|
+| A | `TestSelfNot.txt`、`TestSelfInPredicateReferencing.txt` | `= NULL` / `IS NULL` / `IS NOT NULL`、`IN (…,NULL)`、`IN (子查询)`、比较排除 NULL |
+| B | `TestSelfCasewhen.txt`、`TestSelf.txt:233-244` | 空表 `COUNT`、空集 `SUM/AVG/MAX`、`COALESCE` 兜底、`SUM` / `COUNT(col)` 跳过 NULL |
+| C | `TestSelfJoins.txt`、`TestSelfLeftJoin.txt` | CROSS JOIN 基数 3×3、INNER/LEFT JOIN 基数、索引可用与全表扫描结果一致 |
+| D | `TestSelfPrimaryKeys.txt`、`TestSelf.txt:245,409` | 重复主键 1062、多行 VALUES 的语句级原子性、指定列插入省略列默认 NULL |
+| E | `TestSelfNameResolutionSchemas.txt`、`3PartNames.txt` | 多库同名表隔离、两段式 `db.table`、`USE` 未知库 1049 |
+| F | `TestSelfTransaction.txt:4-22`、`TestSelf.txt:381-399` | 事务内自己的写可见、其它会话不可见、ROLLBACK 恢复行数与值 |
+
+**待补清单(按优先级)**
+
+| 优先级 | 测试点 | HSQLDB 来源 |
+|---|---|---|
+| 高 | NULL 三值逻辑完整真值表:8 种类型 × `AND/OR/NOT/BETWEEN/IN/ALL/ANY` | `TestSelfNot.txt`、`TestSelfInPredicateReferencing.txt` |
+| 高 | 解析器负向用例约 40 条(非法语法必须报错且不破坏后续语句) | `TestSelf.txt:404-444` |
+| 中 | 索引中立性:建索引 / 加 PK / DROP COLUMN / ADD COLUMN 前后同一组查询结果不变 | `TestSelfQueries.txt:41-62` |
+| 中 | 字段尺寸与精度强制:CHAR(4) 超长、DECIMAL(10,2) 舍入、CAST 溢出 | `TestSelfFieldLimits.txt` |
+| 中 | CHECK / NOT NULL 的三值逻辑(UNKNOWN 视为通过、FALSE 才报错) | `TestSelfCheckConstraints.txt`、`TestSelfConstraints.txt` |
+| 中 | GROUP BY 合法性、GROUP BY 表达式、相关 EXISTS + HAVING、聚合与子查询/JOIN 组合 | `TestSelfGroupBy.txt` |
+| 中 | SELECT 列表不含聚合函数时的 GROUP BY / HAVING 结果(当前为 GAP #4) | `TestSelfGroupBy.txt`、`test_full_flow.py` |
+| 中 | 派生表、标量子查询无行返回 NULL、UNION/EXCEPT/INTERSECT 优先级 | `TestSelfSubselects.txt`、`TestSelfUnions.txt`、`TestSelfIssues.txt` |
+| 中 | 重启后元数据 + AUTO_INCREMENT 游标 + 聚合结果一致 | `TestSelfVerify.txt`、`TestSelfCreate/Modify.txt` |
+| 低 | 三段式名称解析、系统库保护、标识符大小写规范化 | `TestSelf3PartNames.txt`、`TestSelfNameResolutionSchemas.txt` |
+| — | 隔离级别 / SAVEPOINT / MVCC 冲突 / MySQL 协议 | **HSQLDB 这 74 个脚本无覆盖**,由 C06 / C08 自设计维护 |
+
+> G9–G13(触发器、视图、权限、存储过程、数组/INTERVAL、临时表、TEXT 表、SEQUENCE)整体标记为**超出 SQLTiny 当前范围**,不纳入补充计划;仅把 G2 的「跨库持久化 + 名称解析」抽象成 C02/E 组用例。
+
+### 8.4 参考 HSQLDB 发现的当前语义差异(GAP)
+
+C05(`smoke_m6_hsqldb_matrix.cpp`)与 `test_full_flow.py` 把与 HSQLDB / SQL 标准不一致的点记录为 `[GAP]`(不计入 FAIL),便于后续按优先级修复:
+
+| # | 测试点 | HSQLDB 期望 | SQLTiny 当前实际 | 建议 |
+|---|---|---|---|---|
+| 1 | `WHERE NOT (a = NULL)` | 0 行(UNKNOWN 取反仍是 UNKNOWN) | 3 行(UNKNOWN 被当作 FALSE 取反) | 表达式求值引入三值逻辑 |
+| 2 | 空集 `SUM` / `AVG` | NULL | 0 | 聚合无输入行时返回 NULL(`MAX` 已正确) |
+| 3 | `COALESCE(SUM(id),0)` | 0 | 空结果集 | 补齐「聚合函数作为标量函数参数」的求值路径 |
+| 4 | `SELECT user_id FROM orders GROUP BY user_id HAVING SUM(total)>100` | 2 行 `(1),(3)` | 5 行 `(1),(1),(2),(3),(4)`(逐行输出) | SELECT 列表不含聚合时也必须走 GROUP BY 路径并应用 HAVING;**同一查询把 `SUM(total)` 放入 SELECT 列表即返回正确的 `(1),(3)`**,说明分组/HAVING 逻辑本身可用,是路径选择的问题 |
+| 5 | `SELECT COUNT(*) FROM orders WHERE status = :st`(SQLAlchemy `text()` 绑定) | 正常执行 | 1064 `unexpected token in expression: 'status'`(`status` 疑似被词法层当保留字,且仅在该位置冲突) | 复查关键字表,列名与保留字冲突时按标识符处理 |
+| 6 | 连接握手 `database` 字段 | 连接即切到指定库(`SELECT DATABASE()` 返回该库) | 字段被忽略,`SELECT DATABASE()` 仍返回全局 current db | 握手响应后执行等价 `USE <db>`(写入 session 状态) |
+| 7 | 多连接 current database 隔离 | per-session(连接 A 的 `USE` 不影响连接 B) | **服务器全局单例**:B 未 `USE` 却看到 A 的库;A 的库被 B 的 `USE` 覆盖,后续查询落到错误的库 | 把 current db 从全局变量移入 Session 状态(C02 多库用例均为单连接顺序执行,故未暴露) |
+| 8 | `DROP DATABASE` 当前库 | MySQL 允许删除当前连接所在库 | 报 1008 `database doesn't exist or is current database` | 判定改为仅校验库存在;删除后把引用该库的 session current db 置空 |
+
+> #1–#4 属 SQL 语义层,不影响 C06 的事务/隔离级别结论;#5–#8 是补全 `test_sqlalchemy.py`(15 组 / 33 项断言)时新发现的协议/会话层缺陷,其中 **#7 影响所有多连接客户端的库隔离,优先级最高**。`DESCRIBE` / `SHOW FULL TABLES` / `SHOW COLUMNS` 类型名规范化(SQLAlchemy 反射 `NullType` 报错)与 SQLAlchemy 生成的 `BOOL` 类型 DDL 不识别,归入 M6 P1 1.2 一并处理;测试侧已通过 raw DDL + `init_command USE` + GAP 标记绕行,当前 29 PASS / 0 FAIL / 4 GAP。第 4 项是被旧脚本 `len(rows) >= 2` 恒真断言掩盖的缺陷,完善 full_flow 后才暴露。

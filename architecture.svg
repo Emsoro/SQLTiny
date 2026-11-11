@@ -1,243 +1,281 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1020" viewBox="0 0 1600 1020" font-family="Liberation Sans, Arial, Helvetica, sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1240" viewBox="0 0 1600 1240" font-family="Inter, Segoe UI, Liberation Sans, Arial, Helvetica, sans-serif">
 <defs>
-<marker id="ah" viewBox="0 0 10 10" refX="9.5" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto"><path d="M0 1 L10 5 L0 9 z" fill="#555555"/></marker>
-<marker id="ahY" viewBox="0 0 10 10" refX="9.5" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto"><path d="M0 1 L10 5 L0 9 z" fill="#E0A800"/></marker>
-<marker id="ahG" viewBox="0 0 10 10" refX="9.5" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto"><path d="M0 1 L10 5 L0 9 z" fill="#7A7A7A"/></marker>
+<linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+<stop offset="0%" stop-color="#F8FBFF"/>
+<stop offset="100%" stop-color="#EDF3FC"/>
+</linearGradient>
+<linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
+<stop offset="0%" stop-color="#2546B0"/>
+<stop offset="45%" stop-color="#3D63D8"/>
+<stop offset="72%" stop-color="#0E8F7E"/>
+<stop offset="100%" stop-color="#C07A16"/>
+</linearGradient>
+<marker id="ah" viewBox="0 0 10 10" refX="9.5" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto"><path d="M0 1 L10 5 L0 9 z" fill="#6B7FA8"/></marker>
+<marker id="ahB" viewBox="0 0 10 10" refX="9.5" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto"><path d="M0 1 L10 5 L0 9 z" fill="#3D63D8"/></marker>
+<marker id="ahT" viewBox="0 0 10 10" refX="9.5" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto"><path d="M0 1 L10 5 L0 9 z" fill="#0E8F7E"/></marker>
+<marker id="ahS" viewBox="0 0 10 10" refX="9.5" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto"><path d="M0 1 L10 5 L0 9 z" fill="#7E90B4"/></marker>
+<marker id="ahA" viewBox="0 0 10 10" refX="9.5" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto"><path d="M0 1 L10 5 L0 9 z" fill="#C07A16"/></marker>
 </defs>
 
-<!-- ========== BACKGROUND ========== -->
-<rect x="0" y="0" width="1600" height="1020" rx="0" fill="#FFFFFF" stroke="none"/>
+<!-- ========== BACKGROUND / HEADER ========== -->
+<rect x="0" y="0" width="1600" height="1240" fill="url(#bg)"/>
+<rect x="0" y="0" width="1600" height="6" fill="url(#accent)"/>
+<rect x="30" y="28" width="6" height="46" rx="3" fill="#2546B0"/>
+<text x="48" y="52" font-size="26" font-weight="bold" fill="#14213D">SQLTiny — Architecture</text>
+<text x="48" y="77" font-size="13.5" fill="#5B6B8C">C++20 embedded database · MySQL wire protocol · HSQLDB 2.7.4 four isolation levels · MVCC transactions</text>
+<rect x="1240" y="32" width="330" height="36" rx="18" fill="#E7EDFF" stroke="#3D63D8"/>
+<circle cx="1262" cy="50" r="5" fill="#0E8F7E"/>
+<text x="1278" y="55" font-size="12.5" font-weight="bold" fill="#2546B0">M6 · 4 ISOLATION LEVELS · MVCC</text>
 
-<!-- ========== TITLE ========== -->
-<text x="30" y="46" font-size="25" font-weight="bold" fill="#111111">SQLTiny — Architecture</text>
-<text x="30" y="72" font-size="14" fill="#707070">Embedded C++20 database with MySQL wire protocol · M6 row-level concurrency</text>
+<!-- ========== PANEL A: REQUEST FLOW ========== -->
+<rect x="30" y="100" width="520" height="1120" rx="14" fill="#FFFFFF" stroke="#CBD8EC"/>
+<rect x="48" y="116" width="22" height="22" rx="5" fill="#2546B0"/>
+<text x="59" y="132" font-size="12.5" font-weight="bold" fill="#FFFFFF" text-anchor="middle">A</text>
+<text x="80" y="133" font-size="15" font-weight="bold" fill="#14213D">Request flow</text>
 
-<!-- ========== PANEL A: Request Flow ========== -->
-<rect x="30" y="92" width="520" height="900" rx="12" fill="#FCFCFC" stroke="#CFCFCF"/>
-<rect x="48" y="106" width="20" height="20" rx="4" fill="#111111"/>
-<text x="58" y="121" font-size="12.5" font-weight="bold" fill="#FFFFFF" text-anchor="middle">A</text>
-<text x="78" y="121" font-size="14" font-weight="bold" fill="#111111">Request flow</text>
+<!-- Step 1 -->
+<rect x="64" y="152" width="452" height="56" rx="8" fill="#FFFFFF" stroke="#CBD8EC"/>
+<circle cx="86" cy="180" r="10" fill="#2546B0"/>
+<text x="86" y="184" font-size="11" font-weight="bold" fill="#FFFFFF" text-anchor="middle">1</text>
+<text x="106" y="175" font-size="13" font-weight="bold" fill="#14213D">MySQL client</text>
+<text x="106" y="193" font-size="11" fill="#5B6B8C">mysql CLI · PyMySQL · SQLAlchemy · JDBC · Go</text>
+<path d="M 290 208 L 290 232" fill="none" stroke="#6B7FA8" stroke-width="1.3" marker-end="url(#ah)"/>
+<text x="298" y="224" font-size="10.5" fill="#7A8AA8" font-style="italic">TCP 3306</text>
 
-<!-- Step 1: Client -->
-<rect x="70" y="142" width="440" height="44" rx="6" fill="#FFFFFF" stroke="#9A9A9A"/>
-<circle cx="92" cy="164" r="10" fill="#111111"/>
-<text x="92" y="168" font-size="11" font-weight="bold" fill="#FFFFFF" text-anchor="middle">1</text>
-<text x="112" y="161" font-size="13" font-weight="bold" fill="#111111">MySQL client</text>
-<text x="112" y="177" font-size="11" fill="#707070" font-style="italic">mysql CLI · PyMySQL · SQLAlchemy · JDBC · Go</text>
-<path d="M 290 186 L 290 210" fill="none" stroke="#555555" stroke-width="1.3" marker-end="url(#ah)"/>
-<text x="298" y="202" font-size="11" fill="#4A4A4A" font-style="italic">TCP 3306</text>
+<!-- Step 2 -->
+<rect x="64" y="232" width="452" height="56" rx="8" fill="#FFFFFF" stroke="#CBD8EC"/>
+<circle cx="86" cy="260" r="10" fill="#2546B0"/>
+<text x="86" y="264" font-size="11" font-weight="bold" fill="#FFFFFF" text-anchor="middle">2</text>
+<text x="106" y="255" font-size="13" font-weight="bold" fill="#14213D">mysql_server — accept() → per-connection thread</text>
+<text x="106" y="273" font-size="11" fill="#5B6B8C">handshake · auth · COM_QUERY loop · OK/EOF status flags</text>
+<path d="M 290 288 L 290 312" fill="none" stroke="#0E8F7E" stroke-width="1.3" marker-end="url(#ahT)"/>
 
-<!-- Step 2: Server Thread -->
-<rect x="70" y="210" width="440" height="44" rx="6" fill="#FFFFFF" stroke="#9A9A9A"/>
-<circle cx="92" cy="232" r="10" fill="#111111"/>
-<text x="92" y="236" font-size="11" font-weight="bold" fill="#FFFFFF" text-anchor="middle">2</text>
-<text x="112" y="229" font-size="13" font-weight="bold" fill="#111111">mysql_server — accept() · spawn per-connection std::thread</text>
-<text x="112" y="244" font-size="11" fill="#707070">handshake → auth → COM_QUERY loop → COM_STMT_*</text>
-<path d="M 290 254 L 290 278" fill="none" stroke="#555555" stroke-width="1.3" marker-end="url(#ah)"/>
+<!-- Step 3: Session / isolation (teal) -->
+<rect x="64" y="312" width="452" height="68" rx="8" fill="#DDF4EF" stroke="#0E8F7E" stroke-width="1.4"/>
+<circle cx="86" cy="340" r="10" fill="#2546B0"/>
+<text x="86" y="344" font-size="11" font-weight="bold" fill="#FFFFFF" text-anchor="middle">3</text>
+<text x="106" y="333" font-size="13" font-weight="bold" fill="#14213D">Session — 4 isolation levels · autocommit · savepoints</text>
+<text x="106" y="351" font-size="11" fill="#4C5F82">readSCN(): RC = statement snapshot, RR/SER = txn snapshot</text>
+<text x="106" y="368" font-size="11" fill="#4C5F82">SET [SESSION] TRANSACTION ISOLATION LEVEL · START TRANSACTION</text>
+<path d="M 290 380 L 290 404" fill="none" stroke="#6B7FA8" stroke-width="1.3" marker-end="url(#ah)"/>
 
-<!-- Step 3: Session -->
-<rect x="70" y="278" width="440" height="54" rx="6" fill="#FFEFB3" stroke="#D6A91C"/>
-<circle cx="92" cy="300" r="10" fill="#111111"/>
-<text x="92" y="304" font-size="11" font-weight="bold" fill="#FFFFFF" text-anchor="middle">3</text>
-<text x="112" y="296" font-size="13" font-weight="bold" fill="#111111">Session — autocommit · transactionSCN · row_actions_</text>
-<text x="112" y="312" font-size="11" fill="#707070">BEGIN / COMMIT / ROLLBACK boundary</text>
-<path d="M 290 332 L 290 356" fill="none" stroke="#555555" stroke-width="1.3" marker-end="url(#ah)"/>
+<!-- Step 4 -->
+<rect x="64" y="404" width="452" height="56" rx="8" fill="#FFFFFF" stroke="#CBD8EC"/>
+<circle cx="86" cy="432" r="10" fill="#2546B0"/>
+<text x="86" y="436" font-size="11" font-weight="bold" fill="#FFFFFF" text-anchor="middle">4</text>
+<text x="106" y="427" font-size="13" font-weight="bold" fill="#14213D">Parser — Lexer → Recursive Descent → AST</text>
+<text x="106" y="445" font-size="11" fill="#5B6B8C">SELECT · INSERT · UPDATE · DELETE · SET · SAVEPOINT · @@vars</text>
+<path d="M 290 460 L 290 484" fill="none" stroke="#3D63D8" stroke-width="1.3" marker-end="url(#ahB)"/>
 
-<!-- Step 4: Parser -->
-<rect x="70" y="356" width="440" height="44" rx="6" fill="#FFFFFF" stroke="#9A9A9A"/>
-<circle cx="92" cy="378" r="10" fill="#111111"/>
-<text x="92" y="382" font-size="11" font-weight="bold" fill="#FFFFFF" text-anchor="middle">4</text>
-<text x="112" y="375" font-size="13" font-weight="bold" fill="#111111">Parser — Lexer(tokenize) → Recursive Descent → AST</text>
-<text x="112" y="390" font-size="11" fill="#707070">SELECT · INSERT · UPDATE · DELETE · SHOW · @@variables</text>
-<path d="M 290 400 L 290 424" fill="none" stroke="#555555" stroke-width="1.3" marker-end="url(#ah)"/>
+<!-- Step 5: Executor (indigo) -->
+<rect x="64" y="484" width="452" height="68" rx="8" fill="#E7EDFF" stroke="#3D63D8" stroke-width="1.4"/>
+<circle cx="86" cy="512" r="10" fill="#2546B0"/>
+<text x="86" y="516" font-size="11" font-weight="bold" fill="#FFFFFF" text-anchor="middle">5</text>
+<text x="106" y="505" font-size="13" font-weight="bold" fill="#14213D">Executor — query_scn(session_) · for_each_visible</text>
+<text x="106" y="523" font-size="11" fill="#4C5F82">WHERE / GROUP BY / ORDER BY · JOIN · aggregate · subquery IN</text>
+<text x="106" y="540" font-size="11" fill="#4C5F82">DML: tryLockRowWrite + RowAction + writerTxn</text>
+<path d="M 290 552 L 290 576" fill="none" stroke="#3D63D8" stroke-width="1.3" marker-end="url(#ahB)"/>
 
-<!-- Step 5: Executor -->
-<rect x="70" y="424" width="440" height="54" rx="6" fill="#FFD84D" stroke="#C99A00" stroke-width="1.4"/>
-<circle cx="92" cy="446" r="10" fill="#111111"/>
-<text x="92" y="450" font-size="11" font-weight="bold" fill="#FFFFFF" text-anchor="middle">5</text>
-<text x="112" y="442" font-size="13" font-weight="bold" fill="#111111">Executor — bind_session · for_each_visible · WHERE/GROUP/ORDER</text>
-<text x="112" y="458" font-size="11" fill="#707070">DML: tryLockRowWrite + RowAction record</text>
-<path d="M 290 478 L 290 502" fill="none" stroke="#555555" stroke-width="1.3" marker-end="url(#ah)"/>
+<!-- Step 6: TransactionManager (indigo) -->
+<rect x="64" y="576" width="452" height="76" rx="8" fill="#DCE6FF" stroke="#2546B0" stroke-width="1.6"/>
+<circle cx="86" cy="608" r="10" fill="#2546B0"/>
+<text x="86" y="612" font-size="11" font-weight="bold" fill="#FFFFFF" text-anchor="middle">6</text>
+<text x="106" y="598" font-size="13" font-weight="bold" fill="#14213D">TransactionManager — commit publishes versions</text>
+<text x="106" y="616" font-size="11" fill="#4C5F82">live_tx_scns_ · committed_queue_ · RowLockMap · writeLock_</text>
+<text x="106" y="633" font-size="11" fill="#4C5F82">RR/SER stale write → 40001 · savepoint undo · reverse rollback</text>
+<path d="M 290 652 L 290 676" fill="none" stroke="#7E90B4" stroke-width="1.3" marker-end="url(#ahS)"/>
 
-<!-- Step 6: Transaction Manager -->
-<rect x="70" y="502" width="440" height="62" rx="6" fill="#FFD84D" stroke="#C99A00" stroke-width="1.4"/>
-<circle cx="92" cy="524" r="10" fill="#111111"/>
-<text x="92" y="528" font-size="11" font-weight="bold" fill="#FFFFFF" text-anchor="middle">6</text>
-<text x="112" y="520" font-size="13" font-weight="bold" fill="#111111">TransactionManager — writeLock_ · SCN · commit · rollback</text>
-<text x="112" y="536" font-size="11" fill="#707070">live_tx_scns_ · committed_queue_ · RowLockMap (per-row EXCLUSIVE)</text>
-<text x="112" y="552" font-size="11" fill="#4A4A4A">commit: conflict check → commitSCN → apply versions → WAL → merge expired</text>
-<path d="M 290 564 L 290 588" fill="none" stroke="#555555" stroke-width="1.3" marker-end="url(#ah)"/>
+<!-- Step 7: Storage (slate) -->
+<rect x="64" y="676" width="452" height="68" rx="8" fill="#E9EEF7" stroke="#7E90B4" stroke-width="1.4"/>
+<circle cx="86" cy="704" r="10" fill="#2546B0"/>
+<text x="86" y="708" font-size="11" font-weight="bold" fill="#FFFFFF" text-anchor="middle">7</text>
+<text x="106" y="697" font-size="13" font-weight="bold" fill="#14213D">Catalog → Table → Row</text>
+<text x="106" y="715" font-size="11" fill="#4C5F82">AVL PK index · row_map_ · Table.mu_ shared_mutex</text>
+<text x="106" y="732" font-size="11" fill="#4C5F82">versions_: createSCN / deleteSCN / pendingTxn / pending delete / insert</text>
+<path d="M 290 744 L 290 768" fill="none" stroke="#C07A16" stroke-width="1.3" marker-end="url(#ahA)"/>
 
-<!-- Step 7: Catalog + Table -->
-<rect x="70" y="588" width="440" height="62" rx="6" fill="#FFFFFF" stroke="#9A9A9A"/>
-<circle cx="92" cy="610" r="10" fill="#111111"/>
-<text x="92" y="614" font-size="11" font-weight="bold" fill="#FFFFFF" text-anchor="middle">7</text>
-<text x="112" y="606" font-size="13" font-weight="bold" fill="#111111">Catalog → Table → Row</text>
-<text x="112" y="622" font-size="11" fill="#707070">Catalog.mu_ (exclusive) — DDL · Table.mu_ (shared/exclusive) — DML vs SELECT</text>
-<text x="112" y="638" font-size="11" fill="#4A4A4A">AVL index (PK unique) · row_map_ (int64_t row_id → Row) · versions_ (createSCN/deleteSCN)</text>
-<path d="M 290 650 L 290 674" fill="none" stroke="#555555" stroke-width="1.3" marker-end="url(#ah)"/>
+<!-- Step 8: WAL (amber) -->
+<rect x="64" y="768" width="452" height="68" rx="8" fill="#FFF0D8" stroke="#C07A16" stroke-width="1.4"/>
+<circle cx="86" cy="796" r="10" fill="#2546B0"/>
+<text x="86" y="800" font-size="11" font-weight="bold" fill="#FFFFFF" text-anchor="middle">8</text>
+<text x="106" y="789" font-size="13" font-weight="bold" fill="#14213D">WalManager — sql.wal · sql.data snapshot</text>
+<text x="106" y="807" font-size="11" fill="#4C5F82">thread-local txn buffer: commit flush / rollback discard</text>
+<text x="106" y="824" font-size="11" fill="#4C5F82">checkpoint keeps only committed, non-deleted rows</text>
 
-<!-- Step 8: WAL + Snapshot -->
-<rect x="70" y="674" width="440" height="62" rx="6" fill="#D9D9D9" stroke="#7A7A7A"/>
-<circle cx="92" cy="696" r="10" fill="#111111"/>
-<text x="92" y="700" font-size="11" font-weight="bold" fill="#FFFFFF" text-anchor="middle">8</text>
-<text x="112" y="692" font-size="13" font-weight="bold" fill="#111111">WalManager — sql.wal · sql.data (snapshot)</text>
-<text x="112" y="708" font-size="11" fill="#707070">64B header · records(Type+flags+len+payload+CRC32) · mu_ exclusive</text>
-<text x="112" y="724" font-size="11" fill="#4A4A4A">append_insert_row / append_update_row / append_auto_inc_update</text>
+<!-- Color key -->
+<path d="M 64 858 L 516 858" stroke="#E3EAF5" stroke-width="1"/>
+<text x="64" y="882" font-size="12.5" font-weight="bold" fill="#14213D">Color key</text>
+<rect x="64" y="894" width="24" height="18" rx="4" fill="#E7EDFF" stroke="#3D63D8"/>
+<text x="98" y="907" font-size="11.5" fill="#4C5F82">Executor / TransactionManager — write path</text>
+<rect x="64" y="918" width="24" height="18" rx="4" fill="#DDF4EF" stroke="#0E8F7E"/>
+<text x="98" y="931" font-size="11.5" fill="#4C5F82">Session / isolation levels — read snapshot policy</text>
+<rect x="64" y="942" width="24" height="18" rx="4" fill="#FFF0D8" stroke="#C07A16"/>
+<text x="98" y="955" font-size="11.5" fill="#4C5F82">WAL / persistence — durable commit boundary</text>
+<rect x="64" y="966" width="24" height="18" rx="4" fill="#E9EEF7" stroke="#7E90B4"/>
+<text x="98" y="979" font-size="11.5" fill="#4C5F82">Catalog / Table — storage &amp; MVCC versions</text>
 
-<!-- Panel A bottom legend -->
-<path d="M 70 754 L 510 754" stroke="#D6D6D6" stroke-width="1"/>
-<text x="70" y="780" font-size="12.5" font-weight="bold" fill="#111111">Lock hierarchy (per component)</text>
-<rect x="70" y="790" width="24" height="14" rx="3" fill="#FFD84D" stroke="#C99A00"/>
-<text x="104" y="801" font-size="11.5" fill="#4A4A4A">RowLockMap — row-level EXCLUSIVE, conflict → abort (40001)</text>
-<rect x="70" y="812" width="24" height="14" rx="3" fill="#FFEFB3" stroke="#D6A91C"/>
-<text x="104" y="823" font-size="11.5" fill="#4A4A4A">TransactionManager.writeLock_ — exclusive on commit/rollback</text>
-<rect x="70" y="834" width="24" height="14" rx="3" fill="#D9D9D9" stroke="#9A9A9A"/>
-<text x="104" y="845" font-size="11.5" fill="#4A4A4A">Table.mu_ shared_lock — SELECT multi-reader parallel</text>
-<rect x="70" y="856" width="24" height="14" rx="3" fill="#FFFFFF" stroke="#9A9A9A"/>
-<text x="104" y="867" font-size="11.5" fill="#4A4A4A">Table.mu_ unique_lock — INSERT/UPDATE/DELETE exclusive</text>
-<rect x="70" y="878" width="24" height="14" rx="3" fill="#D9D9D9" stroke="#9A9A9A"/>
-<text x="104" y="889" font-size="11.5" fill="#4A4A4A">Catalog.mu_ exclusive — CREATE/DROP DATABASE/TABLE</text>
+<!-- Lock hierarchy -->
+<path d="M 64 996 L 516 996" stroke="#E3EAF5" stroke-width="1"/>
+<text x="64" y="1020" font-size="12.5" font-weight="bold" fill="#14213D">Lock hierarchy</text>
+<text x="64" y="1040" font-size="11.5" fill="#4C5F82">① Catalog.mu_ (DDL) → Table.mu_ shared / unique_lock</text>
+<text x="64" y="1058" font-size="11.5" fill="#4C5F82">② RowLockMap (per-row EXCLUSIVE) → writeLock_ (commit)</text>
+<text x="64" y="1076" font-size="11.5" fill="#4C5F82">③ WalManager.mu_ (append/flush) · SELECT takes none</text>
 
-<path d="M 70 908 L 510 908" stroke="#D6D6D6" stroke-width="1"/>
-<text x="70" y="934" font-size="12.5" font-weight="bold" fill="#111111">Design principles</text>
-<text x="70" y="952" font-size="11.5" fill="#4A4A4A">① MVCC snapshot isolation — SELECT adds zero locks, reads never block writes</text>
-<text x="70" y="968" font-size="11.5" fill="#4A4A4A">② writeLock_ is narrow — only around commit/rollback, not the entire SQL</text>
-<text x="70" y="984" font-size="11.5" fill="#4A4A4A">③ HSQLDB-style RowAction — writes tracked per session, conflict detected at commit</text>
-<text x="70" y="1000" font-size="11.5" fill="#4A4A4A">④ First-writer-wins abort — simple, no latch wait queue, retry via 40001</text>
+<!-- Design principles -->
+<path d="M 64 1094 L 516 1094" stroke="#E3EAF5" stroke-width="1"/>
+<text x="64" y="1118" font-size="12.5" font-weight="bold" fill="#14213D">Design principles</text>
+<text x="64" y="1138" font-size="11.5" fill="#4C5F82">① No dirty reads at any level — pendingTxn rows are owner-only</text>
+<text x="64" y="1156" font-size="11.5" fill="#4C5F82">② RU → RC (+ read-only next txn), RR → SERIALIZABLE (HSQLDB)</text>
+<text x="64" y="1174" font-size="11.5" fill="#4C5F82">③ RC = statement snapshot; RR/SER = txn snapshot + 40001</text>
+<text x="64" y="1192" font-size="11.5" fill="#4C5F82">④ Commit is the only publication point for rows and WAL</text>
 
-<!-- ========== PANEL B: Internals ========== -->
-<rect x="580" y="92" width="990" height="900" rx="12" fill="#FCFCFC" stroke="#CFCFCF"/>
-<rect x="598" y="106" width="20" height="20" rx="4" fill="#111111"/>
-<text x="608" y="121" font-size="12.5" font-weight="bold" fill="#FFFFFF" text-anchor="middle">B</text>
-<text x="628" y="121" font-size="14" font-weight="bold" fill="#111111">Internals &amp;amp; data path</text>
+<!-- ========== PANEL B: INTERNALS ========== -->
+<rect x="580" y="100" width="990" height="1120" rx="14" fill="#FFFFFF" stroke="#CBD8EC"/>
+<rect x="598" y="116" width="22" height="22" rx="5" fill="#2546B0"/>
+<text x="609" y="132" font-size="12.5" font-weight="bold" fill="#FFFFFF" text-anchor="middle">B</text>
+<text x="630" y="133" font-size="15" font-weight="bold" fill="#14213D">Internals &amp; data path</text>
 
-<!-- Column header row -->
-<rect x="596" y="142" width="180" height="34" rx="4" fill="#111111"/>
-<text x="686" y="165" font-size="12.5" font-weight="bold" fill="#FFFFFF" text-anchor="middle">Layer</text>
-<rect x="782" y="142" width="260" height="34" rx="4" fill="#111111"/>
-<text x="912" y="165" font-size="12.5" font-weight="bold" fill="#FFFFFF" text-anchor="middle">Components</text>
-<rect x="1048" y="142" width="506" height="34" rx="4" fill="#111111"/>
-<text x="1301" y="165" font-size="12.5" font-weight="bold" fill="#FFFFFF" text-anchor="middle">Notes</text>
+<!-- Column headers -->
+<rect x="596" y="152" width="180" height="34" rx="5" fill="#2546B0"/>
+<text x="686" y="175" font-size="12.5" font-weight="bold" fill="#FFFFFF" text-anchor="middle">Layer</text>
+<rect x="782" y="152" width="260" height="34" rx="5" fill="#2546B0"/>
+<text x="912" y="175" font-size="12.5" font-weight="bold" fill="#FFFFFF" text-anchor="middle">Components</text>
+<rect x="1048" y="152" width="506" height="34" rx="5" fill="#2546B0"/>
+<text x="1301" y="175" font-size="12.5" font-weight="bold" fill="#FFFFFF" text-anchor="middle">Notes</text>
 
 <!-- Row 1: Protocol -->
-<rect x="596" y="186" width="180" height="62" rx="6" fill="#FFFFFF" stroke="#9A9A9A"/>
-<text x="686" y="220" font-size="14" font-weight="bold" fill="#111111" text-anchor="middle">Protocol</text>
-<rect x="782" y="186" width="260" height="62" rx="6" fill="#F1F1F1" stroke="#C4C4C4"/>
-<text x="912" y="206" font-size="12.5" font-weight="bold" fill="#111111" text-anchor="middle">mysql_proto.cpp</text>
-<text x="912" y="222" font-size="11" fill="#4A4A4A" text-anchor="middle">Packet encode/decode</text>
-<text x="912" y="238" font-size="11" fill="#4A4A4A" text-anchor="middle">Initial handshake · HandshakeResponse · COM_QUERY · COM_FIELD_LIST</text>
-<rect x="1048" y="186" width="506" height="62" rx="6" fill="#FFFFFF" stroke="#9A9A9A"/>
-<text x="1070" y="210" font-size="11.5" fill="#4A4A4A">server_version = "5.7.0-SQLTiny"</text>
-<text x="1070" y="226" font-size="11.5" fill="#4A4A4A">packet seq per-connection auto-reset</text>
-<text x="1070" y="242" font-size="11.5" fill="#4A4A4A">COM_FIELD_LIST → mapped to SHOW COLUMNS</text>
-<path d="M 596 248 L 1554 248" stroke="#D6D6D6" stroke-width="1"/>
+<rect x="596" y="194" width="180" height="62" rx="7" fill="#FFFFFF" stroke="#CBD8EC"/>
+<text x="686" y="230" font-size="14" font-weight="bold" fill="#14213D" text-anchor="middle">Protocol</text>
+<rect x="782" y="194" width="260" height="62" rx="7" fill="#F8FAFE" stroke="#CBD8EC"/>
+<text x="912" y="220" font-size="12.5" font-weight="bold" fill="#14213D" text-anchor="middle">mysql_proto.cpp</text>
+<text x="912" y="240" font-size="11" fill="#5B6B8C" text-anchor="middle">Packet encode / decode</text>
+<rect x="1048" y="194" width="506" height="62" rx="7" fill="#FFFFFF" stroke="#CBD8EC"/>
+<text x="1070" y="218" font-size="11.5" fill="#4C5F82">server_version 5.7.0-SQLTiny · per-connection packet seq · COM_FIELD_LIST</text>
+<text x="1070" y="238" font-size="11.5" fill="#4C5F82">OK / EOF report SERVER_STATUS_AUTOCOMMIT and SERVER_STATUS_IN_TRANS</text>
+<path d="M 596 260 L 1554 260" stroke="#E9EFF8" stroke-width="1"/>
 
 <!-- Row 2: Parser -->
-<rect x="596" y="256" width="180" height="82" rx="6" fill="#FFFFFF" stroke="#9A9A9A"/>
-<text x="686" y="298" font-size="14" font-weight="bold" fill="#111111" text-anchor="middle">Parser</text>
-<rect x="782" y="256" width="260" height="82" rx="6" fill="#F1F1F1" stroke="#C4C4C4"/>
-<text x="912" y="274" font-size="12.5" font-weight="bold" fill="#111111" text-anchor="middle">lexer.cpp</text>
-<text x="912" y="290" font-size="11" fill="#4A4A4A" text-anchor="middle">chars → TokenKind → Token</text>
-<text x="912" y="308" font-size="12.5" font-weight="bold" fill="#111111" text-anchor="middle">parser.cpp (recursive descent)</text>
-<text x="912" y="324" font-size="11" fill="#4A4A4A" text-anchor="middle">SELECT / INSERT / UPDATE / DELETE / SHOW / SET</text>
-<rect x="1048" y="256" width="506" height="82" rx="6" fill="#FFFFFF" stroke="#9A9A9A"/>
-<text x="1070" y="278" font-size="11.5" fill="#4A4A4A">@@xxx token (system variables as Ident)</text>
-<text x="1070" y="294" font-size="11.5" fill="#4A4A4A">func_names[] whitelist: VERSION · SCHEMA · COUNT · SUM · AVG · MIN · MAX</text>
-<text x="1070" y="310" font-size="11.5" fill="#4A4A4A">SHOW VARIABLES LIKE 'xxx%' — LIKE pattern parsing</text>
-<text x="1070" y="326" font-size="11.5" fill="#4A4A4A">BEGIN / COMMIT / ROLLBACK → StmtKind (real, not placeholder)</text>
-<path d="M 596 338 L 1554 338" stroke="#D6D6D6" stroke-width="1"/>
+<rect x="596" y="264" width="180" height="82" rx="7" fill="#FFFFFF" stroke="#CBD8EC"/>
+<text x="686" y="310" font-size="14" font-weight="bold" fill="#14213D" text-anchor="middle">Parser</text>
+<rect x="782" y="264" width="260" height="82" rx="7" fill="#F8FAFE" stroke="#CBD8EC"/>
+<text x="912" y="284" font-size="12.5" font-weight="bold" fill="#14213D" text-anchor="middle">lexer.cpp</text>
+<text x="912" y="300" font-size="11" fill="#5B6B8C" text-anchor="middle">chars → TokenKind → Token</text>
+<text x="912" y="318" font-size="12.5" font-weight="bold" fill="#14213D" text-anchor="middle">parser.cpp (recursive descent)</text>
+<text x="912" y="334" font-size="11" fill="#5B6B8C" text-anchor="middle">SET · SAVEPOINT · @@vars</text>
+<rect x="1048" y="264" width="506" height="82" rx="7" fill="#FFFFFF" stroke="#CBD8EC"/>
+<text x="1070" y="286" font-size="11.5" fill="#4C5F82">@@xxx as Ident · func_names[] whitelist · SHOW VARIABLES LIKE 'xxx%'</text>
+<text x="1070" y="306" font-size="11.5" fill="#4C5F82">SET [SESSION] TRANSACTION ISOLATION LEVEL → IsolationLevel 1/2/4/8</text>
+<text x="1070" y="326" font-size="11.5" fill="#4C5F82">START TRANSACTION ... LEVEL · SAVEPOINT / ROLLBACK TO / RELEASE</text>
+<path d="M 596 350 L 1554 350" stroke="#E9EFF8" stroke-width="1"/>
 
-<!-- Row 3: AST + Expr -->
-<rect x="596" y="346" width="180" height="62" rx="6" fill="#FFFFFF" stroke="#9A9A9A"/>
-<text x="686" y="380" font-size="14" font-weight="bold" fill="#111111" text-anchor="middle">AST / Expr</text>
-<rect x="782" y="346" width="260" height="62" rx="6" fill="#F1F1F1" stroke="#C4C4C4"/>
-<text x="912" y="366" font-size="12.5" font-weight="bold" fill="#111111" text-anchor="middle">ast.h — std::variant of Stmt</text>
-<text x="912" y="382" font-size="11" fill="#4A4A4A" text-anchor="middle">SelectStmt · InsertStmt · UpdateStmt · DeleteStmt · ...</text>
-<text x="912" y="398" font-size="11" fill="#4A4A4A" text-anchor="middle">Expr = std::variant(Column / Literal / Call / ...)</text>
-<rect x="1048" y="346" width="506" height="62" rx="6" fill="#FFFFFF" stroke="#9A9A9A"/>
-<text x="1070" y="370" font-size="11.5" fill="#4A4A4A">eval(ctx, expr) — recursive expression evaluator</text>
-<text x="1070" y="386" font-size="11.5" fill="#4A4A4A">ExprContext holds row values + WHERE/HAVING evaluation</text>
-<text x="1070" y="402" font-size="11.5" fill="#4A4A4A">Subquery IN — for each outer row, evaluate inner</text>
-<path d="M 596 408 L 1554 408" stroke="#D6D6D6" stroke-width="1"/>
+<!-- Row 3: AST / Expr -->
+<rect x="596" y="354" width="180" height="62" rx="7" fill="#FFFFFF" stroke="#CBD8EC"/>
+<text x="686" y="390" font-size="14" font-weight="bold" fill="#14213D" text-anchor="middle">AST / Expr</text>
+<rect x="782" y="354" width="260" height="62" rx="7" fill="#F8FAFE" stroke="#CBD8EC"/>
+<text x="912" y="374" font-size="12.5" font-weight="bold" fill="#14213D" text-anchor="middle">ast.h</text>
+<text x="912" y="390" font-size="11" fill="#5B6B8C" text-anchor="middle">IsolationLevel · SetStmt · StmtKind</text>
+<text x="912" y="406" font-size="11" fill="#5B6B8C" text-anchor="middle">Expr = variant of Column / Literal / Call</text>
+<rect x="1048" y="354" width="506" height="62" rx="7" fill="#FFFFFF" stroke="#CBD8EC"/>
+<text x="1070" y="378" font-size="11.5" fill="#4C5F82">eval(ctx, expr) — WHERE / HAVING / subquery IN</text>
+<text x="1070" y="398" font-size="11.5" fill="#4C5F82">@@tx_isolation and @@autocommit resolve to the live Session state</text>
+<path d="M 596 420 L 1554 420" stroke="#E9EFF8" stroke-width="1"/>
 
-<!-- Row 4: Executor (highlighted yellow) -->
-<rect x="596" y="416" width="180" height="78" rx="6" fill="#FFD84D" stroke="#C99A00" stroke-width="1.4"/>
-<text x="686" y="460" font-size="14" font-weight="bold" fill="#111111" text-anchor="middle">Executor</text>
-<rect x="782" y="416" width="260" height="78" rx="6" fill="#FFEFB3" stroke="#D6A91C"/>
-<text x="912" y="436" font-size="12.5" font-weight="bold" fill="#111111" text-anchor="middle">executor.cpp</text>
-<text x="912" y="452" font-size="11" fill="#4A4A4A" text-anchor="middle">exec_select — for_each_visible(querySCN)</text>
-<text x="912" y="468" font-size="11" fill="#4A4A4A" text-anchor="middle">exec_insert / exec_update / exec_delete</text>
-<text x="912" y="484" font-size="11" fill="#4A4A4A" text-anchor="middle">bind_session() → RowAction record</text>
-<rect x="1048" y="416" width="506" height="78" rx="6" fill="#FFFFFF" stroke="#9A9A9A"/>
-<text x="1070" y="440" font-size="11.5" fill="#4A4A4A">exec_update = delete(old) + insert(new) → 2 RowActions (UPDATE_DELETE / UPDATE_INSERT)</text>
-<text x="1070" y="456" font-size="11.5" fill="#4A4A4A">exec_delete → 1 RowAction(DELETE) · physical delete when deleteSCN=0</text>
-<text x="1070" y="472" font-size="11.5" fill="#4A4A4A">exec_select → no RowAction (MVCC reads are snapshot, zero lock)</text>
-<text x="1070" y="488" font-size="11.5" fill="#4A4A4A">current: O(N×M) nested-loop JOIN → M6 P2 Index Nested Loop / Hash Join</text>
-<path d="M 596 494 L 1554 494" stroke="#D6D6D6" stroke-width="1"/>
+<!-- Row 4: Session & isolation (teal) -->
+<rect x="596" y="424" width="180" height="88" rx="7" fill="#DDF4EF" stroke="#0E8F7E" stroke-width="1.5"/>
+<text x="686" y="462" font-size="14" font-weight="bold" fill="#14213D" text-anchor="middle">Session &amp;</text>
+<text x="686" y="480" font-size="14" font-weight="bold" fill="#14213D" text-anchor="middle">Isolation</text>
+<rect x="782" y="424" width="260" height="88" rx="7" fill="#EAF9F5" stroke="#0E8F7E"/>
+<text x="912" y="444" font-size="12.5" font-weight="bold" fill="#14213D" text-anchor="middle">session.cpp</text>
+<text x="912" y="460" font-size="11" fill="#4C5F82" text-anchor="middle">setIsolation() · readSCN()</text>
+<text x="912" y="476" font-size="11" fill="#4C5F82" text-anchor="middle">begin / commit / rollback</text>
+<text x="912" y="492" font-size="11" fill="#4C5F82" text-anchor="middle">savepoints · wal_buffer_</text>
+<rect x="1048" y="424" width="506" height="88" rx="7" fill="#FFFFFF" stroke="#CBD8EC"/>
+<text x="1070" y="444" font-size="11.5" fill="#4C5F82">setIsolation(): RU → RC (+ read-only next txn), RR → SERIALIZABLE</text>
+<text x="1070" y="462" font-size="11.5" fill="#4C5F82">session default is persistent; SET TRANSACTION affects only the next txn</text>
+<text x="1070" y="480" font-size="11.5" fill="#4C5F82">SET AUTOCOMMIT=0/1 · rollbackToSavepoint() · finishTransaction()</text>
+<text x="1070" y="498" font-size="11.5" fill="#4C5F82">WalBufferScope routes the thread-local WAL buffer to the active session</text>
+<path d="M 596 516 L 1554 516" stroke="#E9EFF8" stroke-width="1"/>
 
-<!-- Row 5: Transaction Manager -->
-<rect x="596" y="502" width="180" height="90" rx="6" fill="#FFD84D" stroke="#C99A00" stroke-width="1.4"/>
-<text x="686" y="536" font-size="14" font-weight="bold" fill="#111111" text-anchor="middle">Transaction</text>
-<text x="686" y="554" font-size="14" font-weight="bold" fill="#111111" text-anchor="middle">Manager</text>
-<rect x="782" y="502" width="260" height="90" rx="6" fill="#FFEFB3" stroke="#D6A91C"/>
-<text x="912" y="522" font-size="12.5" font-weight="bold" fill="#111111" text-anchor="middle">transaction.cpp (singleton)</text>
-<text x="912" y="538" font-size="11" fill="#4A4A4A" text-anchor="middle">uint64_t next_scn_ (atomic, monotonic)</text>
-<text x="912" y="554" font-size="11" fill="#4A4A4A" text-anchor="middle">deque&lt;uint64_t&gt; live_tx_scns_ · committed_queue_</text>
-<text x="912" y="570" font-size="11" fill="#4A4A4A" text-anchor="middle">TableLockEntry → map(row_id, RowLock)</text>
-<text x="912" y="586" font-size="11" fill="#4A4A4A" text-anchor="middle">writeLock_ mutex — narrow: only commit/rollback</text>
-<rect x="1048" y="502" width="506" height="90" rx="6" fill="#FFFFFF" stroke="#9A9A9A"/>
-<text x="1070" y="526" font-size="11.5" fill="#4A4A4A">commit_transaction():</text>
-<text x="1082" y="542" font-size="11.5" fill="#4A4A4A">① acquire writeLock_</text>
-<text x="1082" y="558" font-size="11.5" fill="#4A4A4A">② conflict check on RowAction (same rowId, committedSCN &gt; 0)</text>
-<text x="1082" y="574" font-size="11.5" fill="#4A4A4A">③ allocate commitSCN → update Table versions (deleteSCN/createSCN)</text>
-<text x="1082" y="590" font-size="11.5" fill="#4A4A4A">④ WAL append · release row locks · merge_expired_transactions</text>
-<path d="M 596 592 L 1554 592" stroke="#D6D6D6" stroke-width="1"/>
+<!-- Row 5: Executor (indigo) -->
+<rect x="596" y="520" width="180" height="78" rx="7" fill="#E7EDFF" stroke="#3D63D8" stroke-width="1.5"/>
+<text x="686" y="564" font-size="14" font-weight="bold" fill="#14213D" text-anchor="middle">Executor</text>
+<rect x="782" y="520" width="260" height="78" rx="7" fill="#F1F5FF" stroke="#3D63D8"/>
+<text x="912" y="542" font-size="12.5" font-weight="bold" fill="#14213D" text-anchor="middle">executor.cpp</text>
+<text x="912" y="560" font-size="11" fill="#4C5F82" text-anchor="middle">query_scn(session_) → readSCN()</text>
+<text x="912" y="578" font-size="11" fill="#4C5F82" text-anchor="middle">readerTxn / writerTxn · RowAction</text>
+<rect x="1048" y="520" width="506" height="78" rx="7" fill="#FFFFFF" stroke="#CBD8EC"/>
+<text x="1070" y="542" font-size="11.5" fill="#4C5F82">SELECT / INSERT / UPDATE / DELETE use the session read snapshot</text>
+<text x="1070" y="560" font-size="11.5" fill="#4C5F82">UPDATE = delete(old rid) + insert(new rid), 2 RowActions with own ids</text>
+<text x="1070" y="578" font-size="11.5" fill="#4C5F82">SELECT takes zero locks; JOIN is O(N×M) nested loop (M6 P2: hash join)</text>
+<path d="M 596 602 L 1554 602" stroke="#E9EFF8" stroke-width="1"/>
 
-<!-- Row 6: Storage -->
-<rect x="596" y="600" width="180" height="82" rx="6" fill="#D9D9D9" stroke="#7A7A7A"/>
-<text x="686" y="642" font-size="14" font-weight="bold" fill="#111111" text-anchor="middle">Storage</text>
-<rect x="782" y="600" width="260" height="82" rx="6" fill="#F1F1F1" stroke="#C4C4C4"/>
-<text x="912" y="620" font-size="12.5" font-weight="bold" fill="#111111" text-anchor="middle">Table</text>
-<text x="912" y="636" font-size="11" fill="#4A4A4A" text-anchor="middle">row_map_: int64_t row_id → Row (std::map)</text>
-<text x="912" y="652" font-size="11" fill="#4A4A4A" text-anchor="middle">versions_: row_id → VersionInfo{createSCN, deleteSCN}</text>
-<text x="912" y="668" font-size="11" fill="#4A4A4A" text-anchor="middle">AVL index · mu_ (shared_mutex)</text>
-<rect x="1048" y="600" width="506" height="82" rx="6" fill="#FFFFFF" stroke="#9A9A9A"/>
-<text x="1070" y="624" font-size="11.5" fill="#4A4A4A">MVCC visibility: for_each_visible(querySCN) skips rows where createSCN &gt; querySCN or deleteSCN &lt;= querySCN</text>
-<text x="1070" y="640" font-size="11.5" fill="#4A4A4A">AVL unique constraint checked during insert (before WAL)</text>
-<text x="1070" y="656" font-size="11.5" fill="#4A4A4A">TableDef: columns · primary_key_cols · secondary indexes (future)</text>
-<text x="1070" y="672" font-size="11.5" fill="#4A4A4A">B+Tree (future) → replace AVL for larger range-scan tables</text>
-<path d="M 596 682 L 1554 682" stroke="#D6D6D6" stroke-width="1"/>
+<!-- Row 6: Transaction Manager (indigo) -->
+<rect x="596" y="606" width="180" height="108" rx="7" fill="#DCE6FF" stroke="#2546B0" stroke-width="1.6"/>
+<text x="686" y="654" font-size="14" font-weight="bold" fill="#14213D" text-anchor="middle">Transaction</text>
+<text x="686" y="672" font-size="14" font-weight="bold" fill="#14213D" text-anchor="middle">Manager</text>
+<rect x="782" y="606" width="260" height="108" rx="7" fill="#F1F5FF" stroke="#3D63D8"/>
+<text x="912" y="628" font-size="12.5" font-weight="bold" fill="#14213D" text-anchor="middle">transaction.cpp (singleton)</text>
+<text x="912" y="646" font-size="11" fill="#4C5F82" text-anchor="middle">commitSCN · finalize_commit</text>
+<text x="912" y="664" font-size="11" fill="#4C5F82" text-anchor="middle">has_snapshot_conflict()</text>
+<text x="912" y="682" font-size="11" fill="#4C5F82" text-anchor="middle">erase_row / restore_row</text>
+<rect x="1048" y="606" width="506" height="108" rx="7" fill="#FFFFFF" stroke="#CBD8EC"/>
+<text x="1070" y="628" font-size="11.5" fill="#4C5F82">commit: snapshot conflict check → commitSCN → finalize → WAL flush</text>
+<text x="1070" y="646" font-size="11.5" fill="#4C5F82">rollback: reverse undo, restores PK index; uncommitted WAL discarded</text>
+<text x="1070" y="664" font-size="11.5" fill="#4C5F82">rollback_to_savepoint: undo tail actions + truncate wal_buffer_</text>
+<text x="1070" y="682" font-size="11.5" fill="#4C5F82">committed_queue_(commitSCN, owner, actions) feeds RR/SER conflicts</text>
+<text x="1070" y="700" font-size="11.5" fill="#4C5F82">merge_expired_transactions drops entries when no live txn needs them</text>
+<path d="M 596 718 L 1554 718" stroke="#E9EFF8" stroke-width="1"/>
 
-<!-- Row 7: Persistence -->
-<rect x="596" y="690" width="180" height="70" rx="6" fill="#D9D9D9" stroke="#7A7A7A"/>
-<text x="686" y="728" font-size="14" font-weight="bold" fill="#111111" text-anchor="middle">Persistence</text>
-<rect x="782" y="690" width="260" height="70" rx="6" fill="#F1F1F1" stroke="#C4C4C4"/>
-<text x="912" y="710" font-size="12.5" font-weight="bold" fill="#111111" text-anchor="middle">WalManager</text>
-<text x="912" y="726" font-size="11" fill="#4A4A4A" text-anchor="middle">sql.wal · records(Type+flags+len+payload+CRC32)</text>
-<text x="912" y="742" font-size="11" fill="#4A4A4A" text-anchor="middle">mu_ exclusive · auto checkpoint at shutdown</text>
-<rect x="1048" y="690" width="506" height="70" rx="6" fill="#FFFFFF" stroke="#9A9A9A"/>
-<text x="1070" y="714" font-size="11.5" fill="#4A4A4A">Startup: read sql.data snapshot → replay sql.wal (truncate on CRC corrupt) → start SCN after last record</text>
-<text x="1070" y="730" font-size="11.5" fill="#4A4A4A">Snapshot: TableDef · row_count · AUTO_INCREMENT cursor encoded as snapshot</text>
-<text x="1070" y="746" font-size="11.5" fill="#4A4A4A">In-memory mode (no --data-dir): no persistence, fastest</text>
-<path d="M 596 760 L 1554 760" stroke="#D6D6D6" stroke-width="1"/>
+<!-- Row 7: Storage (slate) -->
+<rect x="596" y="722" width="180" height="82" rx="7" fill="#E9EEF7" stroke="#7E90B4" stroke-width="1.4"/>
+<text x="686" y="768" font-size="14" font-weight="bold" fill="#14213D" text-anchor="middle">Storage</text>
+<rect x="782" y="722" width="260" height="82" rx="7" fill="#F4F7FC" stroke="#7E90B4"/>
+<text x="912" y="742" font-size="12.5" font-weight="bold" fill="#14213D" text-anchor="middle">table.cpp · catalog.cpp</text>
+<text x="912" y="760" font-size="11" fill="#4C5F82" text-anchor="middle">VersionInfo · row_map_</text>
+<text x="912" y="778" font-size="11" fill="#4C5F82" text-anchor="middle">AVL PK index · shared_mutex</text>
+<rect x="1048" y="722" width="506" height="82" rx="7" fill="#FFFFFF" stroke="#CBD8EC"/>
+<text x="1070" y="742" font-size="11.5" fill="#4C5F82">for_each_visible(querySCN, readerTxn): owner sees own pending writes</text>
+<text x="1070" y="760" font-size="11.5" fill="#4C5F82">VersionInfo{createSCN, deleteSCN, pendingTxn, pendingInsert, pendingDelete}</text>
+<text x="1070" y="778" font-size="11.5" fill="#4C5F82">finalize_commit() at commit · AVL enforces the unique primary key</text>
+<path d="M 596 808 L 1554 808" stroke="#E9EFF8" stroke-width="1"/>
 
-<!-- Performance note box (bottom) -->
-<rect x="596" y="780" width="960" height="170" rx="10" fill="#F1F1F1" stroke="#C4C4C4"/>
-<rect x="610" y="794" width="14" height="14" rx="3" fill="#FFD84D" stroke="#C99A00"/>
-<text x="630" y="806" font-size="14" font-weight="bold" fill="#111111">Performance (Debug build, single transaction batch)</text>
+<!-- Row 8: Persistence (amber) -->
+<rect x="596" y="812" width="180" height="82" rx="7" fill="#FFF0D8" stroke="#C07A16" stroke-width="1.4"/>
+<text x="686" y="858" font-size="14" font-weight="bold" fill="#14213D" text-anchor="middle">Persistence</text>
+<rect x="782" y="812" width="260" height="82" rx="7" fill="#FFF7E8" stroke="#C07A16"/>
+<text x="912" y="832" font-size="12.5" font-weight="bold" fill="#14213D" text-anchor="middle">wal_manager.cpp</text>
+<text x="912" y="850" font-size="12.5" font-weight="bold" fill="#14213D" text-anchor="middle">snapshot.cpp</text>
+<text x="912" y="868" font-size="11" fill="#4C5F82" text-anchor="middle">sql.wal · sql.data</text>
+<rect x="1048" y="812" width="506" height="82" rx="7" fill="#FFFFFF" stroke="#CBD8EC"/>
+<text x="1070" y="832" font-size="11.5" fill="#4C5F82">append() routes to the txn buffer; flush_txn_buffer() on commit only</text>
+<text x="1070" y="850" font-size="11.5" fill="#4C5F82">Startup: sql.data snapshot → replay sql.wal → resume SCN counter</text>
+<text x="1070" y="868" font-size="11.5" fill="#4C5F82">Snapshot uses for_each_visible(MAX_SCN); deleted rows never revived</text>
+<path d="M 596 906 L 1554 906" stroke="#E9EFF8" stroke-width="1"/>
 
-<rect x="610" y="822" width="420" height="54" rx="6" fill="#FFFFFF" stroke="#9A9A9A"/>
-<text x="626" y="842" font-size="12" font-weight="bold" fill="#111111">Batch INSERT (single BEGIN / COMMIT)</text>
-<text x="626" y="862" font-size="11" fill="#4A4A4A">SQLTiny: ~0.33 ms/op across batch sizes 100 – 5000 (faster per-op than Python overhead)</text>
-<text x="626" y="876" font-size="11" fill="#4A4A4A">SQLite : Python timing precision too low for in-memory sqlite3 (ms-level per-call, native-level is sub-μs)</text>
+<!-- Verification & gaps -->
+<rect x="596" y="924" width="958" height="286" rx="10" fill="#F8FAFE" stroke="#CBD8EC"/>
+<rect x="610" y="938" width="14" height="14" rx="3" fill="url(#accent)"/>
+<text x="632" y="950" font-size="14" font-weight="bold" fill="#14213D">Verification &amp; known gaps</text>
 
-<rect x="1050" y="822" width="500" height="54" rx="6" fill="#FFFFFF" stroke="#9A9A9A"/>
-<text x="1066" y="842" font-size="12" font-weight="bold" fill="#111111">Concurrency (5 threads, 2W + 2R + 1D, 15s)</text>
-<text x="1066" y="862" font-size="11" fill="#4A4A4A">Pre-lock: server crash within 2s (Catalog/Table no mutex)</text>
-<text x="1066" y="876" font-size="11" fill="#4A4A4A">Post-lock: server alive, consistent final state (1497 rows expected 1500-3)</text>
+<rect x="610" y="966" width="300" height="76" rx="7" fill="#E7EDFF" stroke="#3D63D8"/>
+<text x="626" y="990" font-size="12" font-weight="bold" fill="#14213D">smoke_m6_isolation</text>
+<text x="626" y="1009" font-size="10.5" fill="#4C5F82">451/451 PASS — 4 levels, savepoints,</text>
+<text x="626" y="1025" font-size="10.5" fill="#4C5F82">conflicts, autocommit, WAL restart</text>
+<rect x="926" y="966" width="300" height="76" rx="7" fill="#DDF4EF" stroke="#0E8F7E"/>
+<text x="942" y="990" font-size="12" font-weight="bold" fill="#14213D">test_txn_vs_sqlite</text>
+<text x="942" y="1009" font-size="10.5" fill="#4C5F82">70/70 match vs SQLite + 2 documented</text>
+<text x="942" y="1025" font-size="10.5" fill="#4C5F82">expected divergences</text>
+<rect x="1242" y="966" width="298" height="76" rx="7" fill="#FFF0D8" stroke="#C07A16"/>
+<text x="1258" y="990" font-size="12" font-weight="bold" fill="#14213D">Regression</text>
+<text x="1258" y="1009" font-size="10.5" fill="#4C5F82">ctest 7/7 · full_flow 17/17 ·</text>
+<text x="1258" y="1025" font-size="10.5" fill="#4C5F82">WAL recovery &amp; concurrency OK</text>
 
-<text x="610" y="914" font-size="11.5" font-weight="bold" fill="#111111">Current bottleneck</text>
-<text x="610" y="930" font-size="11" fill="#4A4A4A">① JOIN is pure nested loop O(N×M) — M6 P2 needs Index Nested Loop / Hash Join (12s → target &amp;lt;100ms for 200/800)</text>
-<text x="610" y="946" font-size="11" fill="#4A4A4A">② MVCC RowAction → mergeExpired path not yet used for table compaction (permanent versions_ memory growth)</text>
+<text x="610" y="1066" font-size="12" font-weight="bold" fill="#2546B0">Isolation semantics (HSQLDB 2.7.4)</text>
+<text x="610" y="1086" font-size="11.5" fill="#4C5F82">READ UNCOMMITTED → READ COMMITTED (+ read-only when set for the next transaction)</text>
+<text x="610" y="1103" font-size="11.5" fill="#4C5F82">READ COMMITTED (default) → statement-level snapshot, non-repeatable reads allowed</text>
+<text x="610" y="1120" font-size="11.5" fill="#4C5F82">REPEATABLE READ → SERIALIZABLE → one transaction-level snapshot (SNAPSHOT ISOLATION)</text>
+<text x="610" y="1137" font-size="11.5" fill="#4C5F82">SERIALIZABLE → stale / concurrent row writes abort with 40001 (MySQL errno 1213)</text>
+<text x="610" y="1161" font-size="12" font-weight="bold" fill="#B4690E">Known gaps</text>
+<text x="610" y="1179" font-size="11.5" fill="#4C5F82">① JOIN is a pure nested loop O(N×M) — M6 P2 needs Index Nested Loop / Hash Join</text>
+<text x="610" y="1196" font-size="11.5" fill="#4C5F82">② DESCRIBE / SHOW FULL TABLES not implemented (2 SQLAlchemy inspector checks fail)</text>
 </svg>
