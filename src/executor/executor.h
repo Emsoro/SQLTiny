@@ -49,6 +49,7 @@ struct ExecContext {
 /// 执行结果集
 struct ResultSet {
     std::vector<std::string> column_names;     // 显示名(别名或列名)
+    std::vector<types::SqlType> column_types;   // 对应每列的 SQL 类型(供 wire 协议 field_type)
     std::vector<storage::Row> rows;            // 每行按 column_names 对齐
     int64_t affected_rows = 0;
     int64_t last_insert_id = 0;

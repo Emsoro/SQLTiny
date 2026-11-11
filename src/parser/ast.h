@@ -190,7 +190,7 @@ enum class StmtKind {
     Select, Insert, Update, Delete,
     CreateTable, DropTable,
     CreateDatabase, DropDatabase,
-    Use, Show,
+    Use, Show, Set,
 };
 
 struct Statement {

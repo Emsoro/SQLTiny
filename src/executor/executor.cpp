@@ -24,6 +24,11 @@ ResultSet Executor::execute(const ast::Statement& stmt) {
             r.ok = true;
             return r;
         }
+        case ast::StmtKind::Set: {
+            // 占位:兼容 PyMySQL 的 SET NAMES/SET AUTOCOMMIT
+            r.ok = true;
+            return r;
+        }
         case ast::StmtKind::Show: {
             auto& sh = *stmt.show_;
             switch (sh.kind) {
@@ -80,24 +85,24 @@ ResultSet Executor::exec_insert(const ast::InsertStmt& s) {
         if (!s.columns.empty()) {
             // 按列名对齐
             row.resize(def.columns.size());
+            std::vector<bool> set_flags(def.columns.size(), false);
             for (size_t i = 0; i < s.columns.size() && i < expr_row.size(); ++i) {
                 int idx = def.column_index(s.columns[i]);
                 if (idx < 0) continue;
                 ExecContext ctx{ catalog_, s.table_name, {}, {} };
                 row[idx] = eval(*expr_row[i], ctx);
+                set_flags[idx] = true;  // 显式设置了(哪怕值是 NULL)
             }
-            // 未指定列:补默认
+            // 未指定列:补默认(用户没写的列才补)
             for (size_t i = 0; i < def.columns.size(); ++i) {
-                if (row[i].kind == types::Value::Kind::Null) {
+                if (!set_flags[i]) {
                     auto& cdef = def.columns[i];
                     if (cdef.is_auto_increment) row[i] = types::Value::make_int(tbl->next_auto_increment());
                     else if (cdef.default_value) {
                         ExecContext ctx2{ catalog_, s.table_name, {}, {} };
                         row[i] = eval(*cdef.default_value, ctx2);
                     }
-                    else if (cdef.is_primary_key && cdef.is_auto_increment) {
-                        row[i] = types::Value::make_int(tbl->next_auto_increment());
-                    }
+                    else row[i] = types::Value::make_null();
                 }
             }
         } else {
@@ -302,16 +307,66 @@ ResultSet Executor::exec_delete(const ast::DeleteStmt& s) {
 // ---------- SELECT ----------
 ResultSet Executor::exec_select(const ast::SelectStmt& s) {
     ResultSet r;
+
+    // 推断表达式静态类型 — 供 wire 协议 field_type 用
+    struct _SlotRef {
+        const std::string& alias_or_real;
+        const storage::TableDef* def;
+    };
+    // 用 std::function 支持递归
+    std::function<types::SqlType(const ast::Expression&, const std::vector<_SlotRef>*)> infer_type =
+        [&](const ast::Expression& e, const std::vector<_SlotRef>* slots) -> types::SqlType {
+        using namespace types;
+        if (e.kind == ast::ExprKind::Column && slots) {
+            for (auto& sl : *slots) {
+                for (auto& col : sl.def->columns) {
+                    bool match = col.name == e.column_name;
+                    if (!e.table_name.empty()) {
+                        match = match && (e.table_name == sl.alias_or_real);
+                    }
+                    if (match) return col.type.type;
+                }
+            }
+        }
+        if (e.kind == ast::ExprKind::Literal) {
+            switch (e.literal.kind) {
+                case Value::Kind::Int64:  return SqlType::BigInt;
+                case Value::Kind::Double:  return SqlType::Double;
+                case Value::Kind::Bool:   return SqlType::Boolean;
+                case Value::Kind::Null:   return SqlType::Null;
+                default:                  return SqlType::Varchar;
+            }
+        }
+        if (e.kind == ast::ExprKind::FunctionCall) {
+            std::string lower = e.func_name;
+            std::transform(lower.begin(), lower.end(), lower.begin(),
+                           [](unsigned char c){ return std::tolower(c); });
+            if (lower == "count")  return SqlType::BigInt;
+            if (lower == "avg")    return SqlType::Decimal;
+            if (lower == "sum" || lower == "min" || lower == "max") {
+                if (!e.func_args.empty() && slots) {
+                    auto t = infer_type(*e.func_args[0], slots);
+                    if (is_numeric(t)) return t;
+                }
+                return SqlType::Decimal;
+            }
+            return SqlType::Varchar;
+        }
+        return SqlType::Varchar;
+    };
+
     if (s.from_tables.empty() && s.joins.empty()) {
         // 无表 SELECT:例如 SELECT 1, NOW()
         ExecContext ctx{ catalog_, "", {}, {} };
         storage::Row row;
         ctx.col_index.clear();
         r.column_names.clear();
+        r.column_types.clear();
         for (auto& [expr, alias] : s.columns) {
             std::string name = alias.empty() ? "<expr>" : alias;
             if (expr->kind == ast::ExprKind::Column) name = expr->column_name;
             r.column_names.push_back(name);
+            r.column_types.push_back(infer_type(*expr, nullptr));
             row.push_back(eval(*expr, ctx));
         }
         r.rows.push_back(row);
@@ -469,6 +524,12 @@ ResultSet Executor::exec_select(const ast::SelectStmt& s) {
 
     // 输出列别名
     r.column_names.clear();
+    r.column_types.clear();
+    // 构造 slot refs 供 infer_type 用
+    std::vector<_SlotRef> slot_refs;
+    for (auto& slot : slots) {
+        slot_refs.push_back({ slot.alias.empty() ? slot.real_name : slot.alias, slot.def });
+    }
     for (auto& [e, alias] : s.columns) {
         if (e->kind == ast::ExprKind::Star) {
             // SELECT * 展开所有列
@@ -476,6 +537,7 @@ ResultSet Executor::exec_select(const ast::SelectStmt& s) {
                 for (auto& col : slot.def->columns) {
                     std::string name = slot.alias.empty() ? col.name : (slot.alias + "." + col.name);
                     r.column_names.push_back(name);
+                    r.column_types.push_back(col.type.type);
                 }
             }
         } else {
@@ -484,6 +546,7 @@ ResultSet Executor::exec_select(const ast::SelectStmt& s) {
                 name = e->column_name;
             }
             r.column_names.push_back(name);
+            r.column_types.push_back(infer_type(*e, &slot_refs));
         }
     }
 
@@ -765,6 +828,7 @@ ResultSet Executor::exec_show_tables() {
     ResultSet r;
     auto col_name = fmt::format("Tables_in_{}", catalog_.current_database());
     r.column_names = { col_name };
+    r.column_types = { types::SqlType::Varchar };
     auto names = catalog_.table_names();
     std::sort(names.begin(), names.end());
     for (auto& n : names) r.rows.push_back({ types::Value::make_string(n) });
@@ -774,6 +838,8 @@ ResultSet Executor::exec_show_tables() {
 ResultSet Executor::exec_show_columns(const std::string& table_name) {
     ResultSet r;
     r.column_names = { "Field", "Type", "Null", "Key", "Default", "Extra" };
+    r.column_types = { types::SqlType::Varchar, types::SqlType::Varchar, types::SqlType::Varchar,
+                       types::SqlType::Varchar, types::SqlType::Varchar, types::SqlType::Varchar };
     auto* tbl = catalog_.get_table(table_name);
     if (!tbl) {
         r.ok = false; r.mysql_errno = 1146; r.sql_state = "42S02";
@@ -826,6 +892,7 @@ ResultSet Executor::exec_show_columns(const std::string& table_name) {
 ResultSet Executor::exec_show_databases() {
     ResultSet r;
     r.column_names = { "Database" };
+    r.column_types = { types::SqlType::Varchar };
     auto dbs = catalog_.list_databases();
     for (auto& n : dbs) r.rows.push_back({ types::Value::make_string(n) });
     return r;
@@ -835,6 +902,7 @@ ResultSet Executor::exec_show_databases() {
 ResultSet Executor::exec_show_create_table(const std::string& db_name, const std::string& table_name) {
     ResultSet r;
     r.column_names = { "Table", "Create Table" };
+    r.column_types = { types::SqlType::Varchar, types::SqlType::Varchar };
 
     // 构造带 db 限定的表名
     std::string qualified = db_name.empty() ? table_name : (db_name + "." + table_name);
@@ -901,6 +969,7 @@ ResultSet Executor::exec_show_create_table(const std::string& db_name, const std
 ResultSet Executor::exec_show_create_database(const std::string& db_name) {
     ResultSet r;
     r.column_names = { "Database", "Create Database" };
+    r.column_types = { types::SqlType::Varchar, types::SqlType::Varchar };
     if (!catalog_.database_exists(db_name)) {
         r.ok = false; r.mysql_errno = 1049; r.sql_state = "42000";
         r.error_message = fmt::format("Unknown database '{}'", db_name);
@@ -917,6 +986,7 @@ ResultSet Executor::exec_show_create_database(const std::string& db_name) {
 ResultSet Executor::exec_show_status() {
     ResultSet r;
     r.column_names = { "Variable_name", "Value" };
+    r.column_types = { types::SqlType::Varchar, types::SqlType::Varchar };
     static const std::pair<const char*, const char*> kvs[] = {
         {"Aborted_clients", "0"}, {"Aborted_connects", "0"},
         {"Connections", "1"}, {"Delayed_errors", "0"},
@@ -936,6 +1006,7 @@ ResultSet Executor::exec_show_status() {
 ResultSet Executor::exec_show_variables() {
     ResultSet r;
     r.column_names = { "Variable_name", "Value" };
+    r.column_types = { types::SqlType::Varchar, types::SqlType::Varchar };
     static const std::pair<const char*, const char*> kvs[] = {
         {"autocommit", "ON"}, {"character_set_client", "utf8mb4"},
         {"character_set_connection", "utf8mb4"}, {"character_set_database", "utf8mb4"},

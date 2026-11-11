@@ -159,7 +159,7 @@ std::vector<uint8_t> encode_handshake_v10(uint32_t thread_id,
                                           const std::vector<uint8_t>& auth_data) {
     PacketWriter w;
     w.write_u8(10);  // protocol version
-    w.write_string_null("SQLTiny-1.0.0");  // server version
+    w.write_string_null("5.7.0-SQLTiny");  // server version (必须以数字开头,PyMySQL 会 parse)
     w.write_u32(thread_id);
     // auth-data-part-1(8字节)
     for (int i = 0; i < 8 && i < static_cast<int>(auth_data.size()); ++i) w.write_u8(auth_data[i]);
@@ -230,18 +230,18 @@ std::vector<std::vector<uint8_t>> encode_result_set(
     packets.push_back(count_pkt.buf);
 
     // Column defs
-    for (auto& col : rs.column_names) {
-        // 没有类型信息 — 全部当作 VARCHAR(简化)
-        packets.push_back(encode_column_def("", col, types::SqlType::Varchar, true, false, false));
+    for (size_t i = 0; i < rs.column_names.size(); ++i) {
+        auto type = (i < rs.column_types.size()) ? rs.column_types[i] : types::SqlType::Varchar;
+        packets.push_back(encode_column_def("", rs.column_names[i], type, true, false, false));
     }
 
     // EOF after columns(如果没有 deprecate_eof)
     if (!deprecate_eof) packets.push_back(encode_eof_packet(0, 0));
 
     // Rows
-    for (auto& row : rs.rows) {
+    for (size_t row_idx = 0; row_idx < rs.rows.size(); ++row_idx) {
+        auto& row = rs.rows[row_idx];
         PacketWriter w;
-        // 列数对齐
         for (size_t i = 0; i < rs.column_names.size(); ++i) {
             if (i >= row.size()) break;
             auto& v = row[i];

@@ -82,7 +82,7 @@ public:
         write_lenenc_int(s.size());
         write_string_nolen(s);
     }
-    void write_null() { write_lenenc_int(0xfb); }
+    void write_null() { write_u8(0xfb); }  // MySQL text result protocol: NULL = 0xfb (1 byte, NOT lenenc_int!)
     void write_bytes(const uint8_t* p, size_t n) {
         buf.insert(buf.end(), p, p + n);
     }

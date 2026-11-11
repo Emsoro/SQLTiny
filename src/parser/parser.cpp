@@ -108,6 +108,7 @@ ast::StmtPtr Parser::parse_top() {
         }
         case TokenKind::KwUse:       return parse_use();
         case TokenKind::KwShow:      return parse_show();
+        case TokenKind::KwSet:       return parse_set();
         default:
             throw ParseError(t.line, t.col,
                 fmt::format("unexpected start of statement: '{}'", t.text));
@@ -532,23 +533,30 @@ std::string Parser::parse_table_ref() {
 void Parser::parse_joins(ast::SelectStmt& s) {
     while (true) {
         ast::JoinClause jc;
-        // JOIN kind
-        if (match_consume(TokenKind::KwInner) || match_consume(TokenKind::KwJoin)) {
-            if (static_cast<int>(peek().kind) >= static_cast<int>(TokenKind::Kw_START)) {
-                // "JOIN t" 或 "INNER JOIN t"
-            }
+        // 处理 JOIN kind —— 双关键字组合
+        Token pk = peek();
+        if (match_consume(TokenKind::KwCross) && match_consume(TokenKind::KwJoin)) {
+            jc.kind = ast::JoinKind::Cross;
+        } else if (match_consume(TokenKind::KwNatural)) {
+            // NATURAL [LEFT|RIGHT|CROSS] JOIN
+            match_consume(TokenKind::KwLeft) || match_consume(TokenKind::KwRight) || match_consume(TokenKind::KwCross);
+            match_consume(TokenKind::KwOuter);
+            match_consume(TokenKind::KwJoin);
+            jc.kind = ast::JoinKind::Inner;
+        } else if (match_consume(TokenKind::KwInner) || match_consume(TokenKind::KwJoin)) {
+            // INNER JOIN 或单字 JOIN
+            match_consume(TokenKind::KwJoin);  // 双字 INNER JOIN 时再 consume JOIN; 单字 JOIN 已被上面 consume
             jc.kind = ast::JoinKind::Inner;
         } else if (match_consume(TokenKind::KwLeft)) {
+            // LEFT [OUTER] JOIN
             match_consume(TokenKind::KwOuter);
             match_consume(TokenKind::KwJoin);
             jc.kind = ast::JoinKind::Left;
         } else if (match_consume(TokenKind::KwRight)) {
+            // RIGHT [OUTER] JOIN
             match_consume(TokenKind::KwOuter);
             match_consume(TokenKind::KwJoin);
             jc.kind = ast::JoinKind::Right;
-        } else if (match_consume(TokenKind::KwCross)) {
-            match_consume(TokenKind::KwJoin);
-            jc.kind = ast::JoinKind::Cross;
         } else {
             break;
         }
@@ -908,6 +916,22 @@ ast::StmtPtr Parser::parse_drop_database() {
     auto r = std::make_unique<ast::Statement>();
     r->kind = ast::StmtKind::DropDatabase;
     r->drop_database_ = std::move(stmt);
+    return r;
+}
+
+ast::StmtPtr Parser::parse_set() {
+    // consume SET, 整个 SET 语句扫到分号/Eof 为止,返回空 SET (PyMySQL SET NAMES/SET AUTOCOMMIT 兼容)
+    consume(); // SET
+    int depth = 0;
+    while (true) {
+        Token t = peek();
+        if (t.kind == TokenKind::Eof || t.kind == TokenKind::Semi) break;
+        if (t.kind == TokenKind::LParen) depth++;
+        if (t.kind == TokenKind::RParen && depth > 0) depth--;
+        consume();
+    }
+    auto r = std::make_unique<ast::Statement>();
+    r->kind = ast::StmtKind::Set;
     return r;
 }
 
