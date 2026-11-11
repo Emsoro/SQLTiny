@@ -287,22 +287,284 @@ LIMIT 10;
 
 ### M6 · 行锁 + 事务 + JOIN 优化 + 存储过程(按优先级)
 
-#### P0 · 行级锁替代全局 mutex(事务基础设施)
-> 当前 Session::execute 用 `std::mutex` 全局串行化所有 SQL,语义正确但吞吐为 1。真正的 MySQL 使用 **行锁 + 快照隔离**。
+---
 
-- [ ] Catalog 加细粒度读写锁(`std::shared_mutex`):读路径 SELECT 不互相阻塞,只阻塞 DDL
-- [ ] Table 加 row-level lock map:每行状态 `{free, shared(read), exclusive(write)}`
-- [ ] INSERT / UPDATE / DELETE 加 exclusive 锁,SELECT 加 shared 锁
-- [ ] 死锁检测:锁等待超时 + 循环等待检测
-- [ ] M5 的 `g_execute_mutex` 退化为 fallback(Debug build 下锁竞争监控)
+#### P0 · 行级锁 + 事务管理器(参考 HSQLDB TransactionManagerMVCC + Derby LockManager)
+> 当前 `Session::execute` 用全局 `std::mutex` 串行化所有 SQL,语义正确但吞吐为 1。HSQLDB 同一架构(MVCC + AVL + WAL)用 `ReentrantReadWriteLock` 全局 writeLock 保护事务边界,但 **SELECT 不持锁**(快照隔离天然支持)。Derby 用传统 2PL,行锁 + 锁表 + 死锁检测。SQLTiny 走 HSQLDB 路线(已用 MVCC SCN),但需要补齐事务基础设施。
+
+**参考源码**(本地已有):
+- HSQLDB:`hsqldb/src/org/hsqldb/TransactionManagerMVCC.java`、`RowAction.java`、`TransactionManagerCommon.java`
+- Derby:`db-derby-10.17.1.0-src/java/engine/org/apache/derby/store/`(锁管理器在 lower-level store 层)
+
+##### 0.0 新增模块
+
+| 新增 | 说明 | 参考 |
+|---|---|---|
+| `src/core/transaction.h` | `TransactionManager` 类 — 持有全局 `std::mutex writeLock_`(只在事务边界获取),管理 `live_tx_scns_`、`committed_tx_queue_`、SCN 分配 | HSQLDB `TransactionManagerCommon` + `TransactionManagerMVCC` |
+| `src/core/session.{h,cpp}` 扩展 | Session 加 `transactionSCN`、`actionSCN`、`row_actions_`(vector<RowAction>),autocommit 标志 | HSQLDB `Session.java` 事务字段 |
+| `storage/table.{h,cpp}` 扩展 | Table 的 `row_map_` 改为带版本链:`row_id → vector<RowVersion{Row, createSCN, deleteSCN, RowAction*}>` | HSQLDB `Row.rowAction` 单链;但 SQLTiny 当前是单版本,需要升级为多版本链才能真正快照隔离 |
+| `storage/table.{h,cpp}` 加行锁 | `RowLockMap row_locks_;` — map<row_id, LockState>` | Derby LockManager |
+
+##### 0.1 RowAction — 每行的事务操作记录(参考 HSQLDB RowAction.java)
+
+```cpp
+// 每条正在进行的写操作对应一个 RowAction
+struct RowAction {
+    enum Type { NONE, INSERT, DELETE, UPDATE_DELETE, UPDATE_INSERT };
+    
+    Type      type;
+    Session*  owner;           // 哪个 session 做的
+    uint64_t  actionSCN;       // 动作发生时分配的 SCN
+    uint64_t  commitSCN = 0;   // 提交后的 SCN(提交前为 0)
+    Row       row;             // 操作涉及的行(DELETE 的 deleteSCN, INSERT 的 createSCN)
+    int64_t   rowId;           // 行主键
+    std::string tableName;
+    std::string dbName;
+
+    // 冲突检测(参考 HSQLDB RowAction.canCommit)
+    // 返回 true = 可以提交; false = 另一个 session 已经提交了冲突操作
+    bool canCommit() const {
+        // 同 rowId,另一 session 的 commitSCN > 0(已提交),且 type 冲突
+        return !conflicts_with_other_committed_action();
+    }
+    
+    // 可见性判断(参考 HSQLDB RowAction.canRead)
+    bool canRead(uint64_t querySCN) const {
+        if (commitSCN == 0) return false;           // 还没提交,不可见
+        if (type == INSERT || type == UPDATE_INSERT)
+            return commitSCN <= querySCN;
+        if (type == DELETE || type == UPDATE_DELETE)
+            return commitSCN > querySCN;            // 删除提交得比查询早 = 已对该查询不可见
+        return true;
+    }
+};
+```
+
+**关键设计点**:
+- INSERT 时 RowAction 在 `Table::insert` 里创建,加入 `session->row_actions_`
+- DELETE 时 RowAction 在 `Table::delete_by_pk` 里创建,加入 `session->row_actions_`
+- UPDATE = DELETE(旧值)+ INSERT(新值),产生两个 RowAction
+- SELECT **不创建 RowAction**(MVCC 快照隔离的优势!)
+
+##### 0.2 TransactionManager — 全局事务管理器(参考 HSQLDB TransactionManagerMVCC)
+
+```cpp
+class TransactionManager {
+    std::mutex writeLock_;                          // 事务边界全局串行化(参考 HSQLDB writeLock)
+    std::deque<uint64_t> liveTxSCNs_;               // 未结束事务的 SCN 队列
+    std::deque<std::vector<RowAction*>> committedQueue_;  // 已提交但未过期的事务 action 数组
+    std::atomic<uint64_t> nextSCN_{1};
+
+    // —— 事务生命周期 ——
+    
+    uint64_t beginTransaction(Session* s) {
+        std::lock_guard lock(writeLock_);
+        uint64_t scn = nextSCN_.fetch_add(1);
+        s->transactionSCN = scn;
+        liveTxSCNs_.push_back(scn);
+        return scn;
+    }
+
+    bool commitTransaction(Session* s) {
+        std::lock_guard lock(writeLock_);
+        // 1. 冲突检测:session.row_actions_ 里每个 action.canCommit()
+        for (auto* a : s->row_actions_)
+            if (!a->canCommit()) return false;   // 40001 Serialization Failure
+        
+        // 2. 分配 commitSCN
+        uint64_t commitSCN = nextSCN_.fetch_add(1);
+        for (auto* a : s->row_actions_) a->commitSCN = commitSCN;
+        s->actionSCN = commitSCN;
+
+        // 3. 更新 Table 的版本链(deleteSCN = commitSCN, 或 createSCN = commitSCN)
+        for (auto* a : s->row_actions_) {
+            if (a->type == DELETE || a->type == UPDATE_DELETE)
+                a->row.deleteSCN = commitSCN;     // 让这行对后续 commitSCN > x 的查询不可见
+            if (a->type == INSERT || a->type == UPDATE_INSERT)
+                a->row.createSCN = commitSCN;     // 让这行对后续 commitSCN >= x 的查询可见
+        }
+        
+        // 4. WAL 追加(已有,不变) + 持久化
+        // 5. 放入 committedQueue,等到没有 live transaction scn 小于 commitSCN 时 merge
+        committedQueue_.push_back(s->row_actions_);
+        
+        // 6. 从 live queue 移除 + merge 过期
+        endTransaction(s);
+        return true;
+    }
+
+    void rollbackTransaction(Session* s) {
+        std::lock_guard lock(writeLock_);
+        uint64_t rbSCN = nextSCN_.fetch_add(1);  // rollback 也占 SCN
+        
+        // 回滚每个 action:
+        // - INSERT → 物理删除(createSCN 仍为 actionSCN 但没有 commitSCN,永远不可见)
+        // - DELETE → 把 deleteSCN 设 0(恢复可见)
+        // - UPDATE → DELETE 回退 INSERT 也回退
+        
+        for (auto* a : s->row_actions_) {
+            if (a->type == INSERT || a->type == UPDATE_INSERT) {
+                // 从 Table 版本链移除(createSCN = actionSCN 但没 commitSCN)
+                table_rollback_insert(a);
+            } else if (a->type == DELETE || a->type == UPDATE_DELETE) {
+                // 恢复 deleteSCN = 0
+                table_rollback_delete(a);
+            }
+        }
+        
+        endTransaction(s);
+    }
+
+    // live transaction SCN 最小的还在排队的时候,不能 merge committed actions
+    // 否则新启动的 transaction 会看到不该看到的旧版本
+    void mergeExpiredTransactions() {
+        while (!committedQueue_.empty()
+               && !liveTxSCNs_.empty()
+               && committedQueue_.front()[0]->commitSCN < liveTxSCNs_.front()) {
+            auto actions = committedQueue_.front();
+            committedQueue_.pop_front();
+            // 把这些 action 从 Table 版本链的 pending 状态 finalize
+            for (auto* a : actions) finalize_row(a);
+        }
+    }
+    
+    uint64_t getNextSCN() { return nextSCN_.fetch_add(1); }
+    uint64_t currentSCN() { return nextSCN_.load(); }
+};
+```
+
+**SQLTiny 关键简化点**(对比 HSQLDB):
+- 不需要 RowAction 链(每行只属于一个写 session,commit 后 merge 掉)
+- 不需要 `tableWriteLocks` / `tableReadLocks`(先只做行锁,DDL 仍然拿全局写锁)
+- 不需要 latch 等待队列(行锁冲突先简单 abort,后续加 redo 等待)
+
+##### 0.3 行锁模型(参考 Derby LockManager,精简版)
+
+```cpp
+// Table 内维护每行的锁状态
+struct RowLock {
+    enum State { FREE, SHARED_READ, EXCLUSIVE_WRITE };
+    State state = FREE;
+    Session* owner = nullptr;   // EXCLUSIVE 时持有;SHARED 时不填(多个 session 共享)
+    int     sharedCount = 0;
+};
+
+// INSERT / UPDATE / DELETE 时拿 EXCLUSIVE
+bool Table::try_lock_row_write(int64_t rowId, Session* s) {
+    std::lock_guard tableLock(table_mutex_);   // table 级读写锁
+    auto& lk = row_locks_[rowId];
+    if (lk.state == FREE) {
+        lk.state = RowLock::EXCLUSIVE_WRITE;
+        lk.owner = s;
+        return true;
+    }
+    if (lk.state == RowLock::EXCLUSIVE_WRITE && lk.owner == s) return true;  // 重入
+    // 冲突!行被其他 session 写着
+    return false;
+}
+
+// SELECT 只在 autocommit + FOR UPDATE 时加 SHARED,否则快照隔离不加锁
+// 这是 MVCC 的精髓 — SELECT 不阻塞写,写不阻塞 SELECT(除非显式 FOR UPDATE)
+```
+
+##### 0.4 `Session::execute` 流程(P0 之后替换 g_execute_mutex)
+
+```cpp
+ResultSet Session::execute(const std::string& sql) {
+    parser::Parser p(sql);
+    auto stmts = p.parse_all();
+    
+    // autocommit 模式:每条语句隐式 begin + commit
+    // 显式 BEGIN 后 autocommit 关闭,直到 ROLLBACK/COMMIT
+    bool implicitBegin = autocommit_ && !isInTransaction();
+    
+    if (implicitBegin) {
+        beginTransaction();       // txMgr.begin(this)
+    }
+    
+    try {
+        for (auto& s : stmts) {
+            if (s->kind == ast::StmtKind::Commit)   { commitTransaction();   return ok(); }
+            if (s->kind == ast::StmtKind::Rollback) { rollbackTransaction(); return ok(); }
+            if (s->kind == ast::StmtKind::Begin)    { beginTransaction();    return ok(); }
+            
+            auto last = exec_.execute(*s);
+            if (!last.ok) { rollbackTransaction(); return last; }
+            
+            // DML:拿行锁,创建 RowAction
+            if (s->kind == ast::StmtKind::Insert
+             || s->kind == ast::StmtKind::Delete
+             || s->kind == ast::StmtKind::Update) {
+                // 具体拿锁逻辑在 executor 内部调用 txMgr
+            }
+        }
+        
+        if (implicitBegin) {
+            commitTransaction();   // 隐式提交
+        }
+        return last;
+    } catch (const std::exception& e) {
+        if (isInTransaction()) rollbackTransaction();
+        return err(e.what());
+    }
+}
+```
+
+##### 0.5 死锁检测(参考 Derby)
+
+SQLTiny 第一版可以简化:
+- 行锁冲突时先 **abort 当前事务**(40001 Serialization Failure),让客户端重试
+- 暂时不做真正的等待队列 + 循环等待检测(HSQLDB 的 `checkDeadlock` + latch wait 可以后续加)
+- 好处:实现简单,和 HSQLDB MVCC 下 READ COMMITTED 遇到冲突的处理方式一致(HSQLDB 有 redo 等待但 SQLTiny 先用 abort)
+
+---
 
 #### P1 · SQL 标准事务完整化 + SQLAlchemy 最后 2 个 FAIL
-> 当前 BEGIN / COMMIT / ROLLBACK 是 parser 占位,实际没做 undo-log 和自动提交边界。
+> P0 做完后事务基础设施有了,P1 补 SQL 层的边界语义。
 
-- [ ] 真正的 BEGIN / COMMIT / ROLLBACK undo-log(每事务独立 WAL segment)
-- [ ] autocommit 模式与显式 BEGIN 边界
-- [ ] `DESCRIBE table` → parser 映射到 `SHOW COLUMNS FROM table`(解决 SQLAlchemy `meta.create_all` 最后一个 FAIL)
-- [ ] `SHOW FULL TABLES` → 加 FULL 关键字解析,返回 table_type 列(解决 SQLAlchemy Inspector FAIL)
+##### 1.1 需实现的事务功能
+
+| 功能 | 说明 | HSQLDB 对应 |
+|---|---|---|
+| `BEGIN` / `START TRANSACTION` | 显式开始事务,关闭 autocommit | `Session.begin()` |
+| `COMMIT` | 提交当前事务,释放所有行锁,更新可见性边界 | `TransactionManager.commitTransaction` |
+| `ROLLBACK` [TO SAVEPOINT] | 回滚当前事务(或到 savepoint) | `TransactionManager.rollback` / `rollbackSavepoint` |
+| `SAVEPOINT name` / `RELEASE SAVEPOINT` | 中间保存点 | `Session.savepoints` 队列 |
+| `SET autocommit = ON/OFF` | autocommit 模式切换 | `Session.autocommit` 字段 |
+| `FOR UPDATE` 子句 | SELECT 时对匹配行加 EXCLUSIVE 锁 | Derby 的 `FOR UPDATE` 拿行锁 |
+| `SELECT ... LOCK IN SHARE MODE` | SELECT 时对匹配行加 SHARED 锁 | MySQL 兼容 |
+| `SET TRANSACTION ISOLATION LEVEL ...` | 隔离级别设置 | HSQLDB `SET DATABASE TRANSACTION CONTROL` |
+| 隔离级别:READ COMMITTED(默认) / REPEATABLE READ | 当前 SCN snapshot vs 事务开始 SCN snapshot | HSQLDB `Session.isolationLevel` |
+
+##### 1.2 SQLAlchemy 最后 2 个 FAIL
+
+| FAIL | 修复 |
+|---|---|
+| `DESCRIBE table` | parser 加 `DESCRIBE` 关键字解析 → 内部转调 `SHOW COLUMNS FROM table`(一行 map) |
+| `SHOW FULL TABLES FROM db` | parser 加可选 `FULL` 关键字,executor `exec_show_tables` 返回额外一列 `table_type`(BASE TABLE / VIEW) |
+
+##### 1.3 基于 HSQLDB TestSelfTransaction 的测试项
+
+> HSQLDB 的测试框架 `.txt` 格式:`/*u1*/insert /*c2*/select ... /*r预期*/`,SQLTiny 用 smoke C++ 测试 + Python 并发测试组合覆盖。
+
+| 测试 | 类型 | 说明 | HSQLDB 参考 |
+|---|---|---|---|
+| **P0-01**:行锁互斥(写-写冲突 abort) | C++ smoke | Session A INSERT 一行,Session B 同主键 INSERT → B 应该被 abort 或阻塞后重试(第一版直接 abort) | `TestSelfTransaction.txt` insert 冲突 |
+| **P0-02**:写-读 快照隔离 | C++ smoke | Session A BEGIN 后 INSERT,Session B 同时 SELECT → B 用自己的 querySCN 看不到 A 未提交的行 | `TestSelfTransaction.txt` read committed |
+| **P0-03**:读-读 不阻塞 | C++ smoke | 多 session 并发 SELECT 同一表(无锁!)— 这是 MVCC 的关键验证(对比之前全局 mutex 会串行化) | HSQLDB MVCC 多 session 并发读 |
+| **P0-04**:写-写 同事务内重入 | C++ smoke | 一个事务内 UPDATE 同一行两次(应该 OK,因为 RowLock 重入) | — |
+| **P1-01**:autocommit 模式 | Python | 默认 autocommit=true,每条 SQL 隐式 begin+commit;SET autocommit=OFF 后显式 BEGIN/COMMIT | `TestSelfTransaction.txt` autocommit on/off |
+| **P1-02**:ROLLBACK 恢复 | Python | BEGIN → INSERT 3 行 → ROLLBACK → SELECT COUNT(*) = 0 | `TestSelfTransaction.txt` rollback 恢复 |
+| **P1-03**:SAVEPOINT | Python | BEGIN → INSERT → SAVEPOINT s1 → INSERT → ROLLBACK TO s1 → SELECT 只看到第一行 | `TestSelfTransaction.txt` savepoint 回滚 |
+| **P1-04**:SELECT FOR UPDATE 行锁 | Python | BEGIN → SELECT ... FOR UPDATE → 另一 session INSERT 同主键 → 应该冲突 | Derby 锁场景 |
+| **P1-05**:隔离级别 READ COMMITTED vs REPEATABLE READ | C++ | RC:两次 SELECT 之间其他 session 提交了 INSERT,第二次能看到;RR:两次 SELECT 结果一致(同一 SCN 快照) | HSQLDB `Session.isolationLevel` |
+| **P1-06**:死锁检测(两行循环锁) | C++ | Session A:lock row 1 → wait row 2;Session B:lock row 2 → wait row 1 → 其中一个 abort | Derby 死锁检测 |
+| **P1-07**:并发 UPDATE 同一行(40001) | C++ smoke | 多线程并发 UPDATE 同一行(不同值)— 至少一个被 abort,其他重试成功 | HSQLDB row write conflict |
+| **P1-08**:大表并发读写压测 | Python 多线程 | 10 threads × 1000 ops:SELECT / INSERT / UPDATE / DELETE 随机组合,最终 COUNT(*) 正确 | HSQLDB multithread tests |
+| **P1-09**:DESCRIBE / SHOW FULL TABLES(SQLAlchemy 最后 2 FAIL) | Python | SQLAlchemy Engine `.connect()` → `meta.create_all()` → 不再 FAIL | 当前已知 FAIL |
+| **P1-10**:WAL shutdown + restart 恢复事务状态 | C++ smoke | BEGIN → INSERT → shutdown(异常无 commit) → restart → SELECT COUNT(*) 不应该有那行(insert 没 commit,rollback 了) | WAL recovery + undo-log |
+
+---
 
 #### P2 · JOIN 性能优化(当前 O(N×M) 无索引)
 > 当前 join 是纯嵌套循环(500 users × 2000 orders = 100w 行 explode),200/800 数据量 INNER JOIN+GROUP BY 要 12s。
@@ -322,7 +584,7 @@ LIMIT 10;
 
 #### P4 · 远期
 - [ ] 复制/主从(MySQL 二进制日志协议兼容)
-- [ ] 更大的 HSQLDB TestSelf* 覆盖
+- [ ] 更大的 HSQLDB TestSelf* 覆盖(Joins / Constraints / PrimaryKeys / FKModes / StoredProcedure)
 - [ ] `EXPLAIN ANALYZE`
 - [ ] 触发器高级(`FOR EACH STATEMENT`、`BEFORE`、`INSTEAD OF`)
 
