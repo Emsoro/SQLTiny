@@ -33,6 +33,11 @@ public:
     bool is_open() const { return writer_ && writer_->is_open(); }
     bool enabled() const { return !wal_path_.empty(); }
 
+    // ============ SCN 分配 (M5.6 MVCC) ============
+    uint64_t next_scn() { return scn_counter_.fetch_add(1) + 1; }
+    uint64_t current_scn() const { return scn_counter_.load(); }
+    void set_scn_counter(uint64_t v) { scn_counter_.store(v); }  // snapshot replay 恢复
+
     // ============ Append helpers(Executor/Table 调用) ============
 
     // Catalog
@@ -69,6 +74,7 @@ private:
     std::unique_ptr<persist::WalWriter> writer_;
     std::mutex mu_;       // 所有 append 共享一把锁
     std::atomic<bool> checkpoint_pending_{false};
+    std::atomic<uint64_t> scn_counter_{0};
 
     /// WAL 对应的 snapshot 路径:同目录下 sql.data
     std::string snapshot_path() const;

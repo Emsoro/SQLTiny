@@ -135,7 +135,8 @@ ResultSet Executor::exec_insert(const ast::InsertStmt& s) {
         }
 
         int64_t rid = -1;
-        if (!tbl->insert(row, &rid)) {
+        uint64_t create_scn = core::Database::instance().wal().next_scn();
+        if (!tbl->insert(row, &rid, create_scn)) {
             r.ok = false; r.mysql_errno = 1062; r.sql_state = "23000";
             r.error_message = "Duplicate entry for PRIMARY KEY";
             return r;
@@ -189,7 +190,8 @@ ResultSet Executor::exec_insert(const ast::InsertStmt& s) {
                 } else row.push_back(types::Value::make_null());
             }
             int64_t rid = -1;
-            if (!tbl->insert(row, &rid)) {
+            uint64_t create_scn = core::Database::instance().wal().next_scn();
+            if (!tbl->insert(row, &rid, create_scn)) {
                 r.ok = false; r.mysql_errno = 1062; r.sql_state = "23000";
                 r.error_message = "Duplicate entry for PRIMARY KEY";
                 return r;
@@ -244,7 +246,8 @@ ResultSet Executor::exec_update(const ast::UpdateStmt& s) {
     // 先收集所有要改的行 (不能在 for_each 里 modify AVL)
     struct Pending { int64_t rid; storage::Row new_row; storage::Row pk_old; };
     std::vector<Pending> pending;
-    tbl->for_each([&](int64_t rid, const storage::Row& row) {
+    uint64_t qscn = core::Database::instance().wal().current_scn();
+    tbl->for_each_visible(qscn, [&](int64_t rid, const storage::Row& row) {
         ExecContext ctx{ catalog_, s.table_name, {}, row };
         ctx.col_index.clear();
         for (size_t i = 0; i < def.columns.size(); ++i) {
@@ -278,8 +281,10 @@ ResultSet Executor::exec_update(const ast::UpdateStmt& s) {
     auto [u_db, u_tbl] = split_qname(s.table_name);
     std::string u_db_name = u_db.empty() ? catalog_.current_database() : u_db;
     for (auto& p : pending) {
-        if (!p.pk_old.empty()) tbl->delete_by_pk(p.pk_old);
-        tbl->insert(std::move(p.new_row));
+        uint64_t del_scn = core::Database::instance().wal().next_scn();
+        uint64_t ins_scn = core::Database::instance().wal().next_scn();
+        if (!p.pk_old.empty()) tbl->delete_by_pk(p.pk_old, del_scn);
+        tbl->insert(std::move(p.new_row), nullptr, ins_scn);
         affected++;
         core::Database::instance().wal().append_update_row(u_db_name, u_tbl, p.pk_old, p.new_row);
     }
@@ -301,7 +306,8 @@ ResultSet Executor::exec_delete(const ast::DeleteStmt& s) {
 
     // 收集要删的 row_id(不能在 for_each 里删)
     std::vector<int64_t> to_delete;
-    tbl->for_each([&](int64_t rid, const storage::Row& row) {
+    uint64_t dqscn = core::Database::instance().wal().current_scn();
+    tbl->for_each_visible(dqscn, [&](int64_t rid, const storage::Row& row) {
         if (!s.where) { to_delete.push_back(rid); return true; }
         ExecContext ctx{ catalog_, s.table_name, {}, row };
         ctx.col_index.clear();
@@ -326,7 +332,10 @@ ResultSet Executor::exec_delete(const ast::DeleteStmt& s) {
                 int idx = def.column_index(cname);
                 if (idx >= 0 && idx < static_cast<int>(maybe->size())) pk.push_back((*maybe)[idx]);
             }
-        if (!pk.empty()) tbl->delete_by_pk(pk);
+        if (!pk.empty()) {
+            uint64_t del_scn = core::Database::instance().wal().next_scn();
+            tbl->delete_by_pk(pk, del_scn);
+        }
         else {
             // 无主键 — 不支持按 row_id 删
         }
@@ -477,14 +486,15 @@ ResultSet Executor::exec_select(const ast::SelectStmt& s) {
     // 生成候选行:先主表遍历,CROSS/INNER/LEFT/RIGHT JOIN 追加
     std::vector<storage::Row> candidate_rows;
 
-    // 先拿主表所有行
+    // 先拿主表所有行 (MVCC:querySCN)
+    uint64_t sqscn = core::Database::instance().wal().current_scn();
     std::vector<storage::Row> left_rows;
-    tbl->for_each([&](int64_t, const storage::Row& row) { left_rows.push_back(row); return true; });
+    tbl->for_each_visible(sqscn, [&](int64_t, const storage::Row& row) { left_rows.push_back(row); return true; });
 
     for (auto& jc : s.joins) {
         auto* jtbl = catalog_.get_table(jc.table_name);
         std::vector<storage::Row> right_rows;
-        jtbl->for_each([&](int64_t, const storage::Row& row) { right_rows.push_back(row); return true; });
+        jtbl->for_each_visible(sqscn, [&](int64_t, const storage::Row& row) { right_rows.push_back(row); return true; });
 
         std::vector<storage::Row> new_left;
         for (auto& l : left_rows) {

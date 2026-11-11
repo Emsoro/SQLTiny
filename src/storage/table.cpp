@@ -5,10 +5,7 @@ namespace sqltiny::storage {
 
 Row Table::pk_from_row(const Row& row) const {
     Row pk;
-    if (def_.primary_key_cols.empty()) {
-        // 无主键 —— 用 row_id 当虚拟 PK
-        return pk;
-    }
+    if (def_.primary_key_cols.empty()) return pk;
     for (auto& col_list : def_.primary_key_cols) {
         for (auto& cname : col_list) {
             int idx = def_.column_index(cname);
@@ -18,22 +15,17 @@ Row Table::pk_from_row(const Row& row) const {
     return pk;
 }
 
-Key Table::pk_key(const Row& pk) const {
-    return Key(pk);
-}
+Key Table::pk_key(const Row& pk) const { return Key(pk); }
 
 Table::Table(TableDef def) : def_(std::move(def)) {
-    // 无主键 —— 不建 AVL 索引,后续按 row_id 查找
-    if (!def_.primary_key_cols.empty()) {
-        pk_index_ = std::make_unique<IndexAvl>(true /*unique*/);
-    }
+    if (!def_.primary_key_cols.empty()) pk_index_ = std::make_unique<IndexAvl>(true /*unique*/);
 }
 
-bool Table::insert(const Row& row, int64_t* out_row_id) {
+bool Table::insert(const Row& row, int64_t* out_row_id, uint64_t createSCN) {
     if (def_.primary_key_cols.empty()) {
-        // 无主键 —— 直接追加
         int64_t rid = next_row_id_++;
         row_map_[rid] = row;
+        versions_[rid] = {createSCN, 0};
         if (out_row_id) *out_row_id = rid;
         return true;
     }
@@ -43,13 +35,12 @@ bool Table::insert(const Row& row, int64_t* out_row_id) {
     if (!inserted) return false;
     int64_t rid = next_row_id_++;
     row_map_[rid] = row;
-    // 自增游标
+    versions_[rid] = {createSCN, 0};
     for (auto& col_list : def_.primary_key_cols) {
         for (auto& cname : col_list) {
             int idx = def_.column_index(cname);
             if (idx < 0 || idx >= static_cast<int>(row.size())) continue;
-            auto& col_def = def_.columns[idx];
-            if (col_def.is_auto_increment && row[idx].is_int()) {
+            if (def_.columns[idx].is_auto_increment && row[idx].is_int()) {
                 auto_inc_cursor_ = std::max(auto_inc_cursor_, row[idx].v_int);
             }
         }
@@ -58,18 +49,24 @@ bool Table::insert(const Row& row, int64_t* out_row_id) {
     return true;
 }
 
-int64_t Table::next_auto_increment() {
-    return ++auto_inc_cursor_;
-}
+int64_t Table::next_auto_increment() { return ++auto_inc_cursor_; }
 
-bool Table::delete_by_pk(const Row& pk_values) {
+bool Table::delete_by_pk(const Row& pk_values, uint64_t deleteSCN) {
     if (!pk_index_) return false;
     Key key(pk_values);
     auto rid_opt = pk_index_->find(key);
     if (!rid_opt) return false;
     int64_t rid = *rid_opt;
-    pk_index_->remove(key, rid);
-    row_map_.erase(rid);
+    if (deleteSCN == 0) {
+        // 物理删除 (M1-M4 兼容)
+        pk_index_->remove(key, rid);
+        row_map_.erase(rid);
+        versions_.erase(rid);
+    } else {
+        // MVCC 逻辑删除:标记 deleteSCN,物理保留到 checkpoint 压缩
+        pk_index_->remove(key, rid);           // 从索引拿掉,新查询看不到
+        versions_[rid].deleteSCN = deleteSCN;   // 但 row_map 里还在
+    }
     return true;
 }
 
@@ -79,16 +76,41 @@ std::optional<int64_t> Table::find_row_id_by_pk(const Row& pk_values) const {
 }
 
 void Table::for_each(const RowCallback& cb) const {
-    // 按 row_id 有序扫描
     for (auto& [rid, row] : row_map_) {
         if (!cb(rid, row)) break;
     }
 }
 
-std::vector<int64_t> Table::all_row_ids() const {
+void Table::for_each_visible(uint64_t querySCN, const RowCallback& cb) const {
+    if (querySCN == 0) { for_each(cb); return; }
+    for (auto& [rid, row] : row_map_) {
+        auto it = versions_.find(rid);
+        uint64_t cs = (it != versions_.end()) ? it->second.createSCN : 0;
+        uint64_t ds = (it != versions_.end()) ? it->second.deleteSCN : 0;
+        // 可见: createSCN ≤ querySCN < deleteSCN (deleteSCN=0 表示没被删)
+        if (cs == 0 || cs <= querySCN) {
+            if (ds == 0 || ds > querySCN) {
+                if (!cb(rid, row)) break;
+            }
+        }
+    }
+}
+
+std::vector<int64_t> Table::all_row_ids(uint64_t querySCN) const {
     std::vector<int64_t> out;
-    out.reserve(row_map_.size());
-    for (auto& [rid, _] : row_map_) out.push_back(rid);
+    if (querySCN == 0) {
+        out.reserve(row_map_.size());
+        for (auto& [rid, _] : row_map_) out.push_back(rid);
+        return out;
+    }
+    for (auto& [rid, row] : row_map_) {
+        auto it = versions_.find(rid);
+        uint64_t cs = (it != versions_.end()) ? it->second.createSCN : 0;
+        uint64_t ds = (it != versions_.end()) ? it->second.deleteSCN : 0;
+        if ((cs == 0 || cs <= querySCN) && (ds == 0 || ds > querySCN)) {
+            out.push_back(rid);
+        }
+    }
     return out;
 }
 
@@ -97,5 +119,11 @@ std::optional<Row> Table::get_row(int64_t row_id) const {
     if (it == row_map_.end()) return std::nullopt;
     return it->second;
 }
+
+Table::VersionInfo Table::get_version(int64_t row_id) const {
+    auto it = versions_.find(row_id);
+    return (it != versions_.end()) ? it->second : VersionInfo{0, 0};
+}
+void Table::set_version(int64_t row_id, VersionInfo vi) { versions_[row_id] = vi; }
 
 } // namespace sqltiny::storage

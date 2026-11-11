@@ -33,7 +33,6 @@ struct TableDef {
 };
 
 /// 表实例 —— 持有主索引 + 所有 secondary 索引 + 行存储
-/// M2 版本:所有索引都存 Value 完整拷贝,row 本身也是一份拷贝(内存表,先简单)
 class Table {
 public:
     explicit Table(TableDef def);
@@ -41,20 +40,26 @@ public:
     const TableDef& def() const { return def_; }
 
     /// 插入一行。成功返回 true;主键冲突返回 false
-    bool insert(const Row& row, int64_t* out_row_id = nullptr);
+    /// createSCN = 0 表示"立即可见" (M1-M4 兼容,隐式 active)
+    bool insert(const Row& row, int64_t* out_row_id = nullptr, uint64_t createSCN = 0);
 
-    /// 按主键删除
-    bool delete_by_pk(const Row& pk_values);
+    /// 按主键删除 (deleteSCN = 0 表示"立即物理删除" —— M1-M4 兼容)
+    bool delete_by_pk(const Row& pk_values, uint64_t deleteSCN = 0);
 
     /// 按主键查找
     std::optional<int64_t> find_row_id_by_pk(const Row& pk_values) const;
 
     /// 迭代器回调:返回 false 停止
     using RowCallback = std::function<bool(int64_t row_id, const Row& row)>;
+    /// 遍历所有行 (包含标记 deleted 但没真正物理删的版本)
     void for_each(const RowCallback& cb) const;
 
-    /// 所有行 id
-    std::vector<int64_t> all_row_ids() const;
+    /// M5.6 MVCC:按 querySCN 只遍历 querySCN 可见的版本
+    /// querySCN=0 时退化为 for_each() (兼容旧调用)
+    void for_each_visible(uint64_t querySCN, const RowCallback& cb) const;
+
+    /// 所有行 id (只返回物理存在且可见的)
+    std::vector<int64_t> all_row_ids(uint64_t querySCN = 0) const;
 
     size_t row_count() const { return row_map_.size(); }
 
@@ -68,12 +73,20 @@ public:
     void set_auto_inc_cursor(int64_t v) { auto_inc_cursor_ = v; }
     int64_t auto_inc_cursor() const { return auto_inc_cursor_; }
 
+    /// M5.6 MVCC:行版本元信息读写
+    struct VersionInfo { uint64_t createSCN = 0; uint64_t deleteSCN = 0; };
+    VersionInfo get_version(int64_t row_id) const;
+    void set_version(int64_t row_id, VersionInfo vi);
+
 private:
     TableDef def_;
     // 行存储:row_id → Row
     std::map<int64_t, Row> row_map_;
     int64_t next_row_id_ = 1;
     int64_t auto_inc_cursor_ = 0;
+
+    // M5.6 MVCC:row_id → 版本元信息
+    std::map<int64_t, VersionInfo> versions_;
 
     // 主键 AVL 索引 —— key 是 PK 列值按顺序拼接
     std::unique_ptr<IndexAvl> pk_index_;
