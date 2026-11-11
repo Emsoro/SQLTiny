@@ -22,7 +22,7 @@ Table::Table(TableDef def) : def_(std::move(def)) {
 }
 
 bool Table::insert(const Row& row, int64_t* out_row_id, uint64_t createSCN) {
-    std::lock_guard<std::mutex> lock(mu_);
+    std::unique_lock<std::shared_mutex> lock(mu_);
     if (def_.primary_key_cols.empty()) {
         int64_t rid = next_row_id_++;
         row_map_[rid] = row;
@@ -51,12 +51,12 @@ bool Table::insert(const Row& row, int64_t* out_row_id, uint64_t createSCN) {
 }
 
 int64_t Table::next_auto_increment() {
-    std::lock_guard<std::mutex> lock(mu_);
+    std::unique_lock<std::shared_mutex> lock(mu_);
     return ++auto_inc_cursor_;
 }
 
 bool Table::delete_by_pk(const Row& pk_values, uint64_t deleteSCN) {
-    std::lock_guard<std::mutex> lock(mu_);
+    std::unique_lock<std::shared_mutex> lock(mu_);
     if (!pk_index_) return false;
     Key key(pk_values);
     auto rid_opt = pk_index_->find(key);
@@ -76,25 +76,31 @@ bool Table::delete_by_pk(const Row& pk_values, uint64_t deleteSCN) {
 }
 
 std::optional<int64_t> Table::find_row_id_by_pk(const Row& pk_values) const {
+    std::shared_lock<std::shared_mutex> lock(mu_);
     if (!pk_index_) return std::nullopt;
     return pk_index_->find(Key(pk_values));
 }
 
 void Table::for_each(const RowCallback& cb) const {
-    std::lock_guard<std::mutex> lock(mu_);
+    std::shared_lock<std::shared_mutex> lock(mu_);
     for (auto& [rid, row] : row_map_) {
         if (!cb(rid, row)) break;
     }
 }
 
 void Table::for_each_visible(uint64_t querySCN, const RowCallback& cb) const {
-    std::lock_guard<std::mutex> lock(mu_);
-    if (querySCN == 0) { for_each(cb); return; }
+    std::shared_lock<std::shared_mutex> lock(mu_);
+    if (querySCN == 0) {
+        // 退化:遍历全部可见行 (等价 for_each, 但不调 for_each 避免同线程重复加锁)
+        for (auto& [rid, row] : row_map_) {
+            if (!cb(rid, row)) break;
+        }
+        return;
+    }
     for (auto& [rid, row] : row_map_) {
         auto it = versions_.find(rid);
         uint64_t cs = (it != versions_.end()) ? it->second.createSCN : 0;
         uint64_t ds = (it != versions_.end()) ? it->second.deleteSCN : 0;
-        // 可见: createSCN ≤ querySCN < deleteSCN (deleteSCN=0 表示没被删)
         if (cs == 0 || cs <= querySCN) {
             if (ds == 0 || ds > querySCN) {
                 if (!cb(rid, row)) break;
@@ -104,6 +110,7 @@ void Table::for_each_visible(uint64_t querySCN, const RowCallback& cb) const {
 }
 
 std::vector<int64_t> Table::all_row_ids(uint64_t querySCN) const {
+    std::shared_lock<std::shared_mutex> lock(mu_);
     std::vector<int64_t> out;
     if (querySCN == 0) {
         out.reserve(row_map_.size());
@@ -122,19 +129,19 @@ std::vector<int64_t> Table::all_row_ids(uint64_t querySCN) const {
 }
 
 std::optional<Row> Table::get_row(int64_t row_id) const {
-    std::lock_guard<std::mutex> lock(mu_);
+    std::shared_lock<std::shared_mutex> lock(mu_);
     auto it = row_map_.find(row_id);
     if (it == row_map_.end()) return std::nullopt;
     return it->second;
 }
 
 Table::VersionInfo Table::get_version(int64_t row_id) const {
-    std::lock_guard<std::mutex> lock(mu_);
+    std::shared_lock<std::shared_mutex> lock(mu_);
     auto it = versions_.find(row_id);
     return (it != versions_.end()) ? it->second : VersionInfo{0, 0};
 }
 void Table::set_version(int64_t row_id, VersionInfo vi) {
-    std::lock_guard<std::mutex> lock(mu_);
+    std::unique_lock<std::shared_mutex> lock(mu_);
     versions_[row_id] = vi;
 }
 
