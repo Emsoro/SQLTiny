@@ -238,6 +238,27 @@ Token Lexer::next() {
         return read_ident_or_keyword();
     }
 
+    // MySQL @@系统变量: @@xxx 整体当 Ident 处理 (parser 再识别 @@ 前缀)
+    if (c == '@' && peek_char(1) == '@') {
+        advance(2);  // 跳过 @@
+        size_t start = pos_;
+        while (!eof() && (std::isalnum(static_cast<unsigned char>(peek_char())) ||
+                          peek_char() == '_' || peek_char() == '.')) advance();
+        Token t; t.kind = TokenKind::Ident; t.line = start_line; t.col = start_col;
+        t.text = "@@" + std::string(src_.substr(start, pos_ - start));
+        return t;
+    }
+    // MySQL @ 用户变量 (暂不支持,fall through 到 error)
+    if (c == '@') {
+        advance();
+        size_t start = pos_;
+        while (!eof() && (std::isalnum(static_cast<unsigned char>(peek_char())) ||
+                          peek_char() == '_')) advance();
+        Token t; t.kind = TokenKind::Ident; t.line = start_line; t.col = start_col;
+        t.text = "@" + std::string(src_.substr(start, pos_ - start));
+        return t;
+    }
+
     // 多字符运算符
     if (c == '<' && peek_char(1) == '=') { advance(2); return { TokenKind::Le,   "<=", start_line, start_col }; }
     if (c == '>' && peek_char(1) == '=') { advance(2); return { TokenKind::Ge,   ">=", start_line, start_col }; }

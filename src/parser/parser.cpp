@@ -109,6 +109,13 @@ ast::StmtPtr Parser::parse_top() {
         case TokenKind::KwUse:       return parse_use();
         case TokenKind::KwShow:      return parse_show();
         case TokenKind::KwSet:       return parse_set();
+        case TokenKind::KwCommit:    return parse_set();  // COMMIT → 占位 (autocommit=ON)
+        case TokenKind::KwRollback:  return parse_set();  // ROLLBACK → 占位
+        case TokenKind::KwBegin: {
+            consume();  // consume BEGIN
+            // BEGIN ... END 块在 MySQL 存储过程里,SQLTiny 简化处理
+            return parse_set();
+        }
         default:
             throw ParseError(t.line, t.col,
                 fmt::format("unexpected start of statement: '{}'", t.text));
@@ -361,7 +368,8 @@ ast::ExprPtr Parser::parse_primary() {
         static const char* func_names[] = {
             "COUNT", "SUM", "AVG", "MIN", "MAX", "CONCAT", "COALESCE", "IFNULL",
             "ROUND", "ABS", "LENGTH", "NOW", "CURRENT_TIMESTAMP", "CURRENT_DATE",
-            "CURRENT_TIME", "USER", "DATABASE", "CAST", "CONVERT"
+            "CURRENT_TIME", "USER", "DATABASE", "CAST", "CONVERT",
+            "VERSION", "SCHEMA"
         };
         for (auto n : func_names) {
             if (_stricmp(t.text.c_str(), n) == 0) { is_func_kw = true; break; }
@@ -880,6 +888,12 @@ ast::StmtPtr Parser::parse_show() {
         stmt->kind = ast::ShowStmt::Kind::Status;
     } else if (match_consume(TokenKind::KwVariables)) {
         stmt->kind = ast::ShowStmt::Kind::Variables;
+        if (match_consume(TokenKind::KwLike)) {
+            auto t = consume();
+            // LIKE pattern 可能是字符串字面量或标识符
+            if (t.kind == TokenKind::String) stmt->table_or_pattern = t.text;
+            else if (t.kind == TokenKind::Ident) stmt->table_or_pattern = t.text;
+        }
     } else {
         throw ParseError(t.line, t.col, fmt::format("unsupported SHOW '{}'", t.text));
     }

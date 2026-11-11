@@ -26,6 +26,23 @@ types::Value Executor::eval(const ast::Expression& e, const ExecContext& ctx) co
             return e.literal;
 
         case ast::ExprKind::Column: {
+            // @@系统变量 拦截
+            if (e.column_name.size() >= 2 && e.column_name[0] == '@' && e.column_name[1] == '@') {
+                static const std::unordered_map<std::string, std::string> vars = {
+                    {"@@tx_isolation","REPEATABLE-READ"},{"@@session_tx_isolation","REPEATABLE-READ"},
+                    {"@@autocommit","ON"},{"@@session_autocommit","ON"},
+                    {"@@character_set_client","utf8mb4"},{"@@character_set_connection","utf8mb4"},
+                    {"@@character_set_server","utf8mb4"},{"@@character_set_database","utf8mb4"},
+                    {"@@character_set_results","utf8mb4"},{"@@collation_server","utf8mb4_general_ci"},
+                    {"@@collation_database","utf8mb4_general_ci"},
+                    {"@@version","5.7.0-SQLTiny"},{"@@version_comment","SQLTiny"},
+                    {"@@max_connections","151"},{"@@wait_timeout","28800"},
+                    {"@@interactive_timeout","28800"},
+                };
+                auto it = vars.find(e.column_name);
+                if (it != vars.end()) return types::Value::make_string(it->second);
+                return types::Value::make_null();
+            }
             // 优先 alias.col, 其次裸 col
             std::string key = e.table_name.empty() ? e.column_name : (e.table_name + "." + e.column_name);
             auto it = ctx.col_index.find(key);
@@ -239,6 +256,15 @@ types::Value Executor::eval_function(
     }
 
     // 普通函数
+    if (lower == "version") {
+        return types::Value::make_string("5.7.0-SQLTiny");
+    }
+    if (lower == "user" || lower == "current_user") {
+        return types::Value::make_string("root@localhost");
+    }
+    if (lower == "database" || lower == "schema") {
+        return types::Value::make_string(ctx.catalog.current_database());
+    }
     if (lower == "now" || lower == "current_timestamp") {
         std::time_t t = std::time(nullptr);
         std::tm tm{}; localtime_s(&tm, &t);

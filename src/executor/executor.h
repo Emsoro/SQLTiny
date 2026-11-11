@@ -87,7 +87,7 @@ private:
     ResultSet exec_show_create_table(const std::string& db_name, const std::string& table_name);
     ResultSet exec_show_create_database(const std::string& db_name);
     ResultSet exec_show_status();
-    ResultSet exec_show_variables();
+    ResultSet exec_show_variables(const std::string& pattern = "");
 
     ResultSet exec_create_database(const ast::CreateDatabaseStmt& s);
     ResultSet exec_drop_database(const ast::DropDatabaseStmt& s);

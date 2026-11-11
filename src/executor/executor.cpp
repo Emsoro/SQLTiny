@@ -46,7 +46,7 @@ ResultSet Executor::execute(const ast::Statement& stmt) {
                 case ast::ShowStmt::Kind::CreateTable: return exec_show_create_table(sh.db_name, sh.table_or_pattern);
                 case ast::ShowStmt::Kind::CreateDatabase: return exec_show_create_database(sh.table_or_pattern);
                 case ast::ShowStmt::Kind::Status:      return exec_show_status();
-                case ast::ShowStmt::Kind::Variables:   return exec_show_variables();
+                case ast::ShowStmt::Kind::Variables:   return exec_show_variables(sh.table_or_pattern);
             }
             break;
         }
@@ -1051,7 +1051,7 @@ ResultSet Executor::exec_show_status() {
 }
 
 // ---------- SHOW VARIABLES ----------
-ResultSet Executor::exec_show_variables() {
+ResultSet Executor::exec_show_variables(const std::string& pattern) {
     ResultSet r;
     r.column_names = { "Variable_name", "Value" };
     r.column_types = { types::SqlType::Varchar, types::SqlType::Varchar };
@@ -1067,9 +1067,26 @@ ResultSet Executor::exec_show_variables() {
         {"join_buffer_size", "262144"}, {"max_connections", "151"},
         {"net_buffer_length", "16384"}, {"sql_mode", "ONLY_FULL_GROUP_BY"},
         {"thread_cache_size", "9"}, {"wait_timeout", "28800"},
+        {"version", "5.7.0-SQLTiny"},
+    };
+    // LIKE 简易过滤:pattern 去掉单引号, % = 通配任意
+    auto match = [&](const char* name) -> bool {
+        if (pattern.empty()) return true;
+        std::string p = pattern;
+        if (p.size() >= 2 && p.front() == '\'' && p.back() == '\'') p = p.substr(1, p.size()-2);
+        // 简单实现:全 % 或精确 name 相等
+        if (p == "%" || p == "%%") return true;
+        // 支持 %xxx 或 xxx% 或 xxx (子串匹配)
+        if (p.size() >= 2 && p.front() == '%' && p.back() == '%') {
+            std::string inner = p.substr(1, p.size()-2);
+            return std::string(name).find(inner) != std::string::npos;
+        }
+        if (p.size() >= 1 && p.back() == '%') return std::string(name).starts_with(p.substr(0, p.size()-1));
+        if (p.size() >= 1 && p.front() == '%') return std::string(name).ends_with(p.substr(1));
+        return std::string(name) == p;
     };
     for (auto& [k, v] : kvs)
-        r.rows.push_back({ types::Value::make_string(k), types::Value::make_string(v) });
+        if (match(k)) r.rows.push_back({ types::Value::make_string(k), types::Value::make_string(v) });
     return r;
 }
 

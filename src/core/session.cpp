@@ -2,8 +2,13 @@
 #include <fmt/format.h>
 #include <cstdio>
 #include <string>
+#include <mutex>
 
 namespace sqltiny::core {
+
+// 全局执行锁:server 多线程时串行化 SQL 执行
+// (Catalog/Table/Wal 目前不是线程安全的,M6 才细粒度锁)
+static std::mutex g_execute_mutex;
 
 Database& Database::instance() {
     static Database db;
@@ -40,6 +45,7 @@ void Database::shutdown() {
 Session::Session() = default;
 
 executor::ResultSet Session::execute(const std::string& sql) {
+    std::lock_guard<std::mutex> lock(g_execute_mutex);
     try {
         parser::Parser p(sql);
         auto stmts = p.parse_all();
