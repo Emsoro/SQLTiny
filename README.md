@@ -1,9 +1,6 @@
 # SQLTiny — 轻量级嵌入式数据库 · MySQL 协议兼容
 
-![status](https://img.shields.io/badge/status-M5%20Milestone-green)
-![language](https://img.shields.io/badge/C%2B%2B-20-blue)
-![license](https://img.shields.io/badge/license-Apache%202.0-blue)
-![tests](https://img.shields.io/badge/tests-69%20C%2B%2B%2B%20%2B%205%20Python%20scripts%20PASS-brightgreen)
+
 
 **SQLTiny** 是用现代 C++20 从零重写的轻量级关系型数据库,核心设计灵感来自 [HSQLDB](http://hsqldb.org/),额外暴露 **MySQL Wire Protocol**——标准 MySQL 客户端(`mysql` CLI、Navicat、DBeaver、Connector/J、PyMySQL)直接连接。
 
@@ -21,6 +18,37 @@
 | 🗃️ **多库 Catalog** | CREATE/DROP/USE DATABASE,库级独立表注册 |
 | ⚡ **AVL 内存索引** | 自带平衡 BST,主键查询 O(log n) |
 | 🪶 **轻量** | 单库文件,启动毫秒级,依赖仅 fmtlib |
+
+---
+
+## 🏛️ 系统架构
+
+```mermaid
+flowchart LR
+    Client[MySQL Client<br/>PyMySQL · CLI · Navicat · SQLAlchemy]
+    Server[mysql_server<br/>accept() · per-connection thread]
+    Session[Session<br/>autocommit · transactionSCN]
+    Parser[Parser<br/>Lexer tokenize → Recursive Descent → AST]
+    Executor[Executor<br/>bind_session · for_each_visible]
+    TM[TransactionManager<br/>writeLock_ · SCN · RowLockMap]
+    Catalog[Catalog → Table → Row<br/>AVL index · versions_]
+    WAL[WalManager<br/>sql.wal · sql.data snapshot]
+    Client -->|TCP 3306| Server
+    Server --> Session
+    Session --> Parser
+    Parser --> Executor
+    Executor --> TM
+    Executor --> Catalog
+    TM --> Catalog
+    TM --> WAL
+    Catalog --> WAL
+```
+
+![SQLTiny Architecture](./architecture.svg)
+
+> 🔒 **锁分层**: Catalog.mu_(DDL) → Table.mu_ shared_lock(SELECT 多读者并行) / unique_lock(DML 独占) → RowLockMap(行级冲突检测) → TransactionManager.writeLock_(提交边界) → WalManager.mu_(WAL 文件读写)
+>
+> 🧊 **MVCC**: SELECT 完全不加锁,靠 `for_each_visible(querySCN)` 过滤 `createSCN ≤ querySCN < deleteSCN`,快照隔离零锁读取
 
 ---
 
