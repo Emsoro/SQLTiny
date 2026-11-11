@@ -9,6 +9,9 @@
 #include <memory>
 #include <map>
 
+// M6 前向声明: Session 在 sqltiny::core 里, 我们只需要指针
+namespace sqltiny { namespace core { class Session; } }
+
 namespace sqltiny::executor {
 
 // 前向声明 — ExecContext 里要持有 Executor* 用于子查询递归求值
@@ -72,8 +75,13 @@ public:
     catalog::Catalog& catalog_ref() { return catalog_; }
     const catalog::Catalog& catalog_ref() const { return catalog_; }
 
+    // M6: Session 可选关联 — 用于事务内拿锁 + 记录 RowAction
+    void bind_session(core::Session* s) { session_ = s; }
+    core::Session* bound_session() const { return session_; }
+
 private:
     catalog::Catalog& catalog_;
+    core::Session* session_ = nullptr;
 
     ResultSet exec_create_table(const ast::CreateTableStmt& s);
     ResultSet exec_drop_table(const ast::DropTableStmt& s);

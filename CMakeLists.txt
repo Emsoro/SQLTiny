@@ -24,6 +24,7 @@ set(SQLTINY_SOURCES
   src/storage/snapshot.cpp
   src/catalog/catalog.cpp
   src/core/session.cpp
+  src/core/transaction.cpp
   src/executor/expr.cpp
   src/executor/executor.cpp
   src/net/mysql_proto.cpp

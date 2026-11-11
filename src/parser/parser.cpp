@@ -109,12 +109,24 @@ ast::StmtPtr Parser::parse_top() {
         case TokenKind::KwUse:       return parse_use();
         case TokenKind::KwShow:      return parse_show();
         case TokenKind::KwSet:       return parse_set();
-        case TokenKind::KwCommit:    return parse_set();  // COMMIT → 占位 (autocommit=ON)
-        case TokenKind::KwRollback:  return parse_set();  // ROLLBACK → 占位
+        case TokenKind::KwCommit: {
+            consume();
+            auto r = std::make_unique<ast::Statement>();
+            r->kind = ast::StmtKind::Commit;
+            return r;
+        }
+        case TokenKind::KwRollback: {
+            consume();
+            auto r = std::make_unique<ast::Statement>();
+            r->kind = ast::StmtKind::Rollback;
+            return r;
+        }
         case TokenKind::KwBegin: {
-            consume();  // consume BEGIN
-            // BEGIN ... END 块在 MySQL 存储过程里,SQLTiny 简化处理
-            return parse_set();
+            consume();
+            // BEGIN ... END 存储过程块暂简化 — 只处理显式 BEGIN 开启事务
+            auto r = std::make_unique<ast::Statement>();
+            r->kind = ast::StmtKind::Begin;
+            return r;
         }
         default:
             throw ParseError(t.line, t.col,

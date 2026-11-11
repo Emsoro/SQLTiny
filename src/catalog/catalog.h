@@ -29,6 +29,10 @@ public:
     storage::Table* get_table(const std::string& name);
     const storage::Table* get_table(const std::string& name) const;
 
+    /// M6: 指定库名拿表 (跨库查询 / TransactionManager 用)
+    storage::Table* get_table_in_db(const std::string& db_name, const std::string& table_name);
+    const storage::Table* get_table_in_db(const std::string& db_name, const std::string& table_name) const;
+
     std::vector<std::string> table_names() const;
 
     /// M5.5 Snapshot 用:遍历所有库 (顺序)

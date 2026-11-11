@@ -184,6 +184,21 @@ const storage::Table* Catalog::get_table(const std::string& name) const {
     return it->second.get();
 }
 
+storage::Table* Catalog::get_table_in_db(const std::string& db_name, const std::string& table_name) {
+    DbTables* db = get_db(lower_name(db_name));
+    if (!db) return nullptr;
+    auto it = db->tables.find(lower_name(table_name));
+    if (it == db->tables.end()) return nullptr;
+    return it->second.get();
+}
+const storage::Table* Catalog::get_table_in_db(const std::string& db_name, const std::string& table_name) const {
+    const DbTables* db = get_db(lower_name(db_name));
+    if (!db) return nullptr;
+    auto it = db->tables.find(lower_name(table_name));
+    if (it == db->tables.end()) return nullptr;
+    return it->second.get();
+}
+
 std::vector<std::string> Catalog::table_names() const {
     std::vector<std::string> out;
     const DbTables* db = current_db();

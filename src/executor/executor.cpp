@@ -148,6 +148,14 @@ ResultSet Executor::exec_insert(const ast::InsertStmt& s) {
             core::Database::instance().wal().append_insert_row(db_name, tbl_part, rid, row);
             core::Database::instance().wal().append_auto_inc_update(db_name, tbl_part,
                                                                     static_cast<uint64_t>(tbl->auto_inc_cursor()));
+
+            // M6: 记录 RowAction (INSERT 是新行, 主键冲突已防, 不需要行锁)
+            if (session_) {
+                auto ra = core::RowAction::make_insert(
+                    session_, create_scn, rid,
+                    db_name, tbl_part, row);
+                session_->addRowAction(std::move(ra));
+            }
         }
         affected++;
         // 更新 last_insert_id(最后一个插入的 auto_increment 值)
@@ -203,6 +211,12 @@ ResultSet Executor::exec_insert(const ast::InsertStmt& s) {
                 core::Database::instance().wal().append_insert_row(db_name, tbl_part, rid, row);
                 core::Database::instance().wal().append_auto_inc_update(db_name, tbl_part,
                                                                         static_cast<uint64_t>(tbl->auto_inc_cursor()));
+
+                // M6: RowAction
+                if (session_) {
+                    session_->addRowAction(core::RowAction::make_insert(
+                        session_, create_scn, rid, db_name, tbl_part, row));
+                }
             }
             affected++;
             // last_insert_id
@@ -281,12 +295,33 @@ ResultSet Executor::exec_update(const ast::UpdateStmt& s) {
     auto [u_db, u_tbl] = split_qname(s.table_name);
     std::string u_db_name = u_db.empty() ? catalog_.current_database() : u_db;
     for (auto& p : pending) {
+        // M6: 拿 EXCLUSIVE 行锁
+        if (session_ && !session_->tryLockRowWrite(*tbl, p.rid)) {
+            r.ok = false; r.mysql_errno = 1213; r.sql_state = "40001";
+            r.error_message = "Lock wait timeout exceeded; try restarting transaction";
+            return r;
+        }
+
         uint64_t del_scn = core::Database::instance().wal().next_scn();
         uint64_t ins_scn = core::Database::instance().wal().next_scn();
+        storage::Row old_row = *tbl->get_row(p.rid);   // 拿旧行存 RowAction
         if (!p.pk_old.empty()) tbl->delete_by_pk(p.pk_old, del_scn);
-        tbl->insert(std::move(p.new_row), nullptr, ins_scn);
+        tbl->insert(p.new_row, nullptr, ins_scn);
         affected++;
         core::Database::instance().wal().append_update_row(u_db_name, u_tbl, p.pk_old, p.new_row);
+
+        // M6: 两个 RowAction (UPDATE = DELETE旧 + INSERT新)
+        if (session_) {
+            auto ra_del = core::RowAction::make_delete(
+                session_, del_scn, p.rid, u_db_name, u_tbl, old_row);
+            ra_del.type = core::RowAction::UPDATE_DELETE;
+            session_->addRowAction(std::move(ra_del));
+
+            auto ra_ins = core::RowAction::make_insert(
+                session_, ins_scn, p.rid, u_db_name, u_tbl, p.new_row);
+            ra_ins.type = core::RowAction::UPDATE_INSERT;
+            session_->addRowAction(std::move(ra_ins));
+        }
     }
 
     r.affected_rows = affected;
@@ -324,6 +359,13 @@ ResultSet Executor::exec_delete(const ast::DeleteStmt& s) {
     auto [d_db, d_tbl] = split_qname(s.table_name);
     std::string d_db_name = d_db.empty() ? catalog_.current_database() : d_db;
     for (int64_t rid : to_delete) {
+        // M6: 拿 EXCLUSIVE 行锁
+        if (session_ && !session_->tryLockRowWrite(*tbl, rid)) {
+            r.ok = false; r.mysql_errno = 1213; r.sql_state = "40001";
+            r.error_message = "Lock wait timeout exceeded; try restarting transaction";
+            return r;
+        }
+
         auto maybe = tbl->get_row(rid);
         if (!maybe) continue;
         storage::Row pk;
@@ -335,6 +377,12 @@ ResultSet Executor::exec_delete(const ast::DeleteStmt& s) {
         if (!pk.empty()) {
             uint64_t del_scn = core::Database::instance().wal().next_scn();
             tbl->delete_by_pk(pk, del_scn);
+
+            // M6: RowAction
+            if (session_) {
+                session_->addRowAction(core::RowAction::make_delete(
+                    session_, del_scn, rid, d_db_name, d_tbl, *maybe));
+            }
         }
         else {
             // 无主键 — 不支持按 row_id 删

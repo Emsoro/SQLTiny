@@ -191,6 +191,7 @@ enum class StmtKind {
     CreateTable, DropTable,
     CreateDatabase, DropDatabase,
     Use, Show, Set,
+    Begin, Commit, Rollback,       // M6 事务
 };
 
 struct Statement {
