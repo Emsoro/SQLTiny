@@ -23,27 +23,6 @@
 
 ## 🏛️ 系统架构
 
-```mermaid
-flowchart LR
-    Client[MySQL Client<br/>PyMySQL · CLI · Navicat · SQLAlchemy]
-    Server[mysql_server<br/>accept() · per-connection thread]
-    Session[Session<br/>autocommit · transactionSCN]
-    Parser[Parser<br/>Lexer tokenize → Recursive Descent → AST]
-    Executor[Executor<br/>bind_session · for_each_visible]
-    TM[TransactionManager<br/>writeLock_ · SCN · RowLockMap]
-    Catalog[Catalog → Table → Row<br/>AVL index · versions_]
-    WAL[WalManager<br/>sql.wal · sql.data snapshot]
-    Client -->|TCP 3306| Server
-    Server --> Session
-    Session --> Parser
-    Parser --> Executor
-    Executor --> TM
-    Executor --> Catalog
-    TM --> Catalog
-    TM --> WAL
-    Catalog --> WAL
-```
-
 ![SQLTiny Architecture](./architecture.svg)
 
 > 🔒 **锁分层**: Catalog.mu_(DDL) → Table.mu_ shared_lock(SELECT 多读者并行) / unique_lock(DML 独占) → RowLockMap(行级冲突检测) → TransactionManager.writeLock_(提交边界) → WalManager.mu_(WAL 文件读写)
