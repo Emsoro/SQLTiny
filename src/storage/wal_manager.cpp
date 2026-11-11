@@ -123,7 +123,42 @@ void WalManager::close() {
 // ============ Append helpers ============
 // 每条都要构造 record + payload, 然后走 append()
 
+// 每个连接一个线程,一个 Session —— 用 thread_local 指针即可把"当前事务的 WAL 缓冲"
+// 从 Session 传到任意深度的 Executor 调用,不需要给所有 append helper 增加参数。
+static thread_local std::vector<persist::WalRecord>* t_txn_buffer = nullptr;
+
+static bool is_row_dml(persist::RecordType t) {
+    using persist::RecordType;
+    return t == RecordType::InsertRow || t == RecordType::DeleteRow ||
+           t == RecordType::UpdateRow || t == RecordType::AutoIncUpdate;
+}
+
+void WalManager::set_thread_txn_buffer(std::vector<persist::WalRecord>* buf) {
+    t_txn_buffer = buf;
+}
+
+std::vector<persist::WalRecord>* WalManager::thread_txn_buffer() {
+    return t_txn_buffer;
+}
+
+bool WalManager::flush_txn_buffer(std::vector<persist::WalRecord>& buf) {
+    std::lock_guard<std::mutex> g(mu_);
+    bool ok = true;
+    if (writer_ && writer_->is_open()) {
+        for (auto& rec : buf) {
+            if (!writer_->append(rec)) ok = false;
+        }
+    }
+    buf.clear();
+    return ok;
+}
+
 bool WalManager::append(const persist::WalRecord& rec) {
+    // 未提交事务的行 DML 先攒着;DDL/Catalog 记录仍立即写(DDL 不参与事务回滚)
+    if (t_txn_buffer && is_row_dml(rec.type)) {
+        t_txn_buffer->push_back(rec);
+        return true;
+    }
     std::lock_guard<std::mutex> g(mu_);
     if (!writer_ || !writer_->is_open()) return false;
     return writer_->append(rec);

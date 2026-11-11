@@ -4,6 +4,8 @@
 #include "storage/table.h"
 #include <mutex>
 #include <algorithm>
+#include <limits>
+#include <utility>
 
 namespace sqltiny::core {
 
@@ -74,13 +76,31 @@ void TransactionManager::release_all_locks_for_session(Session* s) {
 // ============================================================
 uint64_t TransactionManager::begin_transaction(Session* s) {
     std::lock_guard<std::mutex> g(writeLock_);
-    uint64_t scn = next_scn();    // 用内部 SCN, 与 WAL 的 next_scn 独立 (可以先保持 WAL 也能拿到)
-    // 实际 SQLTiny 第一版: 让 TransactionManager 分配 SCN, WAL 从同源头取
     (void)s;
-    // 先保持 WAL 作为 SCN 源头, 避免两套 SCN 计数器
-    uint64_t wal_scn = sqltiny::core::Database::instance().wal().next_scn();
-    live_tx_scns_.push_back(wal_scn);
-    return wal_scn;
+    // SCN 只有 WAL 一套计数器,避免两套 SCN 造成可见性错乱
+    uint64_t scn = Database::instance().wal().next_scn();
+    live_tx_scns_.push_back(scn);
+    return scn;
+}
+
+// ============================================================
+// 快照隔离的提交时冲突检测
+// ============================================================
+bool TransactionManager::has_snapshot_conflict(Session* s) const {
+    // HSQLDB 2.7.4:REPEATABLE READ / SERIALIZABLE 在 MVCC 下等价 (SNAPSHOT ISOLATION),
+    // 冲突时不等待重做,直接 X_40501 中止事务。READ COMMITTED 不做这个检查。
+    if (s->isolationLevel != ast::IsolationLevel::RepeatableRead &&
+        s->isolationLevel != ast::IsolationLevel::Serializable) return false;
+    for (auto& ctxn : committed_queue_) {
+        if (ctxn.owner == s || ctxn.commitSCN <= s->transactionSCN) continue;
+        for (auto& other : ctxn.actions)
+            for (auto& mine : s->row_actions_)
+                // rowId 是表内局部编号,必须同时比较库/表,避免跨表误判
+                if (other.rowId == mine.rowId &&
+                    other.dbName == mine.dbName &&
+                    other.tableName == mine.tableName) return true;
+    }
+    return false;
 }
 
 // ============================================================
@@ -89,102 +109,75 @@ uint64_t TransactionManager::begin_transaction(Session* s) {
 bool TransactionManager::commit_transaction(Session* s) {
     std::lock_guard<std::mutex> g(writeLock_);
 
-    // 1. 冲突检测: 检查已提交事务里有没有同 rowId 的写操作冲突
-    //    由于 SQLTiny 当前没有持久化 RowAction 队列, 第一版简化 —
-    //    RowAction 的 rowId 冲突检测只查 committed_queue_
-    //    实际上 writeLock_ 串行化了 begin/commit, 所以两个事务不会同时 commit
-    //    行锁冲突已经在 try_lock_row_write 里解决过了
-    (void)s;
+    // 1. 冲突检测(返回 false 由 Session 转成 40001 并整体回滚)
+    if (has_snapshot_conflict(s)) return false;
 
-    // 2. 分配 commitSCN
-    uint64_t commitSCN = sqltiny::core::Database::instance().wal().next_scn();
+    // 2. 分配 commitSCN —— 行版本只有到这一步才对其它会话可见
+    uint64_t commitSCN = Database::instance().wal().next_scn();
 
-    // 3. 把 session 的 row_actions_ 打上 commitSCN, 应用到 Table 版本链
-    //    注意: session 在 header 里声明了但 transaction.h 只前向声明,
-    //    我们用友元或直接在实现里 include session.h
+    // 3. finalize 行版本 + 记录已提交事务(供后续快照冲突检测)
+    for (auto& a : s->row_actions_) a.commitSCN = commitSCN;
     apply_commit_to_tables(s->row_actions_, commitSCN);
-
-    // 4. WAL 追加已有逻辑(Executor 已经在写 WAL 了, commit 时不需要额外 WAL record
-    //    第一版简化 — commit 不写额外 WAL record)
-
-    // 5. 放到 committedQueue, 等过期 merge
     if (!s->row_actions_.empty()) {
-        committed_queue_.push_back(s->row_actions_);
+        committed_queue_.push_back(CommittedTxn{commitSCN, s, s->row_actions_});
     }
 
-    // 6. 释放所有 session 的行锁
-    //    (在 writeLock_ 外释放, 避免死锁)
-
-    // 7. 从 live queue 移除 + merge 过期
-    end_transaction(s);
-
-    // 8. 释放行锁 — 挪到 writeLock_ 外做
-    // 这里先释放, 简化
+    // 4. 释放行锁 + 从 live 队列移除
     release_all_locks_for_session(s);
-
+    end_transaction(s);
     return true;
 }
 
 // ============================================================
-// rollback_transaction
+// rollback_transaction / rollback_to_savepoint
 // ============================================================
 void TransactionManager::rollback_transaction(Session* s) {
     std::lock_guard<std::mutex> g(writeLock_);
-
-    // 回滚版本链:
     apply_rollback_to_tables(s->row_actions_);
-
-    // rollback 不进 committed_queue (它没 commitSCN)
-    end_transaction(s);
-
-    // 释放锁
     release_all_locks_for_session(s);
+    end_transaction(s);
+}
+
+void TransactionManager::rollback_to_savepoint(Session* s, size_t action_index) {
+    std::lock_guard<std::mutex> g(writeLock_);
+    if (action_index >= s->row_actions_.size()) return;
+    std::vector<RowAction> tail(s->row_actions_.begin() + action_index,
+                                s->row_actions_.end());
+    apply_rollback_to_tables(tail);   // 逆序撤销
+    s->row_actions_.erase(s->row_actions_.begin() + action_index,
+                          s->row_actions_.end());
+    // 释放被撤销行上的锁(简化:其它仍存活的写锁随后由本事务继续持有)
+    for (auto& a : tail) {
+        auto* tbl = Database::instance().catalog().get_table_in_db(a.dbName, a.tableName);
+        if (tbl) unlock_row_write(*tbl, a.rowId, s);
+    }
 }
 
 // ============================================================
 // apply_commit_to_tables / apply_rollback_to_tables
 // ============================================================
-void TransactionManager::apply_commit_to_tables(const std::vector<RowAction>& actions, uint64_t commitSCN) {
-    auto& db = sqltiny::core::Database::instance();
+void TransactionManager::apply_commit_to_tables(const std::vector<RowAction>& actions,
+                                               uint64_t commitSCN) {
+    auto& db = Database::instance();
     for (auto& a : actions) {
         storage::Table* tbl = db.catalog().get_table_in_db(a.dbName, a.tableName);
         if (!tbl) continue;
-
-        if (a.type == RowAction::DELETE || a.type == RowAction::UPDATE_DELETE) {
-            // 标记该行 deleteSCN = commitSCN
-            // 先找 row_id 对应的版本信息
-            auto vi = tbl->get_version(a.rowId);
-            vi.deleteSCN = commitSCN;
-            tbl->set_version(a.rowId, vi);
-        }
-        if (a.type == RowAction::INSERT || a.type == RowAction::UPDATE_INSERT) {
-            // 标记该行 createSCN = commitSCN
-            auto vi = tbl->get_version(a.rowId);
-            vi.createSCN = commitSCN;
-            tbl->set_version(a.rowId, vi);
-        }
+        bool is_delete = (a.type == RowAction::DELETE || a.type == RowAction::UPDATE_DELETE);
+        tbl->finalize_commit(a.rowId, commitSCN, is_delete);
     }
 }
 
 void TransactionManager::apply_rollback_to_tables(const std::vector<RowAction>& actions) {
-    auto& db = sqltiny::core::Database::instance();
-    for (auto& a : actions) {
+    auto& db = Database::instance();
+    // 必须逆序:同一行可能先 INSERT 再 DELETE,或 UPDATE 产生一删一插
+    for (auto it = actions.rbegin(); it != actions.rend(); ++it) {
+        auto& a = *it;
         storage::Table* tbl = db.catalog().get_table_in_db(a.dbName, a.tableName);
         if (!tbl) continue;
-
         if (a.type == RowAction::INSERT || a.type == RowAction::UPDATE_INSERT) {
-            // 未提交的 INSERT: 从 row_map_ 物理删除
-            // Table 没有直接按 row_id 删除的接口 — 我们用 delete_by_pk + 设 deleteSCN=actionSCN
-            // 但更简单: 直接调 delete_by_pk(传入 pk 列, deleteSCN=0 表示物理删)
-            // 第一版: delete_by_pk 里如果 deleteSCN=0 则直接 erase
-            // 这里我们把 commitSCN 设成 actionSCN - 1 使得这行永远不可见
-            tbl->delete_by_pk(a.row, /*deleteSCN=*/0);  // 物理删(对于 rollback 的 INSERT)
-        }
-        if (a.type == RowAction::DELETE || a.type == RowAction::UPDATE_DELETE) {
-            // 未提交的 DELETE: 恢复可见性 (deleteSCN 设回 0)
-            auto vi = tbl->get_version(a.rowId);
-            vi.deleteSCN = 0;   // 恢复可见
-            tbl->set_version(a.rowId, vi);
+            tbl->erase_row(a.rowId);        // 未提交插入 → 物理移除(含主键索引)
+        } else {
+            tbl->restore_row(a.rowId);      // 未提交删除 → 恢复可见 + 主键索引
         }
     }
 }
@@ -193,30 +186,19 @@ void TransactionManager::apply_rollback_to_tables(const std::vector<RowAction>& 
 // end_transaction + merge_expired
 // ============================================================
 void TransactionManager::end_transaction(Session* s) {
-    // 从 live 队列移除对应 SCN
-    // 注意: 我们不知道这个 session 的 transactionSCN 是多少
-    // 简化: live_tx_scns_ 是每个 session begin 时 push 的, 我们需要能找到它
-    // 解决方案: 在 Session 里存 transactionSCN, 然后这里查找
     auto tx_scn = s->transactionSCN;
     auto it = std::find(live_tx_scns_.begin(), live_tx_scns_.end(), tx_scn);
     if (it != live_tx_scns_.end()) live_tx_scns_.erase(it);
-
     merge_expired_transactions();
 }
 
 void TransactionManager::merge_expired_transactions() {
-    // 所有 commitSCN < 当前最小 live_tx_scn 的 committed actions 都可以 finalize 了
-    // 因为没有还在等那个 SCN 快照的事务了
-    while (!committed_queue_.empty() && !live_tx_scns_.empty()) {
-        uint64_t min_live = live_tx_scns_.front();
-        uint64_t commit_scn = committed_queue_.front()[0].commitSCN;
-        if (commit_scn < min_live) {
-            // finalize 这些 actions — 实际上 commit 时已经 apply 过了
-            // 这里只是从 committed_queue_ 移除
-            committed_queue_.pop_front();
-        } else {
-            break;
-        }
+    // 没有活跃事务时,所有已提交 action 都不再需要为快照冲突检测保留
+    uint64_t min_live = live_tx_scns_.empty()
+                      ? std::numeric_limits<uint64_t>::max()
+                      : live_tx_scns_.front();
+    while (!committed_queue_.empty() && committed_queue_.front().commitSCN < min_live) {
+        committed_queue_.pop_front();
     }
 }
 

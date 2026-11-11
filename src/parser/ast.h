@@ -185,6 +185,24 @@ struct DropDatabaseStmt {
     bool if_exists = false;
 };
 
+// ---------- 事务 ----------
+/// 隔离级别常量与 HSQLDB 2.7.4 SessionInterface.TX_* 对齐 (1/2/4/8)
+enum class IsolationLevel : int {
+    ReadUncommitted = 1,
+    ReadCommitted   = 2,
+    RepeatableRead  = 4,
+    Serializable    = 8,
+};
+
+/// SET 语句中真正需要语义的部分 (其余一律兼容忽略)
+struct SetStmt {
+    enum class Kind { Ignored, AutoCommit, IsolationLevel };
+    Kind kind = Kind::Ignored;
+    bool autocommit_value = true;
+    int  isolation_level  = 0;     // IsolationLevel 的整数值, 0 = 未指定
+    bool session_default  = true;  // true=会话默认; false=只对下一个事务生效
+};
+
 // ---------- 统一 Statement variant ----------
 enum class StmtKind {
     Select, Insert, Update, Delete,
@@ -192,6 +210,8 @@ enum class StmtKind {
     CreateDatabase, DropDatabase,
     Use, Show, Set,
     Begin, Commit, Rollback,       // M6 事务
+    StartTransaction,              // START TRANSACTION (BEGIN 别名, 可带隔离级别)
+    Savepoint, RollbackToSavepoint, ReleaseSavepoint,
 };
 
 struct Statement {
@@ -208,7 +228,9 @@ struct Statement {
     std::unique_ptr<DropDatabaseStmt>   drop_database_;
     std::unique_ptr<UseStmt>         use_;
     std::unique_ptr<ShowStmt>        show_;
+    std::unique_ptr<SetStmt>         set_;
 
+    std::string savepoint_name;
     std::string raw;
 
     SelectStmt*      as_select()       { return select_.get(); }

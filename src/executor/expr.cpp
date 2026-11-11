@@ -1,4 +1,5 @@
 #include "executor/executor.h"
+#include "core/session.h"
 #include <fmt/format.h>
 #include <algorithm>
 #include <cmath>
@@ -28,6 +29,21 @@ types::Value Executor::eval(const ast::Expression& e, const ExecContext& ctx) co
         case ast::ExprKind::Column: {
             // @@系统变量 拦截
             if (e.column_name.size() >= 2 && e.column_name[0] == '@' && e.column_name[1] == '@') {
+                // 事务相关变量必须反映真实会话状态(之前是硬编码 REPEATABLE-READ / ON)
+                if (e.column_name == "@@tx_isolation" ||
+                    e.column_name == "@@session.tx_isolation" ||
+                    e.column_name == "@@session_tx_isolation" ||
+                    e.column_name == "@@transaction_isolation" ||
+                    e.column_name == "@@session.transaction_isolation") {
+                    return types::Value::make_string(
+                        session_ ? session_->isolationName() : std::string("READ-COMMITTED"));
+                }
+                if (e.column_name == "@@autocommit" ||
+                    e.column_name == "@@session.autocommit" ||
+                    e.column_name == "@@session_autocommit") {
+                    return types::Value::make_string(
+                        (session_ && !session_->autocommit) ? "OFF" : "ON");
+                }
                 static const std::unordered_map<std::string, std::string> vars = {
                     {"@@tx_isolation","REPEATABLE-READ"},{"@@session_tx_isolation","REPEATABLE-READ"},
                     {"@@autocommit","ON"},{"@@session_autocommit","ON"},

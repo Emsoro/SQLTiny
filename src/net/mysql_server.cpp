@@ -31,7 +31,8 @@ bool send_all(int fd, const uint8_t* p, size_t n);
 bool recv_all(int fd, uint8_t* p, size_t n);
 std::vector<uint8_t> encode_mysql_packet(const std::vector<uint8_t>& payload, uint8_t seq);
 std::vector<uint8_t> read_mysql_packet(int socket_fd, uint8_t& seq_out);
-bool send_mysql_response(int fd, const executor::ResultSet& rs, uint8_t& seq, bool deprecate_eof);
+bool send_mysql_response(int fd, const executor::ResultSet& rs, uint8_t& seq,
+                         bool deprecate_eof, uint16_t status_flags);
 
 namespace {
 
@@ -112,6 +113,13 @@ void handle_connection(int client_fd, const ServerConfig& cfg, uint32_t thread_i
         session.current_database = hr.database;
     }
 
+    // 事务状态位:让客户端能正确读到 autocommit / in-transaction (MySQL status flags)
+    auto status_flags = [&]() -> uint16_t {
+        uint16_t f = session.autocommit ? SERVER_STATUS_AUTOCOMMIT : 0;
+        if (session.isInTransaction()) f |= SERVER_STATUS_IN_TRANS;
+        return f;
+    };
+
     // 5. 命令循环
     bool deprecate_eof = (hr.client_cap & CLIENT_DEPRECATE_EOF) != 0;
     while (true) {
@@ -129,7 +137,7 @@ void handle_connection(int client_fd, const ServerConfig& cfg, uint32_t thread_i
             case COM_QUIT: return;
 
             case COM_PING: {
-                auto r = encode_ok_packet(0, 0, SERVER_STATUS_AUTOCOMMIT, 0, "");
+                auto r = encode_ok_packet(0, 0, status_flags(), 0, "");
                 auto p = encode_mysql_packet(r, seq++);
                 if (!send_all(client_fd, p.data(), p.size())) return;
                 break;
@@ -137,7 +145,7 @@ void handle_connection(int client_fd, const ServerConfig& cfg, uint32_t thread_i
             case COM_INIT_DB: {
                 std::string db_name(reinterpret_cast<const char*>(cmd_payload.data() + 1), cmd_payload.size() - 1);
                 session.current_database = db_name;
-                auto r = encode_ok_packet(0, 0, SERVER_STATUS_AUTOCOMMIT, 0, "");
+                auto r = encode_ok_packet(0, 0, status_flags(), 0, "");
                 auto p = encode_mysql_packet(r, seq++);
                 if (!send_all(client_fd, p.data(), p.size())) return;
                 break;
@@ -145,14 +153,14 @@ void handle_connection(int client_fd, const ServerConfig& cfg, uint32_t thread_i
             case COM_QUERY: {
                 std::string sql(reinterpret_cast<const char*>(cmd_payload.data() + 1), cmd_payload.size() - 1);
                 auto result = session.execute(sql);
-                if (!send_mysql_response(client_fd, result, seq, deprecate_eof)) return;
+                if (!send_mysql_response(client_fd, result, seq, deprecate_eof, status_flags())) return;
                 break;
             }
             case COM_FIELD_LIST: {
                 // 简化:返回 SHOW COLUMNS 结果
                 std::string table_name(reinterpret_cast<const char*>(cmd_payload.data() + 1), cmd_payload.size() - 1);
                 auto result = session.execute("SHOW COLUMNS FROM " + table_name);
-                if (!send_mysql_response(client_fd, result, seq, deprecate_eof)) return;
+                if (!send_mysql_response(client_fd, result, seq, deprecate_eof, status_flags())) return;
                 break;
             }
             default: {

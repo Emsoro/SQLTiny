@@ -209,7 +209,7 @@ static std::vector<uint8_t> encode_column_def(
 }
 
 std::vector<std::vector<uint8_t>> encode_result_set(
-        const executor::ResultSet& rs, bool deprecate_eof) {
+        const executor::ResultSet& rs, bool deprecate_eof, uint16_t status_flags) {
     std::vector<std::vector<uint8_t>> packets;
 
     if (!rs.ok) {
@@ -220,7 +220,7 @@ std::vector<std::vector<uint8_t>> encode_result_set(
     // OK packet (DML 无结果集)
     if (rs.column_names.empty()) {
         packets.push_back(encode_ok_packet(rs.affected_rows, rs.last_insert_id,
-            SERVER_STATUS_AUTOCOMMIT, rs.warnings));
+            status_flags, rs.warnings));
         return packets;
     }
 
@@ -236,7 +236,7 @@ std::vector<std::vector<uint8_t>> encode_result_set(
     }
 
     // EOF after columns(如果没有 deprecate_eof)
-    if (!deprecate_eof) packets.push_back(encode_eof_packet(0, 0));
+    if (!deprecate_eof) packets.push_back(encode_eof_packet(0, status_flags));
 
     // Rows
     for (size_t row_idx = 0; row_idx < rs.rows.size(); ++row_idx) {
@@ -257,17 +257,18 @@ std::vector<std::vector<uint8_t>> encode_result_set(
 
     // Last packet: OK 或 EOF 标记结束
     if (deprecate_eof) {
-        packets.push_back(encode_ok_packet(0, 0, SERVER_STATUS_AUTOCOMMIT, 0));
+        packets.push_back(encode_ok_packet(0, 0, status_flags, 0));
     } else {
-        packets.push_back(encode_eof_packet(0, SERVER_STATUS_AUTOCOMMIT));
+        packets.push_back(encode_eof_packet(0, status_flags));
     }
     return packets;
 }
 
 // ======== 工具:发送完整 MySQL 响应 ========
 
-bool send_mysql_response(int fd, const executor::ResultSet& rs, uint8_t& seq, bool deprecate_eof) {
-    auto packets = encode_result_set(rs, deprecate_eof);
+bool send_mysql_response(int fd, const executor::ResultSet& rs, uint8_t& seq,
+                         bool deprecate_eof, uint16_t status_flags) {
+    auto packets = encode_result_set(rs, deprecate_eof, status_flags);
     for (auto& p : packets) {
         auto wrapped = encode_mysql_packet(p, seq++);
         if (!send_all(fd, wrapped.data(), wrapped.size())) return false;

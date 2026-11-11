@@ -73,7 +73,7 @@ enum class TokenKind : uint16_t {
 
     // TCL
     KwBegin, KwCommit, KwRollback, KwSavepoint, KwRelease,
-    KwTransaction, KwWork,
+    KwTransaction, KwWork, KwStart, KwTo,
 
     // Show / Misc
     KwShow, KwTables, KwDatabases, KwColumns, KwUse, KwDescribe, KwExplain, KwCase, KwWhen, KwThen,

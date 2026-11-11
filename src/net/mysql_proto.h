@@ -34,6 +34,7 @@ constexpr uint8_t MYSQL_PACKET_EOF          = 0xfe;
 constexpr uint8_t MYSQL_PACKET_TEXT_RESULT  = 0x01;
 
 // server status flags
+constexpr uint16_t SERVER_STATUS_IN_TRANS   = 0x0001;
 constexpr uint16_t SERVER_STATUS_AUTOCOMMIT = 0x0002;
 
 // field flags
@@ -160,7 +161,9 @@ std::vector<uint8_t> encode_err_packet(uint16_t err, std::string_view sql_state,
 std::vector<uint8_t> encode_eof_packet(uint16_t warnings, uint16_t status_flags);
 
 /// ResultSet 编码:text result protocol
-std::vector<std::vector<uint8_t>> encode_result_set(const executor::ResultSet& rs, bool deprecate_eof);
+std::vector<std::vector<uint8_t>> encode_result_set(
+    const executor::ResultSet& rs, bool deprecate_eof,
+    uint16_t status_flags = SERVER_STATUS_AUTOCOMMIT);
 
 // 辅助
 std::string value_to_text(const sqltiny::types::Value& v);
@@ -177,6 +180,8 @@ bool recv_all(int fd, uint8_t* p, size_t n);
 std::vector<uint8_t> read_mysql_packet(int socket_fd, uint8_t& seq_out);
 std::vector<uint8_t> encode_mysql_packet(const std::vector<uint8_t>& payload, uint8_t seq);
 std::vector<uint8_t> encode_handshake_v10(uint32_t tid, const std::vector<uint8_t>& auth);
-bool send_mysql_response(int fd, const executor::ResultSet& rs, uint8_t& seq, bool deprecate_eof);
+bool send_mysql_response(int fd, const executor::ResultSet& rs, uint8_t& seq,
+                         bool deprecate_eof,
+                         uint16_t status_flags = SERVER_STATUS_AUTOCOMMIT);
 
 } // namespace sqltiny::net

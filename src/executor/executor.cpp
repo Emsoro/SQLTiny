@@ -16,6 +16,17 @@ static std::pair<std::string, std::string> split_qname(const std::string& q) {
     return {q.substr(0, dot), q.substr(dot + 1)};
 }
 
+// MVCC 读上下文:READ COMMITTED 取语句级 SCN,RR/SERIALIZABLE 取事务快照 SCN
+static uint64_t query_scn(core::Session* s) {
+    return s ? s->readSCN() : core::Database::instance().wal().current_scn();
+}
+static uint64_t reader_txn(core::Session* s) {
+    return s ? s->txnId() : 0;
+}
+static uint64_t writer_txn(core::Session* s) {
+    return (s && s->isInTransaction()) ? s->txnId() : 0;
+}
+
 ResultSet Executor::execute(const ast::Statement& stmt) {
     ResultSet r;
     switch (stmt.kind) {
@@ -136,7 +147,7 @@ ResultSet Executor::exec_insert(const ast::InsertStmt& s) {
 
         int64_t rid = -1;
         uint64_t create_scn = core::Database::instance().wal().next_scn();
-        if (!tbl->insert(row, &rid, create_scn)) {
+        if (!tbl->insert(row, &rid, create_scn, writer_txn(session_))) {
             r.ok = false; r.mysql_errno = 1062; r.sql_state = "23000";
             r.error_message = "Duplicate entry for PRIMARY KEY";
             return r;
@@ -199,7 +210,7 @@ ResultSet Executor::exec_insert(const ast::InsertStmt& s) {
             }
             int64_t rid = -1;
             uint64_t create_scn = core::Database::instance().wal().next_scn();
-            if (!tbl->insert(row, &rid, create_scn)) {
+            if (!tbl->insert(row, &rid, create_scn, writer_txn(session_))) {
                 r.ok = false; r.mysql_errno = 1062; r.sql_state = "23000";
                 r.error_message = "Duplicate entry for PRIMARY KEY";
                 return r;
@@ -260,7 +271,7 @@ ResultSet Executor::exec_update(const ast::UpdateStmt& s) {
     // 先收集所有要改的行 (不能在 for_each 里 modify AVL)
     struct Pending { int64_t rid; storage::Row new_row; storage::Row pk_old; };
     std::vector<Pending> pending;
-    uint64_t qscn = core::Database::instance().wal().current_scn();
+    uint64_t qscn = query_scn(session_);
     tbl->for_each_visible(qscn, [&](int64_t rid, const storage::Row& row) {
         ExecContext ctx{ catalog_, s.table_name, {}, row };
         ctx.col_index.clear();
@@ -289,7 +300,7 @@ ResultSet Executor::exec_update(const ast::UpdateStmt& s) {
             }
         pending.push_back({ rid, std::move(new_row), std::move(pk_old) });
         return true;
-    });
+    }, reader_txn(session_));
 
     // 循环外改
     auto [u_db, u_tbl] = split_qname(s.table_name);
@@ -305,12 +316,22 @@ ResultSet Executor::exec_update(const ast::UpdateStmt& s) {
         uint64_t del_scn = core::Database::instance().wal().next_scn();
         uint64_t ins_scn = core::Database::instance().wal().next_scn();
         storage::Row old_row = *tbl->get_row(p.rid);   // 拿旧行存 RowAction
-        if (!p.pk_old.empty()) tbl->delete_by_pk(p.pk_old, del_scn);
-        tbl->insert(p.new_row, nullptr, ins_scn);
+        uint64_t wtxn = writer_txn(session_);
+        if (!p.pk_old.empty()) tbl->delete_by_pk(p.pk_old, del_scn, wtxn);
+        int64_t new_rid = -1;
+        if (!tbl->insert(p.new_row, &new_rid, ins_scn, wtxn)) {
+            // 目标主键已存在:把刚才的逻辑删除还原,保证语句原子性
+            tbl->restore_row(p.rid);
+            r.ok = false; r.mysql_errno = 1062; r.sql_state = "23000";
+            r.error_message = "Duplicate entry for PRIMARY KEY";
+            return r;
+        }
         affected++;
         core::Database::instance().wal().append_update_row(u_db_name, u_tbl, p.pk_old, p.new_row);
 
         // M6: 两个 RowAction (UPDATE = DELETE旧 + INSERT新)
+        // 关键:两条 action 必须各自指向自己真正影响的 row_id,
+        // 否则 commit/rollback 会把版本信息打在错误的行上。
         if (session_) {
             auto ra_del = core::RowAction::make_delete(
                 session_, del_scn, p.rid, u_db_name, u_tbl, old_row);
@@ -318,7 +339,7 @@ ResultSet Executor::exec_update(const ast::UpdateStmt& s) {
             session_->addRowAction(std::move(ra_del));
 
             auto ra_ins = core::RowAction::make_insert(
-                session_, ins_scn, p.rid, u_db_name, u_tbl, p.new_row);
+                session_, ins_scn, new_rid, u_db_name, u_tbl, p.new_row);
             ra_ins.type = core::RowAction::UPDATE_INSERT;
             session_->addRowAction(std::move(ra_ins));
         }
@@ -341,7 +362,7 @@ ResultSet Executor::exec_delete(const ast::DeleteStmt& s) {
 
     // 收集要删的 row_id(不能在 for_each 里删)
     std::vector<int64_t> to_delete;
-    uint64_t dqscn = core::Database::instance().wal().current_scn();
+    uint64_t dqscn = query_scn(session_);
     tbl->for_each_visible(dqscn, [&](int64_t rid, const storage::Row& row) {
         if (!s.where) { to_delete.push_back(rid); return true; }
         ExecContext ctx{ catalog_, s.table_name, {}, row };
@@ -353,7 +374,7 @@ ResultSet Executor::exec_delete(const ast::DeleteStmt& s) {
         auto v = eval(*s.where, ctx);
         if (to_bool(v)) to_delete.push_back(rid);
         return true;
-    });
+    }, reader_txn(session_));
 
     int affected = 0;
     auto [d_db, d_tbl] = split_qname(s.table_name);
@@ -376,7 +397,7 @@ ResultSet Executor::exec_delete(const ast::DeleteStmt& s) {
             }
         if (!pk.empty()) {
             uint64_t del_scn = core::Database::instance().wal().next_scn();
-            tbl->delete_by_pk(pk, del_scn);
+            tbl->delete_by_pk(pk, del_scn, writer_txn(session_));
 
             // M6: RowAction
             if (session_) {
@@ -535,14 +556,15 @@ ResultSet Executor::exec_select(const ast::SelectStmt& s) {
     std::vector<storage::Row> candidate_rows;
 
     // 先拿主表所有行 (MVCC:querySCN)
-    uint64_t sqscn = core::Database::instance().wal().current_scn();
+    uint64_t sqscn = query_scn(session_);
+    uint64_t rtxn = reader_txn(session_);
     std::vector<storage::Row> left_rows;
-    tbl->for_each_visible(sqscn, [&](int64_t, const storage::Row& row) { left_rows.push_back(row); return true; });
+    tbl->for_each_visible(sqscn, [&](int64_t, const storage::Row& row) { left_rows.push_back(row); return true; }, rtxn);
 
     for (auto& jc : s.joins) {
         auto* jtbl = catalog_.get_table(jc.table_name);
         std::vector<storage::Row> right_rows;
-        jtbl->for_each_visible(sqscn, [&](int64_t, const storage::Row& row) { right_rows.push_back(row); return true; });
+        jtbl->for_each_visible(sqscn, [&](int64_t, const storage::Row& row) { right_rows.push_back(row); return true; }, rtxn);
 
         std::vector<storage::Row> new_left;
         for (auto& l : left_rows) {
@@ -1104,7 +1126,7 @@ ResultSet Executor::exec_show_variables(const std::string& pattern) {
     r.column_names = { "Variable_name", "Value" };
     r.column_types = { types::SqlType::Varchar, types::SqlType::Varchar };
     static const std::pair<const char*, const char*> kvs[] = {
-        {"autocommit", "ON"}, {"character_set_client", "utf8mb4"},
+        {"character_set_client", "utf8mb4"},
         {"character_set_connection", "utf8mb4"}, {"character_set_database", "utf8mb4"},
         {"character_set_server", "utf8mb4"}, {"character_set_results", "utf8mb4"},
         {"collation_connection", "utf8mb4_general_ci"},
@@ -1133,8 +1155,15 @@ ResultSet Executor::exec_show_variables(const std::string& pattern) {
         if (p.size() >= 1 && p.front() == '%') return std::string(name).ends_with(p.substr(1));
         return std::string(name) == p;
     };
-    for (auto& [k, v] : kvs)
-        if (match(k)) r.rows.push_back({ types::Value::make_string(k), types::Value::make_string(v) });
+    std::vector<std::pair<std::string, std::string>> vars;
+    vars.push_back({"autocommit", (session_ && !session_->autocommit) ? "OFF" : "ON"});
+    std::string iso = session_ ? session_->isolationName() : std::string("READ-COMMITTED");
+    vars.push_back({"tx_isolation", iso});
+    vars.push_back({"transaction_isolation", iso});
+    for (auto& [k, v] : kvs) vars.push_back({k, v});
+    for (auto& [k, v] : vars)
+        if (match(k.c_str()))
+            r.rows.push_back({ types::Value::make_string(k), types::Value::make_string(v) });
     return r;
 }
 

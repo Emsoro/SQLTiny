@@ -31,6 +31,21 @@
 
 ---
 
+## 🔒 四个隔离级别(参考 HSQLDB 2.7.4)
+
+SQL 语法:`SET SESSION TRANSACTION ISOLATION LEVEL <级别>`(会话默认)、`SET TRANSACTION ISOLATION LEVEL <级别>`(仅下一事务)、`START TRANSACTION ISOLATION LEVEL <级别>`、`SET SESSION tx_isolation='...'`。`SELECT @@tx_isolation` / `SHOW VARIABLES LIKE 'tx_isolation'` 返回真实值。
+
+| 请求级别 | 实际生效 | 读快照 | 说明 |
+|---|---|---|---|
+| READ UNCOMMITTED | **READ COMMITTED** | 语句级 | HSQLDB 提升;下一事务级附加只读(写返回 25006) |
+| READ COMMITTED(默认) | READ COMMITTED | 语句级 | 允许不可重复读/幻读 |
+| REPEATABLE READ | **SERIALIZABLE** | 事务级 | HSQLDB 提升,MVCC 下即 SNAPSHOT ISOLATION |
+| SERIALIZABLE | SERIALIZABLE | 事务级 | 陈旧写/写冲突返回 40001(1213) |
+
+四个级别**都不会读到未提交数据**;自己的未提交写只对自己可见。行版本在 commit 时才 `finalize`,未提交的行 DML 缓存在事务里,commit 整体落 WAL、rollback 整体丢弃,因此重启不会复活回滚掉的数据。事务还支持 `SET AUTOCOMMIT=0/1`、`BEGIN/START TRANSACTION`、`COMMIT`、`ROLLBACK`、`SAVEPOINT` / `ROLLBACK TO SAVEPOINT` / `RELEASE SAVEPOINT`。
+
+---
+
 ## 🏗️ 当前进度
 
 | 里程碑 | 状态 | 说明 |
@@ -70,6 +85,8 @@ cmake --build build --config Debug
 | `build/Debug/smoke_m4.exe` | 冒烟测试 | CREATE/DROP DB / USE / SHOW / SET 占位 — **6/6 PASS** |
 | `build/Debug/smoke_m5_wal.exe` | 冒烟测试 | WAL Replay + CRC 校验 + Checkpoint 恢复 — **28/28 PASS** |
 | `build/Debug/smoke_m25_e2e.exe` | E2E 测试 | Winsock 直连 server — **13/13 PASS** |
+| `build/Debug/smoke_m6_isolation.exe` | 隔离级别测试 | 四级别 + 事务/保存点/冲突 — **451/451 PASS** |
+| `tests/test_txn_vs_sqlite.py` | 事务行为对比 | SQLTiny vs SQLite 四级别 + WAL 重启 — **70/70 一致** |
 | `tests/test_full_flow.py` | PyMySQL 全场景 | 建库→建表→插入→查询(含 JOIN/聚合/NULL)→更新→删除→错误路径→删库 — **17/17 PASS** |
 | `tests/test_sqlalchemy.py` | SQLAlchemy 2.x | Engine/Core/ORM/Inspector/持久化重连 — **8/10 PASS**(2 非核心 FAIL:DESCRIBE / SHOW FULL TABLES) |
 | `tests/test_vs_sqlite.py` | 行为对比 | 同一逻辑 SQLTiny vs SQLite 全场景 assert — **全绿** |
@@ -86,6 +103,7 @@ cmake --build build --config Debug
 .\build\Debug\smoke_m3.exe
 .\build\Debug\smoke_m4.exe
 .\build\Debug\smoke_m5_wal.exe
+.\build\Debug\smoke_m6_isolation.exe
 
 # MySQL 协议端到端(C++ Winsock client)
 .\build\Debug\sqltiny_server.exe --port 3306 --user root
@@ -98,6 +116,7 @@ python tests\test_sqlalchemy.py
 python tests\test_vs_sqlite.py
 python tests\test_perf_vs_sqlite.py
 python tests\test_concurrency.py
+python tests\test_txn_vs_sqlite.py   # 自动起停 server,不占用 3306
 ```
 
 ### 测试总览 (C++ 69/69 PASS · Python 5 script PASS)
@@ -197,9 +216,9 @@ SQLTiny 通过 `--data-dir` 指定持久化目录,目录下生成两个文件:
 | **表连接** | INNER JOIN / LEFT JOIN / CROSS JOIN / 多 JOIN 链 | 别名限定列 + LEFT JOIN 保留 NULL 行 |
 | **子查询** | `WHERE col IN (SELECT …)` | 标量子查询 |
 | **SHOW** | `SHOW DATABASES` / `SHOW TABLES` / `SHOW COLUMNS FROM t` / `SHOW CREATE TABLE t` / `SHOW STATUS` / `SHOW VARIABLES [LIKE pattern]` | LIKE 支持 `%xxx%` / `xxx%` / `%xxx` / 精确匹配 |
-| **系统** | `SET NAMES utf8mb4` / `SET AUTOCOMMIT = ON` | 占位实现(满足 SQLAlchemy / PyMySQL 初始化) |
-| **事务** | `BEGIN` / `COMMIT` / `ROLLBACK` | 目前 parser 占位(语义正确但无 undo-log,所有 SQL 在全局 mutex 下串行化)→ M6 P1 完整化 |
-| **并发安全** | `Session::execute` 入口全局 `std::mutex` | 多线程 server 不 crash,但吞吐为 1(每行锁 → M6 P0) |
+| **系统** | `SET NAMES utf8mb4` / `SET AUTOCOMMIT = 0/1` / `SET [SESSION] TRANSACTION ISOLATION LEVEL …` | 真实生效;`@@tx_isolation` / `@@autocommit` 返回会话真实值 |
+| **事务** | `BEGIN` / `START TRANSACTION` / `COMMIT` / `ROLLBACK` / `SAVEPOINT` / `ROLLBACK TO` / `RELEASE` | 四隔离级别 + 行锁 + 事务级 WAL 缓冲,commit 才可见 |
+| **并发安全** | `TransactionManager.writeLock_` + 行锁 + `Table.shared_mutex` | SELECT 不加锁(MVCC 快照),写-写冲突立即 40001 |
 
 ### 已验证 SQL 示例
 
@@ -268,11 +287,13 @@ SQLTiny/
     ├── smoke_m4.cpp           CREATE/DROP DB / USE / SHOW / SET 占位
     ├── smoke_m5_wal.cpp       WAL Replay + CRC + Checkpoint 恢复
     ├── smoke_m25_e2e.cpp      Winsock 直连 server E2E
+    ├── smoke_m6_isolation.cpp 四隔离级别 + 事务/保存点/冲突
     ├── test_full_flow.py      PyMySQL 全场景用户测试
     ├── test_sqlalchemy.py     SQLAlchemy 2.x Engine/Core/ORM/Inspector
     ├── test_vs_sqlite.py      SQLTiny vs SQLite 行为对比
     ├── test_perf_vs_sqlite.py 大数据量 INSERT + JOIN 性能对比
-    └── test_concurrency.py    多线程并发读写(全局 mutex 验证)
+    ├── test_concurrency.py    多线程并发读写
+    └── test_txn_vs_sqlite.py  四隔离级别 + 事务结果与 SQLite 对比、WAL 重启验证
 ```
 
 ---

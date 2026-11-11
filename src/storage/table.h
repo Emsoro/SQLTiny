@@ -43,10 +43,14 @@ public:
 
     /// 插入一行。成功返回 true;主键冲突返回 false
     /// createSCN = 0 表示"立即可见" (M1-M4 兼容,隐式 active)
-    bool insert(const Row& row, int64_t* out_row_id = nullptr, uint64_t createSCN = 0);
+    /// pendingTxn != 0 表示这是某个事务未提交的插入 —— 其它会话任何隔离级别都不可见
+    bool insert(const Row& row, int64_t* out_row_id = nullptr,
+                uint64_t createSCN = 0, uint64_t pendingTxn = 0);
 
     /// 按主键删除 (deleteSCN = 0 表示"立即物理删除" —— M1-M4 兼容)
-    bool delete_by_pk(const Row& pk_values, uint64_t deleteSCN = 0);
+    /// pendingTxn != 0 表示未提交删除 —— 其它会话仍按已提交版本看到该行
+    bool delete_by_pk(const Row& pk_values, uint64_t deleteSCN = 0,
+                      uint64_t pendingTxn = 0);
 
     /// 按主键查找
     std::optional<int64_t> find_row_id_by_pk(const Row& pk_values) const;
@@ -58,10 +62,13 @@ public:
 
     /// M5.6 MVCC:按 querySCN 只遍历 querySCN 可见的版本
     /// querySCN=0 时退化为 for_each() (兼容旧调用)
-    void for_each_visible(uint64_t querySCN, const RowCallback& cb) const;
+    /// readerTxn:读事务 id。同一事务内自己的未提交写可见,其它事务的未提交写不可见
+    void for_each_visible(uint64_t querySCN, const RowCallback& cb,
+                          uint64_t readerTxn = 0) const;
 
     /// 所有行 id (只返回物理存在且可见的)
-    std::vector<int64_t> all_row_ids(uint64_t querySCN = 0) const;
+    std::vector<int64_t> all_row_ids(uint64_t querySCN = 0,
+                                     uint64_t readerTxn = 0) const;
 
     size_t row_count() const { return row_map_.size(); }
 
@@ -76,9 +83,22 @@ public:
     int64_t auto_inc_cursor() const { return auto_inc_cursor_; }
 
     /// M5.6 MVCC:行版本元信息读写
-    struct VersionInfo { uint64_t createSCN = 0; uint64_t deleteSCN = 0; };
+    /// 参考 HSQLDB 2.7.4 RowAction.canRead():任何隔离级别都不读未提交数据。
+    /// pendingTxn != 0 的那部分改动只对 owner 事务可见。
+    struct VersionInfo {
+        uint64_t createSCN = 0;
+        uint64_t deleteSCN = 0;
+        uint64_t pendingTxn   = 0;   // 未提交改动所属事务 id, 0 = 已提交
+        bool     pendingInsert = false;
+        bool     pendingDelete = false;
+    };
     VersionInfo get_version(int64_t row_id) const;
     void set_version(int64_t row_id, VersionInfo vi);
+
+    /// 事务提交/回滚原语 (TransactionManager 调用)
+    void finalize_commit(int64_t row_id, uint64_t commitSCN, bool is_delete);
+    void erase_row(int64_t row_id);     // 回滚未提交 INSERT:物理移除
+    void restore_row(int64_t row_id);   // 回滚未提交 DELETE:恢复可见 + 主键索引
 
 private:
     TableDef def_;

@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstring>
 #include <vector>
+#include <limits>
 
 namespace sqltiny::persist {
 
@@ -110,16 +111,19 @@ bool WalSnapshot::_write_to(catalog::Catalog& catalog, FILE* fh, uint64_t wal_of
             std::fwrite(td.data(), 1, td.size(), fh);
 
             // [row_count 4B][Row N]...
-            uint32_t row_cnt = static_cast<uint32_t>(tbl->row_count());
+            // 只写"当前已提交且未删除"的行:逻辑删除的行和未提交事务的行不能进快照,
+            // 否则 checkpoint 之后重启会把它们复活 (MVCC 版本链以快照 SCN 为界)。
+            constexpr uint64_t kAllCommitted = std::numeric_limits<uint64_t>::max();
+            uint32_t row_cnt = static_cast<uint32_t>(tbl->all_row_ids(kAllCommitted, 0).size());
             std::fwrite(&row_cnt, 4, 1, fh);
-            tbl->for_each([&](int64_t row_id, const storage::Row& row) {
+            tbl->for_each_visible(kAllCommitted, [&](int64_t row_id, const storage::Row& row) {
                 // [row_id 8B][Row]
                 auto idb = codec::encode_u64(static_cast<uint64_t>(row_id));
                 auto rb = codec::encode_row(row);
                 std::fwrite(idb.data(), 1, idb.size(), fh);
                 std::fwrite(rb.data(), 1, rb.size(), fh);
                 return true;
-            });
+            }, 0);
 
             // [auto_inc_cursor 8B]
             auto aib = codec::encode_u64(static_cast<uint64_t>(tbl->auto_inc_cursor()));

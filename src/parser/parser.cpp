@@ -1,8 +1,60 @@
 #include "parser/parser.h"
 #include <fmt/format.h>
 #include <algorithm>
+#include <cctype>
+#include <string>
 
 namespace sqltiny::parser {
+
+namespace {
+
+std::string upper_copy(std::string s) {
+    for (char& c : s) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    return s;
+}
+
+/// 把 "READ-COMMITTED" / "READ COMMITTED" / "read_committed" 归一成大写无分隔符
+std::string normalize_level(std::string s) {
+    std::string out;
+    for (char c : s) {
+        if (c == '-' || c == '_' || c == ' ' || c == '\t') continue;
+        out.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(c))));
+    }
+    return out;
+}
+
+/// 字符串 → HSQLDB TX_* 隔离级别常量, 0 = 未识别
+int isolation_from_text(const std::string& s) {
+    auto n = normalize_level(s);
+    if (n == "READUNCOMMITTED") return static_cast<int>(ast::IsolationLevel::ReadUncommitted);
+    if (n == "READCOMMITTED")   return static_cast<int>(ast::IsolationLevel::ReadCommitted);
+    if (n == "REPEATABLEREAD")  return static_cast<int>(ast::IsolationLevel::RepeatableRead);
+    if (n == "SERIALIZABLE")    return static_cast<int>(ast::IsolationLevel::Serializable);
+    return 0;
+}
+
+/// 从一串 token 文本里找隔离级别 (优先取 "=" 或 "LEVEL" 之后的部分)
+int isolation_from_tokens(const std::vector<std::string>& toks) {
+    auto scan = [&](size_t from) {
+        std::string joined;
+        for (size_t i = from; i < toks.size(); ++i) joined += toks[i];
+        return isolation_from_text(joined);
+    };
+    for (size_t i = 0; i < toks.size(); ++i) {
+        if (toks[i] == "=" || toks[i] == "LEVEL") {
+            int lvl = scan(i + 1);
+            if (lvl) return lvl;
+        }
+    }
+    return scan(0);
+}
+
+bool token_any(const std::vector<std::string>& toks, std::string_view needle) {
+    for (auto& t : toks) if (t.find(needle) != std::string::npos) return true;
+    return false;
+}
+
+} // namespace
 
 // ========== 工具 ==========
 
@@ -111,6 +163,7 @@ ast::StmtPtr Parser::parse_top() {
         case TokenKind::KwSet:       return parse_set();
         case TokenKind::KwCommit: {
             consume();
+            match_consume(TokenKind::KwWork);          // COMMIT WORK
             auto r = std::make_unique<ast::Statement>();
             r->kind = ast::StmtKind::Commit;
             return r;
@@ -118,14 +171,53 @@ ast::StmtPtr Parser::parse_top() {
         case TokenKind::KwRollback: {
             consume();
             auto r = std::make_unique<ast::Statement>();
+            if (match_consume(TokenKind::KwTo)) {       // ROLLBACK TO [SAVEPOINT] name
+                match_consume(TokenKind::KwSavepoint);
+                r->kind = ast::StmtKind::RollbackToSavepoint;
+                r->savepoint_name = kw_or_ident();
+                return r;
+            }
+            match_consume(TokenKind::KwWork);          // ROLLBACK WORK
             r->kind = ast::StmtKind::Rollback;
             return r;
         }
         case TokenKind::KwBegin: {
             consume();
-            // BEGIN ... END 存储过程块暂简化 — 只处理显式 BEGIN 开启事务
+            match_consume(TokenKind::KwWork);          // BEGIN WORK
             auto r = std::make_unique<ast::Statement>();
             r->kind = ast::StmtKind::Begin;
+            return r;
+        }
+        case TokenKind::KwStart: {                     // START TRANSACTION [ISOLATION LEVEL ...]
+            consume();
+            match_consume(TokenKind::KwTransaction);
+            auto r = std::make_unique<ast::Statement>();
+            r->kind = ast::StmtKind::StartTransaction;
+            std::vector<std::string> toks;
+            while (!match(TokenKind::Eof) && !match(TokenKind::Semi)) {
+                toks.push_back(upper_copy(consume().text));
+            }
+            auto set = std::make_unique<ast::SetStmt>();
+            set->kind = ast::SetStmt::Kind::IsolationLevel;
+            set->session_default = false;              // 只对这一个事务生效
+            set->isolation_level = isolation_from_tokens(toks);
+            if (!set->isolation_level) set->kind = ast::SetStmt::Kind::Ignored;
+            r->set_ = std::move(set);
+            return r;
+        }
+        case TokenKind::KwSavepoint: {
+            consume();
+            auto r = std::make_unique<ast::Statement>();
+            r->kind = ast::StmtKind::Savepoint;
+            r->savepoint_name = kw_or_ident();
+            return r;
+        }
+        case TokenKind::KwRelease: {
+            consume();
+            match_consume(TokenKind::KwSavepoint);
+            auto r = std::make_unique<ast::Statement>();
+            r->kind = ast::StmtKind::ReleaseSavepoint;
+            r->savepoint_name = kw_or_ident();
             return r;
         }
         default:
@@ -946,18 +1038,48 @@ ast::StmtPtr Parser::parse_drop_database() {
 }
 
 ast::StmtPtr Parser::parse_set() {
-    // consume SET, 整个 SET 语句扫到分号/Eof 为止,返回空 SET (PyMySQL SET NAMES/SET AUTOCOMMIT 兼容)
+    // SET 语句整条扫到分号/Eof:识别 AUTOCOMMIT / 隔离级别,其余兼容忽略
     consume(); // SET
-    int depth = 0;
+    std::vector<std::string> toks;
     while (true) {
         Token t = peek();
         if (t.kind == TokenKind::Eof || t.kind == TokenKind::Semi) break;
-        if (t.kind == TokenKind::LParen) depth++;
-        if (t.kind == TokenKind::RParen && depth > 0) depth--;
+        toks.push_back(upper_copy(t.text));
         consume();
     }
+
+    auto set = std::make_unique<ast::SetStmt>();
+    bool has_isolation = token_any(toks, "ISOLATION") || token_any(toks, "TX_ISOLATION");
+
+    if (token_any(toks, "AUTOCOMMIT")) {
+        set->kind = ast::SetStmt::Kind::AutoCommit;
+        set->autocommit_value = true;
+        // 取 '=' 之后的第一个值;没有 '=' 就取最后一个 token
+        size_t from = 0;
+        for (size_t i = 0; i < toks.size(); ++i) if (toks[i] == "=") { from = i + 1; break; }
+        if (from == 0) from = toks.empty() ? 0 : toks.size() - 1;
+        if (from < toks.size()) {
+            auto& v = toks[from];
+            set->autocommit_value = !(v == "0" || v == "OFF" || v == "FALSE");
+        }
+    } else if (has_isolation) {
+        int lvl = isolation_from_tokens(toks);
+        if (lvl) {
+            set->kind = ast::SetStmt::Kind::IsolationLevel;
+            set->isolation_level = lvl;
+            // SET SESSION/GLOBAL ... 或 SET tx_isolation=... 影响会话默认;
+            // 只有裸 SET TRANSACTION ISOLATION LEVEL ... 才只影响下一个事务
+            bool explicit_txn = std::find(toks.begin(), toks.end(), "TRANSACTION") != toks.end();
+            bool session_scope = std::find(toks.begin(), toks.end(), "SESSION") != toks.end()
+                              || std::find(toks.begin(), toks.end(), "GLOBAL") != toks.end()
+                              || token_any(toks, "@@SESSION.");
+            set->session_default = session_scope || !explicit_txn;
+        }
+    }
+
     auto r = std::make_unique<ast::Statement>();
     r->kind = ast::StmtKind::Set;
+    r->set_ = std::move(set);
     return r;
 }
 

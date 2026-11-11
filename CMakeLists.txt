@@ -57,6 +57,7 @@ add_smoke_test(smoke_m3       tests/smoke_m3.cpp)
 add_smoke_test(smoke_m4       tests/smoke_m4.cpp)
 add_smoke_test(smoke_m25_e2e  tests/smoke_m25_e2e.cpp)
 add_smoke_test(smoke_m5_wal   tests/smoke_m5_wal.cpp)
+add_smoke_test(smoke_m6_isolation tests/smoke_m6_isolation.cpp)
 
 if(GTest_FOUND)
   function(add_sqltiny_test name source)

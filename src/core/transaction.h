@@ -123,6 +123,9 @@ public:
     // 回滚: 未提交 INSERT → 物理删除; 未提交 DELETE → 恢复
     void rollback_transaction(Session* s);
 
+    // 回滚到保存点:只撤销 [action_index, end) 的写操作,事务继续保持
+    void rollback_to_savepoint(Session* s, size_t action_index);
+
     // —— 行锁 ——
     // 让 Table 调用: 对指定 row_id 拿 EXCLUSIVE 锁
     // 返回 true = 成功; false = 冲突 (立即 abort 模式, 不等待)
@@ -138,8 +141,13 @@ private:
 
     // —— 内部: 处理 Table 版本链 ——
     void apply_commit_to_tables(const std::vector<RowAction>& actions, uint64_t commitSCN);
+    /// actions 按发生顺序传入,内部逆序撤销
     void apply_rollback_to_tables(const std::vector<RowAction>& actions);
     void release_all_locks_for_session(Session* s);
+
+    /// 快照隔离 (REPEATABLE READ / SERIALIZABLE) 提交时的写冲突检测
+    /// 参考 HSQLDB TransactionManagerMVCC:另一个事务在本事务快照之后提交了同行改动 → 40001
+    bool has_snapshot_conflict(Session* s) const;
 
     std::mutex              writeLock_;          // 事务边界串行化
     std::deque<uint64_t>    live_tx_scns_;       // 未结束事务 SCN (有序)
@@ -157,7 +165,12 @@ private:
     TableLockEntry* get_or_create_lock_entry(storage::Table* tbl);
 
     // —— 已提交事务 action 队列 (等 live tx SCN 过期后 finalize) ——
-    std::deque<std::vector<RowAction>> committed_queue_;
+    struct CommittedTxn {
+        uint64_t commitSCN = 0;
+        Session* owner = nullptr;
+        std::vector<RowAction> actions;
+    };
+    std::deque<CommittedTxn> committed_queue_;
 
     // 合并已经没有 live transaction 能看到的 committed actions
     void merge_expired_transactions();

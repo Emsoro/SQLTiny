@@ -61,7 +61,8 @@ private:
     ast::StmtPtr parse_drop_database();
     ast::StmtPtr parse_use();
     ast::StmtPtr parse_show();
-    ast::StmtPtr parse_set();   // 占位:兼容 PyMySQL SET NAMES/SET AUTOCOMMIT
+    /// SET:识别 AUTOCOMMIT / 四个隔离级别,其余兼容忽略(SET NAMES 等)
+    ast::StmtPtr parse_set();
 
     // 辅助
     std::vector<ast::ColumnDef> parse_column_defs();

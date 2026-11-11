@@ -22,6 +22,7 @@ def connect():
                            charset="utf8mb4", autocommit=True)
 
 def writer(tid):
+    global COUNTER
     conn = connect(); cur = conn.cursor()
     while not STOP.is_set():
         try:

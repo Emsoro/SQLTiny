@@ -63,6 +63,14 @@ public:
     // 通用 append(上面的 helper 最终都走这里)
     bool append(const persist::WalRecord& rec);
 
+    // ============ 事务级 WAL 缓冲 (M6) ============
+    // 参考 HSQLDB:未提交事务的 DML 不能落到日志里,否则崩溃/replay 会复活回滚掉的行。
+    // Session 在 begin 时挂上缓冲区,commit 时整体 flush,rollback 时整体丢弃。
+    static void set_thread_txn_buffer(std::vector<persist::WalRecord>* buf);
+    static std::vector<persist::WalRecord>* thread_txn_buffer();
+    /// 把指定事务缓冲整体落盘(调用方持有的 buffer,不依赖 thread_local)
+    bool flush_txn_buffer(std::vector<persist::WalRecord>& buf);
+
     // ============ Checkpoint (M5.5) ============
     /// 同步 checkpoint:写 snapshot .data + truncate WAL
     bool do_checkpoint(catalog::Catalog& catalog);
