@@ -76,7 +76,7 @@ enum class TokenKind : uint16_t {
     KwTransaction, KwWork,
 
     // Show / Misc
-    KwShow, KwUse, KwDescribe, KwExplain, KwCase, KwWhen, KwThen,
+    KwShow, KwTables, KwDatabases, KwColumns, KwUse, KwDescribe, KwExplain, KwCase, KwWhen, KwThen,
     KwElse, KwEnd, KwCast, KwConvert, KwIntoKw, KwOut, KwEscape,
     KwCurrentTimestamp, KwNow, KwCurrentDate, KwCurrentTime,
     KwUser, KwDatabaseKw, KwCount, KwSum, KwAvg, KwMin, KwMax,
