@@ -11,17 +11,22 @@
 
 namespace sqltiny::executor {
 
+// 前向声明 — ExecContext 里要持有 Executor* 用于子查询递归求值
+class Executor;
+
 // 表达式层 free function(跨 cpp 可见,定义在 expr.cpp)
 bool to_bool(const types::Value& v);
 
 /// 执行上下文:提供行上下文 + 列查找 + 表查找
 struct ExecContext {
     catalog::Catalog& catalog;
-    // 单表 SELECT: table_name → Row
     std::string primary_table;
-    std::vector<std::pair<std::string, std::string>> tables;  // (real_name, alias)
-    storage::Row current_row;  // 按列名查找
-    std::map<std::string, int> col_index;  // alias.col / col → index in current_row
+    std::vector<std::pair<std::string, std::string>> tables;
+    storage::Row current_row;
+    std::map<std::string, int> col_index;
+
+    // 子查询求值时递归调 exec_select 需要 executor 指针
+    Executor* exec = nullptr;
 
     // 聚合状态(SELECT 执行时临时填充)
     struct AggState {

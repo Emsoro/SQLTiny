@@ -1,6 +1,8 @@
 #include "executor/executor.h"
 #include <fmt/format.h>
 #include <algorithm>
+#include <functional>
+#include <cstdio>
 #include <set>
 #include <map>
 
@@ -116,6 +118,50 @@ ResultSet Executor::exec_insert(const ast::InsertStmt& s) {
             }
         }
     }
+
+    // M3: INSERT … SELECT …
+    if (s.select_source) {
+        auto sel = execute(*s.select_source);
+        if (!sel.ok) { r.ok = false; r.mysql_errno = sel.mysql_errno; r.sql_state = sel.sql_state; r.error_message = sel.error_message; return r; }
+        for (auto& src_row : sel.rows) {
+            storage::Row row;
+            // 简单按位置对齐:SELECT 列数 >= INSERT 目标列数
+            size_t n = s.columns.empty() ? def.columns.size() : s.columns.size();
+            for (size_t i = 0; i < n && i < src_row.size(); ++i) {
+                if (s.columns.empty()) row.push_back(src_row[i]);
+                else {
+                    int idx = def.column_index(s.columns[i]);
+                    if (idx >= 0 && row.size() <= idx) row.resize(idx + 1);
+                    if (idx >= 0) row[idx] = src_row[i];
+                }
+            }
+            // 补默认列
+            for (size_t i = row.size(); i < def.columns.size(); ++i) {
+                auto& cdef = def.columns[i];
+                if (cdef.is_auto_increment) row.push_back(types::Value::make_int(tbl->next_auto_increment()));
+                else if (cdef.default_value) {
+                    ExecContext ctx0{ catalog_, s.table_name, {}, {} }; ctx0.exec = this;
+                    row.push_back(eval(*cdef.default_value, ctx0));
+                } else row.push_back(types::Value::make_null());
+            }
+            int64_t rid = -1;
+            if (!tbl->insert(row, &rid)) {
+                r.ok = false; r.mysql_errno = 1062; r.sql_state = "23000";
+                r.error_message = "Duplicate entry for PRIMARY KEY";
+                return r;
+            }
+            affected++;
+            // last_insert_id
+            for (auto& col_list : def.primary_key_cols)
+                for (auto& cname : col_list) {
+                    int idx = def.column_index(cname);
+                    if (idx >= 0 && idx < static_cast<int>(row.size()) && row[idx].is_int()) {
+                        if (def.columns[idx].is_auto_increment) r.last_insert_id = row[idx].v_int;
+                    }
+                }
+        }
+    }
+
     r.affected_rows = affected;
     return r;
 }
@@ -306,6 +352,7 @@ ResultSet Executor::exec_select(const ast::SelectStmt& s) {
     // 建立 ctx.col_index
     auto build_ctx = [&](const storage::Row& flat_row) {
         ExecContext ctx{ catalog_, primary_table, {}, flat_row };
+        ctx.exec = this;   // 子查询递归求值需要
         for (auto& slot : slots) {
             for (size_t i = 0; i < slot.def->columns.size(); ++i) {
                 std::string bare = slot.def->columns[i].name;
@@ -444,86 +491,214 @@ ResultSet Executor::exec_select(const ast::SelectStmt& s) {
     };
 
     if (has_agg) {
-        // M2 简化版聚合:单组,所有行聚合
-        storage::Row agg_flat;
-        auto ctx0 = build_ctx(agg_flat);
-        storage::Row agg_row;
+        // M3:GROUP BY — 按 group_by 表达式分桶,每桶独立聚合
+        struct Bucket {
+            std::vector<storage::Row> rows;   // flat rows
+        };
+        std::vector<Bucket> buckets;
+        std::vector<std::string> bucket_keys;   // 并行存分桶 key,保持输入顺序
 
-        // COUNT 总数直接用 after_where.size()
-        int64_t total_rows = static_cast<int64_t>(after_where.size());
-
-        // sum/min/max 按列计算
-        std::map<std::string, double> sums;
-        std::map<std::string, double> mins;
-        std::map<std::string, double> maxs;
-        std::map<std::string, int64_t> counts;
-        for (auto& row : after_where) {
-            for (size_t ci = 0; ci < r.column_names.size(); ++ci) {
-                // 每列对应的聚合函数参数(按 columns 顺序)
+        // 生成每个 flat row 的分组 key (vector<Value>)
+        auto group_key_str = [&](const storage::Row& flat) -> std::string {
+            if (s.group_by.empty()) return "";   // 空 group_by = 单组 (MySQL 允许,等效全表一组)
+            auto ctx = build_ctx(flat);
+            std::string k;
+            for (auto& [e, _] : s.group_by) {
+                auto v = eval(*e, ctx);
+                k += v.to_string() + "\x01";
             }
+            return k;
+        };
+
+        // 按 key 分桶 (保持输入顺序,稳定)
+        for (auto& flat : after_where) {
+            std::string key = group_key_str(flat);
+            size_t bi = 0;
+            bool found = false;
+            for (size_t i = 0; i < bucket_keys.size(); ++i) {
+                if (bucket_keys[i] == key) { bi = i; found = true; break; }
+            }
+            if (!found) { bucket_keys.push_back(key); buckets.push_back({}); bi = buckets.size() - 1; }
+            buckets[bi].rows.push_back(std::move(flat));
+        }
+        // 空表 + 无 group_by — 生成一个空桶(对应 SELECT COUNT(*) FROM empty_t)
+        if (buckets.empty()) buckets.push_back({});
+
+        // 对每个桶算聚合行 (抽 lambda,可复用)
+        auto agg_one_bucket = [&](const std::vector<storage::Row>& flat_rows) -> storage::Row {
+            storage::Row agg_row;
+            int64_t total = static_cast<int64_t>(flat_rows.size());
+
+            for (auto& [e, _] : s.columns) {
+                if (e->kind != ast::ExprKind::FunctionCall) {
+                    // 非聚合列
+                    if (flat_rows.empty()) { agg_row.push_back(types::Value::make_null()); continue; }
+                    // GROUP BY 列:取桶内第一行的值 (MySQL 默认 ANY_VALUE 语义)
+                    auto ctx0 = build_ctx(flat_rows.front());
+                    agg_row.push_back(eval(*e, ctx0));
+                    continue;
+                }
+                std::string lower; lower.resize(e->func_name.size());
+                std::transform(e->func_name.begin(), e->func_name.end(), lower.begin(),
+                               [](unsigned char c) { return std::tolower(c); });
+
+                if (lower == "count") {
+                    if (e->func_star_arg) { agg_row.push_back(types::Value::make_int(total)); continue; }
+                    int64_t c = 0;
+                    for (auto& row : flat_rows) {
+                        auto ctx = build_ctx(row);
+                        auto v = eval(*e->func_args[0], ctx);
+                        if (!v.is_null()) c++;
+                    }
+                    agg_row.push_back(types::Value::make_int(c));
+                } else if (lower == "sum" || lower == "avg") {
+                    double acc = 0; int64_t c = 0;
+                    for (auto& row : flat_rows) {
+                        auto ctx = build_ctx(row);
+                        auto v = eval(*e->func_args[0], ctx);
+                        double d;
+                        if (v.try_to_double(d)) { acc += d; c++; }
+                    }
+                    if (lower == "avg") agg_row.push_back(types::Value::make_double(c ? acc / c : 0));
+                    else agg_row.push_back(types::Value::make_double(acc));
+                } else if (lower == "min") {
+                    double best = 0; bool first = true;
+                    for (auto& row : flat_rows) {
+                        auto ctx = build_ctx(row);
+                        auto v = eval(*e->func_args[0], ctx);
+                        double d; if (!v.try_to_double(d)) continue;
+                        if (first || d < best) { best = d; first = false; }
+                    }
+                    agg_row.push_back(first ? types::Value::make_null() : types::Value::make_double(best));
+                } else if (lower == "max") {
+                    double best = 0; bool first = true;
+                    for (auto& row : flat_rows) {
+                        auto ctx = build_ctx(row);
+                        auto v = eval(*e->func_args[0], ctx);
+                        double d; if (!v.try_to_double(d)) continue;
+                        if (first || d > best) { best = d; first = false; }
+                    }
+                    agg_row.push_back(first ? types::Value::make_null() : types::Value::make_double(best));
+                } else {
+                    // 普通函数在聚合上下文用桶内第一行
+                    if (!flat_rows.empty()) agg_row.push_back(eval(*e, build_ctx(flat_rows.front())));
+                    else agg_row.push_back(types::Value::make_null());
+                }
+            }
+            return agg_row;
+        };
+
+        // 算每个桶
+        std::vector<storage::Row> agg_rows;
+        for (auto& b : buckets) agg_rows.push_back(agg_one_bucket(b.rows));
+
+        // HAVING 过滤 (M3)
+        if (s.having) {
+            std::vector<storage::Row> filtered;
+            // HAVING 表达式里的聚合函数要对整个桶算(不是单行),需要专门的求值器
+            // std::function 解决递归 lambda 初始化问题
+            std::function<types::Value(const ast::Expression&, const std::vector<storage::Row>&)> eval_having;
+            eval_having = [&](const ast::Expression& expr, const std::vector<storage::Row>& bucket_rows) -> types::Value {
+                // 先判断 expr 类型
+                if (expr.kind == ast::ExprKind::Literal) return expr.literal;
+                if (expr.kind == ast::ExprKind::Column) {
+                    if (bucket_rows.empty()) return types::Value::make_null();
+                    // 列引用:取桶内第一行的值(MySQL 允许非聚合列出现在 HAVING,ANY_VALUE 语义)
+                    auto ctx0 = build_ctx(bucket_rows.front());
+                    return eval(expr, ctx0);
+                }
+                if (expr.kind == ast::ExprKind::BinaryOp) {
+                    auto l = eval_having(*expr.lhs, bucket_rows);
+                    auto r = eval_having(*expr.rhs, bucket_rows);
+                    switch (expr.binop) {
+                        case ast::BinOp::Eq:  return types::Value::make_bool(l.sql_equals(r));
+                        case ast::BinOp::Ne:  return types::Value::make_bool(!l.is_null() && !r.is_null() && l.compare(r) != 0);
+                        case ast::BinOp::Gt:  return types::Value::make_bool(!l.is_null() && !r.is_null() && l.compare(r) >  0);
+                        case ast::BinOp::Lt:  return types::Value::make_bool(!l.is_null() && !r.is_null() && l.compare(r) <  0);
+                        case ast::BinOp::Ge:  return types::Value::make_bool(!l.is_null() && !r.is_null() && l.compare(r) >= 0);
+                        case ast::BinOp::Le:  return types::Value::make_bool(!l.is_null() && !r.is_null() && l.compare(r) <= 0);
+                        case ast::BinOp::And: return types::Value::make_bool(to_bool(l) && to_bool(r));
+                        case ast::BinOp::Or:  return types::Value::make_bool(to_bool(l) || to_bool(r));
+                        default: { auto ctx0 = build_ctx(bucket_rows.front()); return eval(expr, ctx0); }
+                    }
+                }
+                if (expr.kind == ast::ExprKind::UnaryOp) {
+                    auto v = eval_having(*expr.operand, bucket_rows);
+                    if (expr.unary == ast::Expression::UnaryKind::Not) return types::Value::make_bool(!to_bool(v));
+                    return v;
+                }
+                if (expr.kind == ast::ExprKind::FunctionCall) {
+                    std::string lower; lower.resize(expr.func_name.size());
+                    std::transform(expr.func_name.begin(), expr.func_name.end(), lower.begin(),
+                                   [](unsigned char c) { return std::tolower(c); });
+                    if (lower == "count" || lower == "sum" || lower == "avg" || lower == "min" || lower == "max") {
+                        storage::Row fake_agg;   // 复用上面 agg_one_bucket 的逻辑?不行,会有递归
+                        // 直接内联实现
+                        if (lower == "count") {
+                            if (expr.func_star_arg) return types::Value::make_int(static_cast<int64_t>(bucket_rows.size()));
+                            int64_t c = 0;
+                            for (auto& row : bucket_rows) {
+                                auto ctx = build_ctx(row);
+                                auto v = eval(*expr.func_args[0], ctx);
+                                if (!v.is_null()) c++;
+                            }
+                            return types::Value::make_int(c);
+                        } else {
+                            double acc = 0; int64_t c = 0;
+                            for (auto& row : bucket_rows) {
+                                auto ctx = build_ctx(row);
+                                auto v = eval(*expr.func_args[0], ctx);
+                                double d; if (!v.try_to_double(d)) continue;
+                                if (lower == "sum" || lower == "avg") { acc += d; c++; }
+                                else if (lower == "min") { if (c == 0 || d < acc) { acc = d; c++; } }
+                                else if (lower == "max") { if (c == 0 || d > acc) { acc = d; c++; } }
+                            }
+                            if (c == 0) return types::Value::make_null();
+                            if (lower == "avg") return types::Value::make_double(acc / c);
+                            return types::Value::make_double(acc);
+                        }
+                    }
+                    // 非聚合函数:用桶内第一行算
+                    if (!bucket_rows.empty()) {
+                        auto ctx0 = build_ctx(bucket_rows.front());
+                        return eval(expr, ctx0);
+                    }
+                    return types::Value::make_null();
+                }
+                // 其他:用第一行算
+                if (!bucket_rows.empty()) {
+                    auto ctx0 = build_ctx(bucket_rows.front());
+                    return eval(expr, ctx0);
+                }
+                return types::Value::make_null();
+            };
+            for (size_t bi = 0; bi < agg_rows.size(); ++bi) {
+                auto v = eval_having(*s.having, buckets[bi].rows);
+                if (to_bool(v)) filtered.push_back(std::move(agg_rows[bi]));
+            }
+            agg_rows = std::move(filtered);
         }
 
-        // 简化:对每个 select expr 单独聚合
-        for (auto& [e, _] : s.columns) {
-            if (e->kind != ast::ExprKind::FunctionCall) {
-                // 非聚合列 —— 取第一行(Group By 简化)
-                if (!after_where.empty()) agg_row.push_back(compute_row(after_where.front())[0]);
-                else agg_row.push_back(types::Value::make_null());
-                continue;
-            }
-            std::string lower; lower.resize(e->func_name.size());
-            std::transform(e->func_name.begin(), e->func_name.end(), lower.begin(),
-                           [](unsigned char c) { return std::tolower(c); });
-
-            if (lower == "count") {
-                if (e->func_star_arg) { agg_row.push_back(types::Value::make_int(total_rows)); continue; }
-                // COUNT(col):跳过 NULL
-                int64_t c = 0;
-                for (auto& row : after_where) {
-                    auto ctx = build_ctx(row);
-                    auto v = eval(*e->func_args[0], ctx);
-                    if (!v.is_null()) c++;
+        // ORDER BY 可作用于聚合结果行
+        if (!s.order_by.empty()) {
+            std::sort(agg_rows.begin(), agg_rows.end(), [&](const storage::Row& a, const storage::Row& b) {
+                for (auto& [expr, asc] : s.order_by) {
+                    // ORDER BY 表达式在聚合上下文 — 用桶内 flat row 做 ctx
+                    storage::Row flat_a = a.empty() ? storage::Row() : buckets[0].rows.front(); // 简化
+                    storage::Row flat_b = b.empty() ? storage::Row() : buckets[0].rows.front();
+                    auto ctx_a = build_ctx(flat_a);
+                    auto ctx_b = build_ctx(flat_b);
+                    int c = eval(*expr, ctx_a).compare(eval(*expr, ctx_b));
+                    if (c != 0) return asc ? c < 0 : c > 0;
                 }
-                agg_row.push_back(types::Value::make_int(c));
-            } else if (lower == "sum" || lower == "avg") {
-                double acc = 0; int64_t c = 0;
-                for (auto& row : after_where) {
-                    auto ctx = build_ctx(row);
-                    auto v = eval(*e->func_args[0], ctx);
-                    double d;
-                    if (v.try_to_double(d)) { acc += d; c++; }
-                }
-                if (lower == "avg") agg_row.push_back(types::Value::make_double(c ? acc / c : 0));
-                else agg_row.push_back(types::Value::make_double(acc));
-            } else if (lower == "min") {
-                double best = 0; bool first = true;
-                for (auto& row : after_where) {
-                    auto ctx = build_ctx(row);
-                    auto v = eval(*e->func_args[0], ctx);
-                    double d; if (!v.try_to_double(d)) continue;
-                    if (first || d < best) { best = d; first = false; }
-                }
-                agg_row.push_back(first ? types::Value::make_null() : types::Value::make_double(best));
-            } else if (lower == "max") {
-                double best = 0; bool first = true;
-                for (auto& row : after_where) {
-                    auto ctx = build_ctx(row);
-                    auto v = eval(*e->func_args[0], ctx);
-                    double d; if (!v.try_to_double(d)) continue;
-                    if (first || d > best) { best = d; first = false; }
-                }
-                agg_row.push_back(first ? types::Value::make_null() : types::Value::make_double(best));
-            } else {
-                // 普通函数在聚合上下文里用第一行值
-                if (!after_where.empty()) agg_row.push_back(eval(*e, build_ctx(after_where.front())));
-                else agg_row.push_back(types::Value::make_null());
-            }
+                return false;
+            });
         }
-        r.rows.push_back(std::move(agg_row));
+
+        r.rows = std::move(agg_rows);
+        r.affected_rows = static_cast<int64_t>(r.rows.size());
         return r;
     }
-
-    // GROUP BY — 简化版:不重点支持;先当作无聚合路径
     // ORDER BY
     if (!s.order_by.empty()) {
         std::sort(after_where.begin(), after_where.end(), [&](const storage::Row& a, const storage::Row& b) {

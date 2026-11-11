@@ -146,6 +146,13 @@ types::Value Executor::eval(const ast::Expression& e, const ExecContext& ctx) co
         case ast::ExprKind::FunctionCall:
             return eval_function(e.func_name, e.func_args, e.func_star_arg, ctx);
 
+        case ast::ExprKind::Subquery: {
+            if (!ctx.exec || !e.subquery_stmt) return types::Value::make_null();
+            auto result = ctx.exec->execute(*e.subquery_stmt);
+            if (result.rows.empty() || result.rows[0].empty()) return types::Value::make_null();
+            return result.rows[0][0];   // 标量子查询:取第一行第一列
+        }
+
         case ast::ExprKind::Placeholder:
             return types::Value::make_null();
     }
@@ -206,6 +213,17 @@ types::Value Executor::eval_function(
     if (lower == "__in") {
         if (args.size() < 2) return types::Value::make_bool(false);
         auto left = eval(*args[0], ctx);
+        // 右值是 SELECT 子查询:取所有行当候选值
+        if (args[1] && args[1]->kind == ast::ExprKind::Subquery && args[1]->subquery_stmt) {
+            if (!ctx.exec) return types::Value::make_bool(false);
+            auto result = ctx.exec->execute(*args[1]->subquery_stmt);
+            for (auto& row : result.rows) {
+                if (row.empty()) continue;
+                if (!left.is_null() && !row[0].is_null() && left.compare(row[0]) == 0)
+                    return types::Value::make_bool(true);
+            }
+            return types::Value::make_bool(false);
+        }
         for (size_t i = 1; i < args.size(); ++i) {
             auto v = eval(*args[i], ctx);
             if (!left.is_null() && !v.is_null() && left.compare(v) == 0)

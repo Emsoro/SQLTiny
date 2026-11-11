@@ -40,7 +40,8 @@ enum class ExprKind {
     UnaryOp,        // 一元运算(-, NOT, IS NULL)
     FunctionCall,   // COUNT(*), CONCAT(a,b), COALESCE(a,b) 等
     Star,           // * 或 t.*
-    Placeholder,    // ?  (M2.5 不重点支持,先占位)
+    Subquery,       // 标量子查询: SELECT expr FROM t WHERE ...  作为一个表达式
+    Placeholder,    // ?
 };
 
 /// 二元运算符
@@ -71,6 +72,8 @@ struct Expression {
     std::string func_name;
     std::vector<ExprPtr> func_args;
     bool func_star_arg = false;  // COUNT(*)
+    // --- Subquery ---
+    StmtPtr subquery_stmt;       // Subquery 用:持有完整 SELECT Statement
 
     // 便捷构造
     static ExprPtr make_literal(types::Value v);
@@ -79,6 +82,7 @@ struct Expression {
     static ExprPtr make_binary(BinOp op, ExprPtr l, ExprPtr r);
     static ExprPtr make_star(std::string table = "");
     static ExprPtr make_function(std::string name, std::vector<ExprPtr> args, bool star = false);
+    static ExprPtr make_subquery(StmtPtr stmt);
 };
 
 // ---------- JOIN ----------
@@ -116,9 +120,8 @@ struct SelectStmt {
 struct InsertStmt {
     std::string table_name;
     std::vector<std::string> columns;   // 可空,空表示全列
-    // VALUES 子句:每组是 vector<ExprPtr>
-    std::vector<std::vector<ExprPtr>> value_rows;
-    // 后续扩展:SELECT 子查询 (M2 暂时不重点)
+    std::vector<std::vector<ExprPtr>> value_rows;  // VALUES 子句
+    StmtPtr select_source;                          // INSERT … SELECT … (M3)
 };
 
 // ---------- UPDATE ----------

@@ -44,5 +44,11 @@ ExprPtr Expression::make_function(std::string name, std::vector<ExprPtr> args, b
     e->func_star_arg = star;
     return e;
 }
+ExprPtr Expression::make_subquery(StmtPtr stmt) {
+    auto e = std::make_unique<Expression>();
+    e->kind = ExprKind::Subquery;
+    e->subquery_stmt = std::move(stmt);
+    return e;
+}
 
 } // namespace sqltiny::ast

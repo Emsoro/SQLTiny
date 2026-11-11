@@ -174,9 +174,16 @@ ast::ExprPtr Parser::parse_comparison() {
             in_expr->func_name = "__in";
             expect(TokenKind::LParen, "(");
             in_expr->func_args.push_back(std::move(left));
-            while (!match(TokenKind::RParen)) {
-                in_expr->func_args.push_back(parse_expr());
-                match_consume(TokenKind::Comma);
+            // IN (SELECT ...) 还是 IN (e1, e2, ...)
+            if (match(TokenKind::KwSelect)) {
+                auto sub = parse_select();
+                auto sq = ast::Expression::make_subquery(std::move(sub));
+                in_expr->func_args.push_back(std::move(sq));
+            } else {
+                while (!match(TokenKind::RParen)) {
+                    in_expr->func_args.push_back(parse_expr());
+                    match_consume(TokenKind::Comma);
+                }
             }
             consume(); // )
             e->kind = ast::ExprKind::UnaryOp;
@@ -184,7 +191,6 @@ ast::ExprPtr Parser::parse_comparison() {
             e->operand = std::move(in_expr);
             return e;
         }
-        // 否则 NOT 后面接别的(之前 parse_not_expr 会处理),这里不应该到
     }
     if (match_consume(TokenKind::KwIn)) {
         auto e = std::make_unique<ast::Expression>();
@@ -192,9 +198,15 @@ ast::ExprPtr Parser::parse_comparison() {
         e->func_name = "__in";
         expect(TokenKind::LParen, "(");
         e->func_args.push_back(std::move(left));
-        while (!match(TokenKind::RParen)) {
-            e->func_args.push_back(parse_expr());
-            match_consume(TokenKind::Comma);
+        if (match(TokenKind::KwSelect)) {
+            auto sub = parse_select();
+            auto sq = ast::Expression::make_subquery(std::move(sub));
+            e->func_args.push_back(std::move(sq));
+        } else {
+            while (!match(TokenKind::RParen)) {
+                e->func_args.push_back(parse_expr());
+                match_consume(TokenKind::Comma);
+            }
         }
         consume();
         return e;
@@ -556,18 +568,27 @@ ast::StmtPtr Parser::parse_insert() {
         }
     }
 
-    expect(TokenKind::KwValues, "VALUES");
-    do {
-        expect(TokenKind::LParen, "(");
-        std::vector<ast::ExprPtr> row;
-        if (!match(TokenKind::RParen)) {
-            do {
-                row.push_back(parse_expr());
-            } while (match_consume(TokenKind::Comma));
-        }
-        consume(); // )
-        stmt->value_rows.push_back(std::move(row));
-    } while (match_consume(TokenKind::Comma));
+    // VALUES 或 SELECT 子句 (M3)
+    if (match_consume(TokenKind::KwValues)) {
+        do {
+            expect(TokenKind::LParen, "(");
+            std::vector<ast::ExprPtr> row;
+            if (!match(TokenKind::RParen)) {
+                do {
+                    row.push_back(parse_expr());
+                } while (match_consume(TokenKind::Comma));
+            }
+            consume(); // )
+            stmt->value_rows.push_back(std::move(row));
+        } while (match_consume(TokenKind::Comma));
+    } else if (match(TokenKind::KwSelect)) {
+        // INSERT … SELECT … :不要 match_consume,让 parse_select 自己处理 SELECT token
+        auto sub = parse_select();
+        stmt->select_source = std::move(sub);
+    } else {
+        auto t = peek();
+        throw ParseError(t.line, t.col, "expected VALUES or SELECT after INSERT");
+    }
 
     auto r = std::make_unique<ast::Statement>();
     r->kind = ast::StmtKind::Insert;
