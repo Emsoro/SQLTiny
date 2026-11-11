@@ -50,6 +50,7 @@ endfunction()
 add_smoke_test(smoke_m1       tests/smoke_m1.cpp)
 add_smoke_test(smoke_m2       tests/smoke_m2.cpp)
 add_smoke_test(smoke_m3       tests/smoke_m3.cpp)
+add_smoke_test(smoke_m4       tests/smoke_m4.cpp)
 add_smoke_test(smoke_m25_e2e  tests/smoke_m25_e2e.cpp)
 
 if(GTest_FOUND)

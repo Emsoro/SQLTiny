@@ -18,9 +18,16 @@ executor::ResultSet Session::execute(const std::string& sql) {
         for (auto& s : stmts) {
             last = exec_.execute(*s);
             if (!last.ok) return last;
-            // 处理 USE
+            // 处理 USE:必须通过 catalog 切换,同时更新 Session 字段
             if (s->kind == ast::StmtKind::Use) {
-                current_database = s->use_->database_name;
+                auto& name = s->use_->database_name;
+                if (!exec_.catalog_ref().switch_database(name)) {
+                    executor::ResultSet u;
+                    u.ok = false; u.mysql_errno = 1049; u.sql_state = "42000";
+                    u.error_message = fmt::format("Unknown database '{}'", name);
+                    return u;
+                }
+                current_database = name;
                 executor::ResultSet u;
                 u.ok = true; u.affected_rows = 0;
                 return u;

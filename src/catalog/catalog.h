@@ -8,29 +8,47 @@
 
 namespace sqltiny::catalog {
 
-/// Catalog —— 持有所有表实例(分 database)
+/// Catalog —— 多库模型:databases_[db].tables_[table]
 class Catalog {
 public:
-    Catalog() = default;
+    Catalog();
 
-    /// 创建表。已存在返回 false(除非 if_not_exists)
+    // ---------- Database ----------
+    bool create_database(const std::string& name, bool if_not_exists = false);
+    bool drop_database(const std::string& name, bool if_exists = false);
+    bool database_exists(const std::string& name) const;
+    bool switch_database(const std::string& name);   // USE db —— 失败返回 false
+    std::string current_database() const { return current_database_; }
+    std::vector<std::string> list_databases() const;
+
+    // ---------- Table ----------
     bool create_table(const ast::CreateTableStmt& stmt);
-
-    /// 删除表
     bool drop_table(const std::string& name, bool if_exists);
-
-    /// 查是否存在
     bool table_exists(const std::string& name) const;
 
-    /// 取表(可变)
     storage::Table* get_table(const std::string& name);
     const storage::Table* get_table(const std::string& name) const;
 
-    /// 所有表名列表
     std::vector<std::string> table_names() const;
 
 private:
-    std::map<std::string, std::unique_ptr<storage::Table>> tables_;
+    std::string current_database_ = "default";
+    /// 每个 database 持有自己的 table map
+    struct DbTables {
+        std::map<std::string, std::unique_ptr<storage::Table>> tables;
+    };
+    std::map<std::string, DbTables> databases_;
+
+    /// 取当前库的 tables map
+    DbTables* current_db();
+    const DbTables* current_db() const;
+
+    /// 按 db 名拿 DbTables(没找到返回 nullptr)
+    DbTables* get_db(const std::string& name);
+    const DbTables* get_db(const std::string& name) const;
+
+    /// lowercased name
+    static std::string lower_name(const std::string& s);
 };
 
 } // namespace sqltiny::catalog

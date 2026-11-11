@@ -17,11 +17,25 @@ ResultSet Executor::execute(const ast::Statement& stmt) {
         case ast::StmtKind::Delete:      return exec_delete(*stmt.delete_);
         case ast::StmtKind::CreateTable: return exec_create_table(*stmt.create_table_);
         case ast::StmtKind::DropTable:   return exec_drop_table(*stmt.drop_table_);
-        case ast::StmtKind::Use:         return r;
-        case ast::StmtKind::Show: {
-            if (stmt.show_->kind == ast::ShowStmt::Kind::Tables) return exec_show_tables();
-            if (stmt.show_->kind == ast::ShowStmt::Kind::Columns) return exec_show_columns(stmt.show_->table_or_pattern);
+        case ast::StmtKind::CreateDatabase: return exec_create_database(*stmt.create_database_);
+        case ast::StmtKind::DropDatabase:   return exec_drop_database(*stmt.drop_database_);
+        case ast::StmtKind::Use: {
+            // Session 层已经同步过 catalog,这里空返回
+            r.ok = true;
             return r;
+        }
+        case ast::StmtKind::Show: {
+            auto& sh = *stmt.show_;
+            switch (sh.kind) {
+                case ast::ShowStmt::Kind::Tables:      return exec_show_tables();
+                case ast::ShowStmt::Kind::Columns:     return exec_show_columns(sh.table_or_pattern);
+                case ast::ShowStmt::Kind::Databases:   return exec_show_databases();
+                case ast::ShowStmt::Kind::CreateTable: return exec_show_create_table(sh.db_name, sh.table_or_pattern);
+                case ast::ShowStmt::Kind::CreateDatabase: return exec_show_create_database(sh.table_or_pattern);
+                case ast::ShowStmt::Kind::Status:      return exec_show_status();
+                case ast::ShowStmt::Kind::Variables:   return exec_show_variables();
+            }
+            break;
         }
     }
     return r;
@@ -746,10 +760,11 @@ ResultSet Executor::exec_select(const ast::SelectStmt& s) {
     return r;
 }
 
-// ---------- SHOW ----------
+// ---------- SHOW TABLES ----------
 ResultSet Executor::exec_show_tables() {
     ResultSet r;
-    r.column_names = { "Tables_in_default" };
+    auto col_name = fmt::format("Tables_in_{}", catalog_.current_database());
+    r.column_names = { col_name };
     auto names = catalog_.table_names();
     std::sort(names.begin(), names.end());
     for (auto& n : names) r.rows.push_back({ types::Value::make_string(n) });
@@ -803,6 +818,162 @@ ResultSet Executor::exec_show_columns(const std::string& table_name) {
             types::Value::make_null(),
             types::Value::make_string(extra),
         });
+    }
+    return r;
+}
+
+// ---------- SHOW DATABASES ----------
+ResultSet Executor::exec_show_databases() {
+    ResultSet r;
+    r.column_names = { "Database" };
+    auto dbs = catalog_.list_databases();
+    for (auto& n : dbs) r.rows.push_back({ types::Value::make_string(n) });
+    return r;
+}
+
+// ---------- SHOW CREATE TABLE ----------
+ResultSet Executor::exec_show_create_table(const std::string& db_name, const std::string& table_name) {
+    ResultSet r;
+    r.column_names = { "Table", "Create Table" };
+
+    // 构造带 db 限定的表名
+    std::string qualified = db_name.empty() ? table_name : (db_name + "." + table_name);
+    auto* tbl = catalog_.get_table(qualified);
+    if (!tbl) {
+        r.ok = false; r.mysql_errno = 1146; r.sql_state = "42S02";
+        r.error_message = fmt::format("Table '{}' doesn't exist", qualified);
+        return r;
+    }
+    auto& def = tbl->def();
+
+    std::string sql = fmt::format("CREATE TABLE `{}` (\n", def.name);
+    for (size_t i = 0; i < def.columns.size(); ++i) {
+        auto& col = def.columns[i];
+        // 类型字符串
+        std::string type_str;
+        switch (col.type.type) {
+            case types::SqlType::BigInt:   type_str = "BIGINT"; break;
+            case types::SqlType::Int:      type_str = "INT"; break;
+            case types::SqlType::SmallInt: type_str = "SMALLINT"; break;
+            case types::SqlType::TinyInt:  type_str = "TINYINT"; break;
+            case types::SqlType::Double:   type_str = "DOUBLE"; break;
+            case types::SqlType::Float:    type_str = "FLOAT"; break;
+            case types::SqlType::Decimal:  type_str = fmt::format("DECIMAL({},{})", col.type.length, col.type.scale); break;
+            case types::SqlType::Varchar:  type_str = fmt::format("VARCHAR({})", col.type.length ? col.type.length : 255); break;
+            case types::SqlType::Char:     type_str = fmt::format("CHAR({})", col.type.length ? col.type.length : 1); break;
+            case types::SqlType::Text:     type_str = "TEXT"; break;
+            case types::SqlType::Blob:     type_str = "BLOB"; break;
+            case types::SqlType::Date:     type_str = "DATE"; break;
+            case types::SqlType::Time:     type_str = "TIME"; break;
+            case types::SqlType::DateTime: type_str = "DATETIME"; break;
+            case types::SqlType::Timestamp:type_str = "TIMESTAMP"; break;
+            case types::SqlType::Boolean:  type_str = "TINYINT(1)"; break;
+            case types::SqlType::Json:     type_str = "JSON"; break;
+            default: type_str = "UNKNOWN";
+        }
+        if (col.type.unsigned_) type_str += " UNSIGNED";
+        sql += fmt::format("  `{}` {}", col.name, type_str);
+        if (!col.nullable) sql += " NOT NULL";
+        if (col.is_auto_increment) sql += " AUTO_INCREMENT";
+        if (col.is_primary_key) sql += " PRIMARY KEY";
+        if (col.default_value) sql += " DEFAULT <expr>";
+        if (i + 1 < def.columns.size()) sql += ",";
+        sql += "\n";
+    }
+    // 表级 PK
+    if (def.primary_key_cols.size() == 1 && def.primary_key_cols[0].size() > 1) {
+        std::string pk_cols;
+        for (size_t i = 0; i < def.primary_key_cols[0].size(); ++i) {
+            if (i) pk_cols += ", ";
+            pk_cols += "`" + def.primary_key_cols[0][i] + "`";
+        }
+        sql += fmt::format("  PRIMARY KEY ({})\n", pk_cols);
+    }
+    sql += ")";
+    r.rows.push_back({
+        types::Value::make_string(def.name),
+        types::Value::make_string(std::move(sql)),
+    });
+    return r;
+}
+
+// ---------- SHOW CREATE DATABASE ----------
+ResultSet Executor::exec_show_create_database(const std::string& db_name) {
+    ResultSet r;
+    r.column_names = { "Database", "Create Database" };
+    if (!catalog_.database_exists(db_name)) {
+        r.ok = false; r.mysql_errno = 1049; r.sql_state = "42000";
+        r.error_message = fmt::format("Unknown database '{}'", db_name);
+        return r;
+    }
+    r.rows.push_back({
+        types::Value::make_string(db_name),
+        types::Value::make_string(fmt::format("CREATE DATABASE `{}`", db_name)),
+    });
+    return r;
+}
+
+// ---------- SHOW STATUS ----------
+ResultSet Executor::exec_show_status() {
+    ResultSet r;
+    r.column_names = { "Variable_name", "Value" };
+    static const std::pair<const char*, const char*> kvs[] = {
+        {"Aborted_clients", "0"}, {"Aborted_connects", "0"},
+        {"Connections", "1"}, {"Delayed_errors", "0"},
+        {"Delayed_insert_threads", "0"}, {"Delayed_writes", "0"},
+        {"Not_flushed_delayed_rows", "0"}, {"Open_files", "16"},
+        {"Open_streams", "0"}, {"Open_tables", "1"},
+        {"Opened_tables", "1"}, {"Threads_connected", "1"},
+        {"Threads_created", "1"}, {"Threads_running", "1"},
+        {"Uptime", "0"}, {"Version", "5.7.0-SQLTiny"},
+    };
+    for (auto& [k, v] : kvs)
+        r.rows.push_back({ types::Value::make_string(k), types::Value::make_string(v) });
+    return r;
+}
+
+// ---------- SHOW VARIABLES ----------
+ResultSet Executor::exec_show_variables() {
+    ResultSet r;
+    r.column_names = { "Variable_name", "Value" };
+    static const std::pair<const char*, const char*> kvs[] = {
+        {"autocommit", "ON"}, {"character_set_client", "utf8mb4"},
+        {"character_set_connection", "utf8mb4"}, {"character_set_database", "utf8mb4"},
+        {"character_set_server", "utf8mb4"}, {"character_set_results", "utf8mb4"},
+        {"collation_connection", "utf8mb4_general_ci"},
+        {"collation_database", "utf8mb4_general_ci"},
+        {"collation_server", "utf8mb4_general_ci"},
+        {"default_storage_engine", "InnoDB"}, {"engine_condition_pushdown", "ON"},
+        {"innodb_version", "5.7.0"}, {"interactive_timeout", "28800"},
+        {"join_buffer_size", "262144"}, {"max_connections", "151"},
+        {"net_buffer_length", "16384"}, {"sql_mode", "ONLY_FULL_GROUP_BY"},
+        {"thread_cache_size", "9"}, {"wait_timeout", "28800"},
+    };
+    for (auto& [k, v] : kvs)
+        r.rows.push_back({ types::Value::make_string(k), types::Value::make_string(v) });
+    return r;
+}
+
+// ---------- CREATE DATABASE ----------
+ResultSet Executor::exec_create_database(const ast::CreateDatabaseStmt& s) {
+    ResultSet r;
+    if (!catalog_.create_database(s.database_name, s.if_not_exists)) {
+        r.ok = false; r.mysql_errno = 1007; r.sql_state = "HY000";
+        r.error_message = fmt::format("Can't create database '{}'; database exists", s.database_name);
+    }
+    return r;
+}
+
+// ---------- DROP DATABASE ----------
+ResultSet Executor::exec_drop_database(const ast::DropDatabaseStmt& s) {
+    ResultSet r;
+    if (!catalog_.drop_database(s.database_name, s.if_exists)) {
+        r.ok = false; r.mysql_errno = 1008; r.sql_state = "HY000";
+        if (catalog_.current_database() == s.database_name) {
+            r.error_message = fmt::format("Can't drop database '{}'; database doesn't exist or is current database", s.database_name);
+        } else {
+            r.error_message = fmt::format("Can't drop database '{}'; database doesn't exist", s.database_name);
+        }
     }
     return r;
 }

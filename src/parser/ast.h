@@ -159,15 +159,37 @@ struct UseStmt {
 
 // ---------- SHOW ----------
 struct ShowStmt {
-    enum class Kind { Tables, Databases, Columns };
+    enum class Kind {
+        Tables,
+        Columns,
+        Databases,
+        CreateTable,       // SHOW CREATE TABLE [db.]tbl
+        CreateDatabase,    // SHOW CREATE DATABASE db
+        Status,            // SHOW [GLOBAL|SESSION] STATUS
+        Variables,         // SHOW [GLOBAL|SESSION] VARIABLES
+    };
     Kind kind;
-    std::string table_or_pattern;
+    std::string table_or_pattern;   // Tables:pattern / Columns:table / CreateTable:tbl / CreateDatabase:db
+    std::string db_name;            // Columns / CreateTable 里可选限定
+};
+
+// ---------- CREATE DATABASE ----------
+struct CreateDatabaseStmt {
+    std::string database_name;
+    bool if_not_exists = false;
+};
+
+// ---------- DROP DATABASE ----------
+struct DropDatabaseStmt {
+    std::string database_name;
+    bool if_exists = false;
 };
 
 // ---------- 统一 Statement variant ----------
 enum class StmtKind {
     Select, Insert, Update, Delete,
     CreateTable, DropTable,
+    CreateDatabase, DropDatabase,
     Use, Show,
 };
 
@@ -181,13 +203,13 @@ struct Statement {
     std::unique_ptr<DeleteStmt>      delete_;
     std::unique_ptr<CreateTableStmt> create_table_;
     std::unique_ptr<DropTableStmt>   drop_table_;
+    std::unique_ptr<CreateDatabaseStmt> create_database_;
+    std::unique_ptr<DropDatabaseStmt>   drop_database_;
     std::unique_ptr<UseStmt>         use_;
     std::unique_ptr<ShowStmt>        show_;
 
-    // 原始 SQL 片段(便于错误提示)
     std::string raw;
 
-    // 便捷访问(cast 风格)
     SelectStmt*      as_select()       { return select_.get(); }
     InsertStmt*      as_insert()       { return insert_.get(); }
     UpdateStmt*      as_update()       { return update_.get(); }

@@ -88,8 +88,24 @@ ast::StmtPtr Parser::parse_top() {
         case TokenKind::KwInsert:    return parse_insert();
         case TokenKind::KwUpdate:    return parse_update();
         case TokenKind::KwDelete:    return parse_delete();
-        case TokenKind::KwCreate:    return parse_create_table();
-        case TokenKind::KwDrop:      return parse_drop_table();
+        case TokenKind::KwCreate: {
+            consume(); // CREATE
+            auto nt = peek();
+            if (nt.kind == TokenKind::KwDatabase || nt.kind == TokenKind::KwSchema)
+                return parse_create_database();
+            if (nt.kind == TokenKind::KwTable)
+                return parse_create_table();
+            throw ParseError(nt.line, nt.col, fmt::format("expected TABLE or DATABASE after CREATE, got '{}'", nt.text));
+        }
+        case TokenKind::KwDrop: {
+            consume(); // DROP
+            auto nt = peek();
+            if (nt.kind == TokenKind::KwDatabase || nt.kind == TokenKind::KwSchema)
+                return parse_drop_database();
+            if (nt.kind == TokenKind::KwTable)
+                return parse_drop_table();
+            throw ParseError(nt.line, nt.col, fmt::format("expected TABLE or DATABASE after DROP, got '{}'", nt.text));
+        }
         case TokenKind::KwUse:       return parse_use();
         case TokenKind::KwShow:      return parse_show();
         default:
@@ -732,7 +748,7 @@ std::vector<ast::ColumnDef> Parser::parse_column_defs() {
 }
 
 ast::StmtPtr Parser::parse_create_table() {
-    consume(); // CREATE
+    // CREATE 已在 parse_top 里 consume 掉
     match_consume(TokenKind::KwTemporary);
     expect(TokenKind::KwTable, "TABLE");
 
@@ -787,7 +803,7 @@ ast::StmtPtr Parser::parse_create_table() {
 // 上面代码假设 ColumnDef 有 default_pk_cols,如果编译不过再改。
 
 ast::StmtPtr Parser::parse_drop_table() {
-    consume(); // DROP
+    // DROP 已在 parse_top 里 consume 掉
     expect(TokenKind::KwTable, "TABLE");
     auto stmt = std::make_unique<ast::DropTableStmt>();
     if (match_consume(TokenKind::KwIf) && match_consume(TokenKind::KwExists)) {
@@ -813,24 +829,85 @@ ast::StmtPtr Parser::parse_use() {
 ast::StmtPtr Parser::parse_show() {
     consume(); // SHOW
     auto stmt = std::make_unique<ast::ShowStmt>();
+
+    // 可选 GLOBAL / SESSION (对 STATUS / VARIABLES 用)
+    bool global_or_session = false;
+    if (match_consume(TokenKind::KwGlobal) || match_consume(TokenKind::KwSession))
+        global_or_session = true;  // 记录但 ShowStmt 里没字段,忽略
+
     Token t = peek();
     if (match_consume(TokenKind::KwTables)) {
         stmt->kind = ast::ShowStmt::Kind::Tables;
         if (match_consume(TokenKind::KwFrom) || match_consume(TokenKind::KwIn)) {
             stmt->table_or_pattern = kw_or_ident();
         }
-    } else if (match_consume(TokenKind::KwDatabases) || match_consume(TokenKind::KwSchema)) {
+    } else if (match_consume(TokenKind::KwDatabases) || match_consume(TokenKind::KwSchemas)) {
         stmt->kind = ast::ShowStmt::Kind::Databases;
-    } else if (match_consume(TokenKind::KwColumns)) {
+    } else if (match_consume(TokenKind::KwColumns) || match_consume(TokenKind::KwFields)) {
         stmt->kind = ast::ShowStmt::Kind::Columns;
         expect(TokenKind::KwFrom, "FROM");
         stmt->table_or_pattern = kw_or_ident();
+        if (match_consume(TokenKind::KwFrom)) {
+            stmt->db_name = kw_or_ident();
+        }
+    } else if (match_consume(TokenKind::KwCreate)) {
+        auto nt = peek();
+        if (match_consume(TokenKind::KwTable)) {
+            stmt->kind = ast::ShowStmt::Kind::CreateTable;
+            // 可选 db.table
+            std::string first = kw_or_ident();
+            if (match_consume(TokenKind::Dot)) {
+                stmt->db_name = first;
+                stmt->table_or_pattern = kw_or_ident();
+            } else {
+                stmt->table_or_pattern = first;
+            }
+        } else if (match_consume(TokenKind::KwDatabase) || match_consume(TokenKind::KwSchema)) {
+            stmt->kind = ast::ShowStmt::Kind::CreateDatabase;
+            stmt->table_or_pattern = kw_or_ident();
+        } else {
+            throw ParseError(nt.line, nt.col, fmt::format("expected TABLE or DATABASE after SHOW CREATE, got '{}'", nt.text));
+        }
+    } else if (match_consume(TokenKind::KwStatus)) {
+        stmt->kind = ast::ShowStmt::Kind::Status;
+    } else if (match_consume(TokenKind::KwVariables)) {
+        stmt->kind = ast::ShowStmt::Kind::Variables;
     } else {
         throw ParseError(t.line, t.col, fmt::format("unsupported SHOW '{}'", t.text));
     }
+    (void)global_or_session;
+
     auto r = std::make_unique<ast::Statement>();
     r->kind = ast::StmtKind::Show;
     r->show_ = std::move(stmt);
+    return r;
+}
+
+ast::StmtPtr Parser::parse_create_database() {
+    // CREATE 已在 parse_top 里 consume 掉,这里 consume DATABASE | SCHEMA
+    match_consume(TokenKind::KwDatabase) || match_consume(TokenKind::KwSchema);
+    auto stmt = std::make_unique<ast::CreateDatabaseStmt>();
+    if (match_consume(TokenKind::KwIf) && match_consume(TokenKind::KwNot) && match_consume(TokenKind::KwExists)) {
+        stmt->if_not_exists = true;
+    }
+    stmt->database_name = kw_or_ident();
+    auto r = std::make_unique<ast::Statement>();
+    r->kind = ast::StmtKind::CreateDatabase;
+    r->create_database_ = std::move(stmt);
+    return r;
+}
+
+ast::StmtPtr Parser::parse_drop_database() {
+    // DROP 已在 parse_top 里 consume 掉,这里 consume DATABASE | SCHEMA
+    match_consume(TokenKind::KwDatabase) || match_consume(TokenKind::KwSchema);
+    auto stmt = std::make_unique<ast::DropDatabaseStmt>();
+    if (match_consume(TokenKind::KwIf) && match_consume(TokenKind::KwExists)) {
+        stmt->if_exists = true;
+    }
+    stmt->database_name = kw_or_ident();
+    auto r = std::make_unique<ast::Statement>();
+    r->kind = ast::StmtKind::DropDatabase;
+    r->drop_database_ = std::move(stmt);
     return r;
 }
 

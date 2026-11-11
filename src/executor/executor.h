@@ -67,6 +67,10 @@ public:
     /// 执行单条语句
     ResultSet execute(const ast::Statement& stmt);
 
+    /// 暴露 catalog 引用供外部(Session USE 处理)同步 current_database
+    catalog::Catalog& catalog_ref() { return catalog_; }
+    const catalog::Catalog& catalog_ref() const { return catalog_; }
+
 private:
     catalog::Catalog& catalog_;
 
@@ -78,6 +82,14 @@ private:
     ResultSet exec_select(const ast::SelectStmt& s);
     ResultSet exec_show_tables();
     ResultSet exec_show_columns(const std::string& table_name);
+    ResultSet exec_show_databases();
+    ResultSet exec_show_create_table(const std::string& db_name, const std::string& table_name);
+    ResultSet exec_show_create_database(const std::string& db_name);
+    ResultSet exec_show_status();
+    ResultSet exec_show_variables();
+
+    ResultSet exec_create_database(const ast::CreateDatabaseStmt& s);
+    ResultSet exec_drop_database(const ast::DropDatabaseStmt& s);
 
     // 表达式求值
     types::Value eval(const ast::Expression& e, const ExecContext& ctx) const;

@@ -57,6 +57,8 @@ private:
     ast::StmtPtr parse_delete();
     ast::StmtPtr parse_create_table();
     ast::StmtPtr parse_drop_table();
+    ast::StmtPtr parse_create_database();
+    ast::StmtPtr parse_drop_database();
     ast::StmtPtr parse_use();
     ast::StmtPtr parse_show();
 
