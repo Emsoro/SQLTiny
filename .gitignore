@@ -1,0 +1,46 @@
+# Build output
+build/
+out/
+*.obj
+*.o
+*.lib
+*.exe
+*.dll
+*.exp
+*.pdb
+*.ilk
+*.log
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+Presets/
+*.cmake.user
+
+# vcpkg
+build/vcpkg_*
+
+# IDE
+.vs/
+.vscode/
+.idea/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# OS
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# HSQLDB 源码目录(不跟踪)
+hsqldb/
+
+# 测试临时文件
+*.db
+*.log
+data/
