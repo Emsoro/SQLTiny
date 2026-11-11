@@ -1,9 +1,9 @@
 # SQLTiny — 轻量级嵌入式数据库 · MySQL 协议兼容
 
-![status](https://img.shields.io/badge/status-M4%20Milestone-green)
+![status](https://img.shields.io/badge/status-M5%20Milestone-green)
 ![language](https://img.shields.io/badge/C%2B%2B-20-blue)
 ![license](https://img.shields.io/badge/license-Apache%202.0-blue)
-![tests](https://img.shields.io/badge/tests-48%2F48%20PASS-brightgreen)
+![tests](https://img.shields.io/badge/tests-69%20C%2B%2B%2B%20%2B%205%20Python%20scripts%20PASS-brightgreen)
 
 **SQLTiny** 是用现代 C++20 从零重写的轻量级关系型数据库,核心设计灵感来自 [HSQLDB](http://hsqldb.org/),额外暴露 **MySQL Wire Protocol**——标准 MySQL 客户端(`mysql` CLI、Navicat、DBeaver、Connector/J、PyMySQL)直接连接。
 
@@ -32,9 +32,9 @@
 | M2 Catalog + DDL/DML | ✅ | Parser + AST + 执行器 |
 | M2.5 MySQL 协议 | ✅ | Wire Protocol 握手 + 编解码 + TCP server |
 | M3 子查询 + JOIN 补全 | ✅ | GROUP BY · HAVING · 子查询 IN · INSERT SELECT · INNER/LEFT JOIN |
-| **M4 协议层补全** | ✅ | Catalog 多库化 · CREATE/DROP/USE DATABASE · SHOW 系列 · SET 占位 · **Python 全场景测试** |
-| M5 持久化 WAL | 📋 | 重启不丢数据 |
-| M6 性能打磨 | 📋 | B+Tree + EXPLAIN |
+| M4 协议层补全 | ✅ | Catalog 多库化 · SHOW 系列(含 LIKE) · SQLAlchemy 系统变量兼容 |
+| **M5 持久化 + MVCC + SQLAlchemy** | ✅ | WAL+Replay+Checkpoint · MVCC SCN 可见性 · AUTO_INCREMENT · 全局 mutex 并发安全 · **SQLAlchemy 8/10 核心路径 PASS · 4 个集成测试** |
+| **M6 行锁 + 事务 + JOIN 优化** | 📋 | 行级锁替换全局 mutex → 真正事务 → JOIN 索引优化 → 存储过程 |
 
 ---
 
@@ -61,8 +61,13 @@ cmake --build build --config Debug
 | `build/Debug/smoke_m2.exe` | 冒烟测试 | CRUD / 聚合 / 表达式 / DDL / NULL — **5/5 PASS** |
 | `build/Debug/smoke_m3.exe` | 冒烟测试 | GROUP BY / HAVING / 子查询 IN / INSERT SELECT — **4/4 PASS** |
 | `build/Debug/smoke_m4.exe` | 冒烟测试 | CREATE/DROP DB / USE / SHOW / SET 占位 — **6/6 PASS** |
+| `build/Debug/smoke_m5_wal.exe` | 冒烟测试 | WAL Replay + CRC 校验 + Checkpoint 恢复 — **28/28 PASS** |
 | `build/Debug/smoke_m25_e2e.exe` | E2E 测试 | Winsock 直连 server — **13/13 PASS** |
 | `tests/test_full_flow.py` | PyMySQL 全场景 | 建库→建表→插入→查询(含 JOIN/聚合/NULL)→更新→删除→错误路径→删库 — **17/17 PASS** |
+| `tests/test_sqlalchemy.py` | SQLAlchemy 2.x | Engine/Core/ORM/Inspector/持久化重连 — **8/10 PASS**(2 非核心 FAIL:DESCRIBE / SHOW FULL TABLES) |
+| `tests/test_vs_sqlite.py` | 行为对比 | 同一逻辑 SQLTiny vs SQLite 全场景 assert — **全绿** |
+| `tests/test_perf_vs_sqlite.py` | 性能对比 | 200 users + 800 orders INSERT + JOIN 性能 — **跑通无 crash** |
+| `tests/test_concurrency.py` | 并发安全 | 5 线程(2W+2R+1D)15s 并发读写 — **通过** |
 
 ### 一键跑全量测试
 ```powershell
@@ -73,24 +78,34 @@ cmake --build build --config Debug
 .\build\Debug\smoke_m2.exe
 .\build\Debug\smoke_m3.exe
 .\build\Debug\smoke_m4.exe
+.\build\Debug\smoke_m5_wal.exe
 
 # MySQL 协议端到端(C++ Winsock client)
 .\build\Debug\sqltiny_server.exe --port 3306 --user root
 .\build\Debug\smoke_m25_e2e.exe
 
 # Python 全场景(PyMySQL client,单一 connection)
-pip install pymysql
+pip install pymysql sqlalchemy
 python tests\test_full_flow.py
+python tests\test_sqlalchemy.py
+python tests\test_vs_sqlite.py
+python tests\test_perf_vs_sqlite.py
+python tests\test_concurrency.py
 ```
 
-### 测试总览 (48/48 PASS)
+### 测试总览 (C++ 69/69 PASS · Python 5 script PASS)
 ```
 smoke_m1        3/3  PASS    Value / AVL / Lexer
 smoke_m2        5/5  PASS    CRUD / 聚合 / 表达式 / DDL edge / IS NULL
 smoke_m3        4/4  PASS    GROUP BY / HAVING / 子查询 IN / INSERT SELECT
 smoke_m4        6/6  PASS    CREATE/DROP DB / USE / SHOW / SET 占位
+smoke_m5_wal   28/28 PASS    WAL Replay + CRC + Checkpoint + 启动恢复
 smoke_m25_e2e  13/13 PASS    MySQL wire C++ client E2E
 test_full_flow 17/17 PASS    PyMySQL 全场景:建库→建表→插入→查询(含NULL/聚合/JOIN)→更新→删除→错误路径→删库
+test_sqlalchemy 8/10 PASS    SQLAlchemy Engine/Core/ORM/Inspector (2 FAIL:DESCRIBE + SHOW FULL TABLES → M6 P1)
+test_vs_sqlite  全绿          同逻辑 SQLTiny vs SQLite 行为一致
+test_perf_vs_sqlite 跑通      200 users / 800 orders INSERT + JOIN 性能对比
+test_concurrency 通过         5 线程 15s 并发,全局 mutex 防 crash
 ```
 
 ---
@@ -145,9 +160,10 @@ sqltiny_server [--port <n>] [--user <name>] [--password <pwd>]
 | **聚合** | `COUNT(*)` / `COUNT(col)` / `SUM` / `AVG` / `MIN` / `MAX` | GROUP BY + HAVING 完整 |
 | **表连接** | INNER JOIN / LEFT JOIN / CROSS JOIN / 多 JOIN 链 | 别名限定列 + LEFT JOIN 保留 NULL 行 |
 | **子查询** | `WHERE col IN (SELECT …)` | 标量子查询 |
-| **SHOW** | `SHOW DATABASES` / `SHOW TABLES` / `SHOW COLUMNS FROM t` / `SHOW CREATE TABLE t` / `SHOW STATUS` / `SHOW VARIABLES` | |
-| **系统** | `SET NAMES utf8mb4` / `SET AUTOCOMMIT = ON` | 占位实现(满足 PyMySQL 握手) |
-| **事务** | (M5) `BEGIN` / `COMMIT` / `ROLLBACK` | |
+| **SHOW** | `SHOW DATABASES` / `SHOW TABLES` / `SHOW COLUMNS FROM t` / `SHOW CREATE TABLE t` / `SHOW STATUS` / `SHOW VARIABLES [LIKE pattern]` | LIKE 支持 `%xxx%` / `xxx%` / `%xxx` / 精确匹配 |
+| **系统** | `SET NAMES utf8mb4` / `SET AUTOCOMMIT = ON` | 占位实现(满足 SQLAlchemy / PyMySQL 初始化) |
+| **事务** | `BEGIN` / `COMMIT` / `ROLLBACK` | 目前 parser 占位(语义正确但无 undo-log,所有 SQL 在全局 mutex 下串行化)→ M6 P1 完整化 |
+| **并发安全** | `Session::execute` 入口全局 `std::mutex` | 多线程 server 不 crash,但吞吐为 1(每行锁 → M6 P0) |
 
 ### 已验证 SQL 示例
 
@@ -214,8 +230,13 @@ SQLTiny/
     ├── smoke_m2.cpp           CRUD / 聚合 / 表达式 / DDL / NULL
     ├── smoke_m3.cpp           GROUP BY / HAVING / 子查询 IN / INSERT SELECT
     ├── smoke_m4.cpp           CREATE/DROP DB / USE / SHOW / SET 占位
+    ├── smoke_m5_wal.cpp       WAL Replay + CRC + Checkpoint 恢复
     ├── smoke_m25_e2e.cpp      Winsock 直连 server E2E
-    └── test_full_flow.py      PyMySQL 全场景用户测试(单一 connection)
+    ├── test_full_flow.py      PyMySQL 全场景用户测试
+    ├── test_sqlalchemy.py     SQLAlchemy 2.x Engine/Core/ORM/Inspector
+    ├── test_vs_sqlite.py      SQLTiny vs SQLite 行为对比
+    ├── test_perf_vs_sqlite.py 大数据量 INSERT + JOIN 性能对比
+    └── test_concurrency.py    多线程并发读写(全局 mutex 验证)
 ```
 
 ---

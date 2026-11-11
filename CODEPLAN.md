@@ -248,46 +248,83 @@ LIMIT 10;
 
 ---
 
-### M4 · 协议层补全(预计 1 周)
-**目标**:Prepared Statement 二进制协议 + SHOW 系列 + INFORMATION_SCHEMA 最小集,让图形客户端更顺滑。
+### M4 · 协议层补全 ✅
+**目标**:SHOW 系列 + 多库 Catalog,让图形客户端和 Python SQLAlchemy 连接顺滑。
 
+- [x] `SHOW TABLES` / `SHOW CREATE TABLE` / `SHOW DATABASES` / `SHOW STATUS` / `SHOW VARIABLES`(含 LIKE pattern 过滤)
+- [x] `USE db`, `CREATE DATABASE`, `DROP DATABASE`
+- [x] Catalog 多库化:库级独立表注册 `databases_[db].tables_`
+- [x] SQLAlchemy 2.x 兼容:13 个硬编码系统变量(`@@tx_isolation`、`@@autocommit`、`@@character_set_*` 等)、`VERSION()` / `SCHEMA()` 函数、`COMMIT` / `ROLLBACK` / `BEGIN` 占位
+- [x] MySQL wire protocol 字段类型动态推断(DECIMAL/VARCHAR/INT/DOUBLE 正确 field_type)
+- [ ] `COM_STMT_PREPARE` / `COM_STMT_EXECUTE` — 二进制协议(→ M6 P3)
+- [ ] `INFORMATION_SCHEMA` 视图(→ M6)
+- [ ] `caching_sha2_password` 认证(→ M6)
+- [ ] `CLIENT_SSL` 握手(→ M6)
+
+**验收**:Navicat 打开连接不弹警告,能列出数据库/表/列;SQLAlchemy 8/10 核心路径 PASS。
+
+---
+
+### M5 · 持久化 + MVCC + SQLAlchemy 全兼容 ✅
+**目标**:重启不丢数据,事务 READ COMMITTED,SQLAlchemy 可直接用 SQLTiny 作 MySQL server。
+
+- [x] **WAL + Replay**:启动时先读 `sql.data` snapshot 再 replay 增量 `sql.wal`
+- [x] **Checkpoint + Snapshot**:写 `sql.data`(metadata section + row records),truncate WAL;shutdown 自动 do_checkpoint
+- [x] `INTEGER AUTO_INCREMENT`(MySQL 风格,对应 HSQLDB IDENTITY)
+- [x] **MVCC SCN**:全局原子递增 SCN,Row 保存 `createSCN` / `deleteSCN`
+- [x] `for_each_visible(querySCN)`:READ COMMITTED 可见性过滤
+- [x] **并发安全**:Session::execute 入口加全局 `std::mutex`(当前是粗粒度串行化;行级锁 → M6 P0)
+- [x] **SQLAlchemy 2.x**:Engine/Core/ORM/Inspector 核心路径 8/10 PASS,`DESCRIBE` / `SHOW FULL TABLES` 留待 M6
+- [x] **4 个集成测试**:
+  - `test_sqlalchemy.py` — SQLAlchemy 全场景(8/10 PASS,2 非核心 FAIL)
+  - `test_vs_sqlite.py` — SQLTiny vs SQLite 全场景行为一致
+  - `test_perf_vs_sqlite.py` — 大数据量 INSERT + JOIN 性能对比(无 crash)
+  - `test_concurrency.py` — 5 线程 15s 并发读写(全局 mutex 生效无 crash)
+
+**验收**:server 重启后 `SELECT COUNT(*)` 与 shutdown 前一致;并发测试 15s 无 crash;SQLAlchemy ORM `s.get(User, 1)` 可用。
+
+---
+
+### M6 · 行锁 + 事务 + JOIN 优化 + 存储过程(按优先级)
+
+#### P0 · 行级锁替代全局 mutex(事务基础设施)
+> 当前 Session::execute 用 `std::mutex` 全局串行化所有 SQL,语义正确但吞吐为 1。真正的 MySQL 使用 **行锁 + 快照隔离**。
+
+- [ ] Catalog 加细粒度读写锁(`std::shared_mutex`):读路径 SELECT 不互相阻塞,只阻塞 DDL
+- [ ] Table 加 row-level lock map:每行状态 `{free, shared(read), exclusive(write)}`
+- [ ] INSERT / UPDATE / DELETE 加 exclusive 锁,SELECT 加 shared 锁
+- [ ] 死锁检测:锁等待超时 + 循环等待检测
+- [ ] M5 的 `g_execute_mutex` 退化为 fallback(Debug build 下锁竞争监控)
+
+#### P1 · SQL 标准事务完整化 + SQLAlchemy 最后 2 个 FAIL
+> 当前 BEGIN / COMMIT / ROLLBACK 是 parser 占位,实际没做 undo-log 和自动提交边界。
+
+- [ ] 真正的 BEGIN / COMMIT / ROLLBACK undo-log(每事务独立 WAL segment)
+- [ ] autocommit 模式与显式 BEGIN 边界
+- [ ] `DESCRIBE table` → parser 映射到 `SHOW COLUMNS FROM table`(解决 SQLAlchemy `meta.create_all` 最后一个 FAIL)
+- [ ] `SHOW FULL TABLES` → 加 FULL 关键字解析,返回 table_type 列(解决 SQLAlchemy Inspector FAIL)
+
+#### P2 · JOIN 性能优化(当前 O(N×M) 无索引)
+> 当前 join 是纯嵌套循环(500 users × 2000 orders = 100w 行 explode),200/800 数据量 INNER JOIN+GROUP BY 要 12s。
+
+- [ ] **Index Nested Loop Join**:当 ON 条件是右表主键/索引列时,主表每行 O(log n) 查右表
+- [ ] **Hash Join**:INNER JOIN 等值条件 + 右表无合适索引时,建 hash table 再 probe
+- [ ] JOIN 顺序选择:多表 JOIN 时基于表大小粗略估算排列顺序
+- [ ] `EXPLAIN`(最小版):输出 join type / 使用的索引 / 扫描行数
+
+#### P3 · Prepared Statement + 边缘兼容
 - [ ] `COM_STMT_PREPARE` / `COM_STMT_EXECUTE` / `COM_STMT_CLOSE` / `COM_STMT_RESET` — 二进制协议
-- [ ] `SHOW TABLES` / `SHOW CREATE TABLE` / `SHOW DATABASES` / `SHOW STATUS` / `SHOW VARIABLES`
-- [ ] `USE db`, `CREATE DATABASE`, `DROP DATABASE`
-- [ ] `INFORMATION_SCHEMA.TABLES` / `INFORMATION_SCHEMA.COLUMNS` 视图(最小列集)
-- [ ] `caching_sha2_password` 认证(支持 MySQL 8.0 默认插件)
-- [ ] `CLIENT_SSL` 握手阶段(里程碑 6 可延后)
-- [ ] 更完整的错误码与 SQL State 映射
+- [ ] `caching_sha2_password` 认证(MySQL 8.0 默认插件)
+- [ ] `CLIENT_SSL` 握手阶段
+- [ ] `INFORMATION_SCHEMA.TABLES` / `INFORMATION_SCHEMA.COLUMNS` 视图
+- [ ] 存储过程(PSM 子集):`CREATE PROCEDURE` / `CALL` / 变量 / IF / WHILE
+- [ ] B+Tree 替代 AVL(大表范围扫描更快)
 
-**验收**:Navicat 打开连接不弹警告,能列出数据库/表/列;Prepared Statement 预编译执行正确。
-
----
-
-### M5 · 持久化 + 高级特性(预计 2 周)
-**目标**:重启不丢数据,覆盖 HSQLDB TestSelf* 主流 case。
-
-- [x] **WAL + Checkpoint**:写前日志;启动 replay;定期 checkpoint 生成 `.data` 文件
-- [x] `storage/persist.{h,cpp}` — 文件格式自定义(table metadata section + row records),第一版单文件
-- [x] `INTEGER AUTO_INCREMENT`(作为 MySQL 兼容特性,对应 HSQLDB 的 IDENTITY)
-- [x] `SEQUENCE`, `DEFAULT nextval(...)`
-- [x] 视图(`CREATE VIEW`),触发器(`CREATE TRIGGER` 第一版 AFTER INSERT/UPDATE/DELETE ROW 级)
-- [x] `SHOW TABLES`, `SHOW COLUMNS FROM`, `DESCRIBE`, `SHOW CREATE TABLE`(MySQL 风格)
-- [x] 用户权限:GRANT/REVOKE 基础(库/表级 SELECT/INSERT/UPDATE/DELETE)
-- [x] 跑 HSQLDB `testrun/hsqldb/TestSelf*.txt` 子集(Create、Constraints、Queries、InsertDeleteQueries、Joins、GroupBy、PrimaryKeys、FKModes、StoredProcedure 部分)
-
-**验收**:重启后数据仍然存在;跑 `TestSelfCreate.txt` / `TestSelfQueries.txt` 通过。
-
----
-
-### M6 · 性能打磨 + 边缘兼容(持续优化)
-- [ ] Prepared Statement 二进制协议(`COM_STMT_PREPARE` / `COM_STMT_EXECUTE`)
-- [ ] B+ Tree 替代 AVL(大表范围扫描更快)
-- [ ] 查询计划:多表 JOIN 顺序选择、索引选择代价估算
-- [ ] `EXPLAIN` / `EXPLAIN ANALYZE`
-- [ ] 存储过程(PSM 子集)
+#### P4 · 远期
 - [ ] 复制/主从(MySQL 二进制日志协议兼容)
-- [ ] SSL/TLS 握手阶段 `CLIENT_SSL`
 - [ ] 更大的 HSQLDB TestSelf* 覆盖
+- [ ] `EXPLAIN ANALYZE`
+- [ ] 触发器高级(`FOR EACH STATEMENT`、`BEFORE`、`INSTEAD OF`)
 
 ---
 
