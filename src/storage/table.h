@@ -64,6 +64,10 @@ public:
     /// 自增主键下一个值(仅整数 PK)
     int64_t next_auto_increment();
 
+    /// M5.5 Snapshot 重建 + AUTO_INCREMENT 收尾:恢复 cursor
+    void set_auto_inc_cursor(int64_t v) { auto_inc_cursor_ = v; }
+    int64_t auto_inc_cursor() const { return auto_inc_cursor_; }
+
 private:
     TableDef def_;
     // 行存储:row_id → Row

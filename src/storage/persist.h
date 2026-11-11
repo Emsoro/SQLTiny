@@ -94,7 +94,11 @@ namespace codec {
     /// uint64 LE
     std::vector<uint8_t> encode_u64(uint64_t v);
     uint64_t decode_u64(std::span<const uint8_t>& buf);
-}
+} // namespace codec
+
+/// CRC32 (IEEE 802.3) — 公开供 snapshot/wal 共用
+uint32_t crc32(const uint8_t* data, size_t len, uint32_t init = 0xFFFFFFFF);
+uint32_t crc32(const std::vector<uint8_t>& v);
 
 /// WAL writer — 纯追加文件
 class WalWriter {

@@ -145,6 +145,8 @@ ResultSet Executor::exec_insert(const ast::InsertStmt& s) {
             auto [db_part, tbl_part] = split_qname(s.table_name);
             std::string db_name = db_part.empty() ? catalog_.current_database() : db_part;
             core::Database::instance().wal().append_insert_row(db_name, tbl_part, rid, row);
+            core::Database::instance().wal().append_auto_inc_update(db_name, tbl_part,
+                                                                    static_cast<uint64_t>(tbl->auto_inc_cursor()));
         }
         affected++;
         // 更新 last_insert_id(最后一个插入的 auto_increment 值)
@@ -197,6 +199,8 @@ ResultSet Executor::exec_insert(const ast::InsertStmt& s) {
                 auto [db_part, tbl_part] = split_qname(s.table_name);
                 std::string db_name = db_part.empty() ? catalog_.current_database() : db_part;
                 core::Database::instance().wal().append_insert_row(db_name, tbl_part, rid, row);
+                core::Database::instance().wal().append_auto_inc_update(db_name, tbl_part,
+                                                                        static_cast<uint64_t>(tbl->auto_inc_cursor()));
             }
             affected++;
             // last_insert_id

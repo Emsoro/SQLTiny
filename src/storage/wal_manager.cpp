@@ -1,4 +1,5 @@
 #include "storage/wal_manager.h"
+#include "storage/snapshot.h"
 #include "catalog/catalog.h"
 #include "storage/table.h"
 #include "parser/ast.h"
@@ -7,6 +8,13 @@
 #include <atomic>
 
 namespace sqltiny {
+
+std::string WalManager::snapshot_path() const {
+    // sql.wal → sql.data
+    auto dot = wal_path_.rfind('.');
+    if (dot == std::string::npos) return wal_path_ + ".data";
+    return wal_path_.substr(0, dot) + ".data";
+}
 
 bool WalManager::open(const std::string& wal_path, catalog::Catalog& catalog) {
     wal_path_ = wal_path;
@@ -23,21 +31,89 @@ bool WalManager::open(const std::string& wal_path, catalog::Catalog& catalog) {
         return false;
     }
 
-    // 尝试 replay 现有内容
-    bool truncated = false;
-    size_t applied = replay(catalog, truncated);
-    if (applied > 0) {
-        fmt::print("[WAL] replay complete: {} records applied {}\n",
-                   applied, truncated ? "(truncated at crash point)" : "(clean)");
+    // bootstrap: snapshot + WAL 增量
+    bootstrap(catalog);
+    return true;
+}
+
+void WalManager::bootstrap(catalog::Catalog& catalog) {
+    std::string snap_path = snapshot_path();
+    persist::WalSnapshot snap(snap_path);
+    uint64_t snap_wal_offset = 0;
+    int64_t rows_rebuilt = -1;
+
+    if (snap.file_exists() && snap.is_valid()) {
+        rows_rebuilt = snap.read_and_rebuild(catalog, &snap_wal_offset);
+        if (rows_rebuilt >= 0) {
+            fmt::print("[Snapshot] rebuilt OK: {} rows (wal_offset={})\n", rows_rebuilt, snap_wal_offset);
+            checkpoint_wal_offset_ = snap_wal_offset;
+        } else {
+            fmt::print("[Snapshot] CRC failed, ignoring — replay WAL from scratch\n");
+            checkpoint_wal_offset_ = 0;
+        }
     } else {
-        fmt::print("[WAL] new or empty: {}\n", wal_path);
+        fmt::print("[Snapshot] no snapshot — replay WAL from scratch\n");
+        checkpoint_wal_offset_ = 0;
     }
+
+    // 现在 replay 从 checkpoint_wal_offset_ 之后的 WAL 增量
+    // 简化实现:WalReader 从头读,但跳过 checkpoint_wal_offset_ 之前的字节
+    // (M5 第一版简单做:从头 replay — 如果有 snapshot 就先清,如果没有就直接 replay)
+    if (rows_rebuilt >= 0) {
+        // 有 snapshot 重建过了 — 追加 replay WAL
+        // 但现在 replay() 是从头读,我们需要让它 seek 到 checkpoint_wal_offset_ 之后
+        // 临时方案:直接从头 replay,用幂等的 CreateTable/DropTable
+        // (replay 里 if_not_exists / if_exists 已经幂等,重复应用 DDL 不破坏)
+        bool truncated = false;
+        size_t applied = replay(catalog, truncated);
+        fmt::print("[WAL] post-snapshot replay: {} records applied {}\n",
+                   applied, truncated ? "(truncated)" : "(clean)");
+    } else {
+        bool truncated = false;
+        size_t applied = replay(catalog, truncated);
+        fmt::print("[WAL] replay from scratch: {} records applied {}\n",
+                   applied, truncated ? "(truncated)" : "(clean)");
+    }
+}
+
+bool WalManager::do_checkpoint(catalog::Catalog& catalog) {
+    if (!enabled()) return true;
+    std::lock_guard<std::mutex> g(mu_);
+
+    // 1. 记录当前 WAL 偏移
+    FILE* fh = std::fopen(wal_path_.c_str(), "rb+");
+    if (!fh) return false;
+    std::fseek(fh, 0, SEEK_END);
+    uint64_t wal_offset = static_cast<uint64_t>(std::ftell(fh));
+    std::fclose(fh);
+
+    // 2. 写 snapshot
+    persist::WalSnapshot snap(snapshot_path());
+    if (!snap.write(catalog, wal_offset)) return false;
+
+    // 3. 写 CheckpointStart + EndOfFile
+    persist::WalRecord cps{ persist::RecordType::CheckpointStart, 0, persist::codec::encode_u64(wal_offset) };
+    writer_->append(cps);
+    persist::WalRecord eof{ persist::RecordType::EndOfFile, 0, {} };
+    writer_->append(eof);
+    writer_->close(); writer_.reset();
+
+    // 4. 截断 WAL (重开从头写)
+    fh = std::fopen(wal_path_.c_str(), "w+b");
+    if (!fh) return false;
+    std::fclose(fh);
+
+    // 5. 重开 writer
+    writer_ = std::make_unique<persist::WalWriter>(wal_path_);
+    if (!writer_->open()) return false;
+    checkpoint_wal_offset_ = 0;
+    checkpoint_pending_.store(false);
+    fmt::print("[WAL] checkpoint done: WAL truncated, snapshot at {}\n", snapshot_path());
     return true;
 }
 
 void WalManager::close() {
     if (!writer_ || !writer_->is_open()) return;
-    // 写 EndOfFile 作为干净关闭标记
     persist::WalRecord eof{ persist::RecordType::EndOfFile, 0, {} };
     append(eof);
     writer_->close();
@@ -245,8 +321,10 @@ size_t WalManager::replay(catalog::Catalog& catalog, bool& out_truncated) {
                 auto tn = persist::codec::decode_string(buf);
                 if (!dn || !tn) break;
                 uint64_t cur = persist::codec::decode_u64(buf);
-                // AutoIncrement 的 cursor 调整 — Table 没有直接 setter,这里跳过
-                // (auto_increment 不影响数据正确性,只是重启后从更大的值开始)
+                auto* tbl = catalog.get_table(*dn + "." + *tn);
+                if (tbl) {
+                    tbl->set_auto_inc_cursor(static_cast<int64_t>(cur));
+                }
                 break;
             }
             case persist::RecordType::EndOfFile: {

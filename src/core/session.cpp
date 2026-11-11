@@ -29,6 +29,11 @@ bool Database::open(const std::string& data_dir) {
 }
 
 void Database::shutdown() {
+    // 优雅关闭前做 checkpoint:写 snapshot + truncate WAL
+    if (wal_.enabled()) {
+        fmt::print("[SQLTiny] shutting down — checkpointing...\n");
+        wal_.do_checkpoint(catalog_);
+    }
     wal_.close();
 }
 

@@ -31,6 +31,14 @@ public:
 
     std::vector<std::string> table_names() const;
 
+    /// M5.5 Snapshot 用:遍历所有库 (顺序)
+    void for_each_database(const std::function<void(const std::string& db_name)>& cb) const;
+    /// M5.5 Snapshot 用:遍历指定库的所有表
+    void for_each_table_in(const std::string& db_name,
+                           const std::function<void(const std::string& tname, const storage::Table*)>& cb) const;
+    /// M5.5 Snapshot 重建前清空 (保留 default)
+    void clear_all_except_default();
+
 private:
     std::string current_database_ = "default";
     /// 每个 database 持有自己的 table map

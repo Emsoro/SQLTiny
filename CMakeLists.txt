@@ -21,6 +21,7 @@ set(SQLTINY_SOURCES
   src/storage/table.cpp
   src/storage/persist.cpp
   src/storage/wal_manager.cpp
+  src/storage/snapshot.cpp
   src/catalog/catalog.cpp
   src/core/session.cpp
   src/executor/expr.cpp

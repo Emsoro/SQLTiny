@@ -194,4 +194,31 @@ std::vector<std::string> Catalog::table_names() const {
     return out;
 }
 
+void Catalog::for_each_database(const std::function<void(const std::string&)>& cb) const {
+    std::vector<std::string> names;
+    for (auto& [name, _] : databases_) names.push_back(name);
+    std::sort(names.begin(), names.end());
+    for (auto& n : names) cb(n);
+}
+
+void Catalog::for_each_table_in(const std::string& db_name,
+                                const std::function<void(const std::string&, const storage::Table*)>& cb) const {
+    const DbTables* db = get_db(db_name);
+    if (!db) return;
+    std::vector<std::string> names;
+    for (auto& [name, _] : db->tables) names.push_back(name);
+    std::sort(names.begin(), names.end());
+    for (auto& n : names) cb(n, db->tables.at(n).get());
+}
+
+void Catalog::clear_all_except_default() {
+    // 保留 default 及其 tables (如果有),其他库全部清掉
+    auto def_it = databases_.find("default");
+    DbTables default_backup;
+    if (def_it != databases_.end()) default_backup = std::move(def_it->second);
+    databases_.clear();
+    databases_["default"] = std::move(default_backup);
+    current_database_ = "default";
+}
+
 } // namespace sqltiny::catalog

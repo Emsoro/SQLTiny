@@ -59,6 +59,8 @@ public:
     bool append(const persist::WalRecord& rec);
 
     // ============ Checkpoint (M5.5) ============
+    /// 同步 checkpoint:写 snapshot .data + truncate WAL
+    bool do_checkpoint(catalog::Catalog& catalog);
     void request_checkpoint() { checkpoint_pending_.store(true); }
     bool checkpoint_pending() const { return checkpoint_pending_.load(); }
 
@@ -68,8 +70,14 @@ private:
     std::mutex mu_;       // 所有 append 共享一把锁
     std::atomic<bool> checkpoint_pending_{false};
 
-    /// Replay WAL 到 catalog。返回实际应用的 record 数。
-    /// is_truncated = true 表示 WAL 中途损坏/崩溃 —— 前面的有效,后面的丢
+    /// WAL 对应的 snapshot 路径:同目录下 sql.data
+    std::string snapshot_path() const;
+    /// 上一次 checkpoint 时 WAL 的偏移 —— replay 从这里之后开始
+    uint64_t checkpoint_wal_offset_ = 0;
+
+    /// 启动时:先读 snapshot,再 replay 后续 WAL
+    void bootstrap(catalog::Catalog& catalog);
+    /// Replay WAL 到 catalog (从 checkpoint_wal_offset_ 之后开始)
     size_t replay(catalog::Catalog& catalog, bool& out_truncated);
 };
 

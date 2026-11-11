@@ -8,26 +8,29 @@
 namespace sqltiny::persist {
 
 // ============ CRC32 (IEEE 802.3, 查表) ============
-static uint32_t crc32_table[256];
-static bool    crc32_table_init = false;
-static void init_crc32_table() {
-    if (crc32_table_init) return;
-    for (uint32_t i = 0; i < 256; ++i) {
-        uint32_t c = i;
-        for (int k = 0; k < 8; ++k) {
-            c = (c & 1) ? (0xEDB88320 ^ (c >> 1)) : (c >> 1);
+namespace {
+    uint32_t crc32_table[256];
+    bool    crc32_table_init = false;
+    void init_crc32_table() {
+        if (crc32_table_init) return;
+        for (uint32_t i = 0; i < 256; ++i) {
+            uint32_t c = i;
+            for (int k = 0; k < 8; ++k) {
+                c = (c & 1) ? (0xEDB88320 ^ (c >> 1)) : (c >> 1);
+            }
+            crc32_table[i] = c;
         }
-        crc32_table[i] = c;
+        crc32_table_init = true;
     }
-    crc32_table_init = true;
-}
-static uint32_t crc32(const uint8_t* data, size_t len, uint32_t init = 0xFFFFFFFF) {
+} // namespace
+
+uint32_t crc32(const uint8_t* data, size_t len, uint32_t init) {
     init_crc32_table();
     uint32_t c = init;
     for (size_t i = 0; i < len; ++i) c = crc32_table[(c ^ data[i]) & 0xFF] ^ (c >> 8);
     return c ^ 0xFFFFFFFF;
 }
-static uint32_t crc32(const std::vector<uint8_t>& v) {
+uint32_t crc32(const std::vector<uint8_t>& v) {
     return crc32(v.data(), v.size());
 }
 
