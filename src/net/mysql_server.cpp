@@ -69,6 +69,18 @@ void close_fd(int fd) {
 #endif
 }
 
+    // 优雅关闭:直接 close 会发 RST,客户端可能来不及读到 ERR 包
+    void graceful_close(int fd) {
+#ifdef _WIN32
+        ::shutdown(fd, SD_SEND);
+#else
+        ::shutdown(fd, SHUT_WR);
+#endif
+        // 排空对端剩余数据,直到对端也关闭
+        char tmp[256];
+        while (::recv(fd, tmp, sizeof(tmp), 0) > 0) {}
+    }
+
 // 处理一个新连接
 void handle_connection(int client_fd, const ServerConfig& cfg, uint32_t thread_id) {
     core::Session session;
@@ -95,11 +107,26 @@ void handle_connection(int client_fd, const ServerConfig& cfg, uint32_t thread_i
     }
     auto& hr = *hr_opt;
 
+    // M6 P1 #6: 握手的 database 字段生效 —— 不存在的库返回 1049 并拒绝连接
+    // (必须在发 OK 之前校验,认证成功后立刻生效)
+    if (!hr.database.empty()) {
+        auto& cat = core::Database::instance().catalog();
+        if (!cat.database_exists(hr.database)) {
+            auto err = encode_err_packet(1049, "42000",
+                                         fmt::format("Unknown database '{}'", hr.database));
+            auto epkt = encode_mysql_packet(err, seq++);
+            send_all(client_fd, epkt.data(), epkt.size());
+            graceful_close(client_fd);
+            return;
+        }
+    }
+
     // 3. 校验 user + auth(开发期简化:user=root 就行,不校验密码)
     if (_stricmp(hr.user.c_str(), cfg.user.c_str()) != 0) {
         auto err = encode_err_packet(1045, "28000", "Access denied for user");
         auto epkt = encode_mysql_packet(err, seq++);
         send_all(client_fd, epkt.data(), epkt.size());
+        graceful_close(client_fd);
         return;
     }
 
@@ -109,9 +136,7 @@ void handle_connection(int client_fd, const ServerConfig& cfg, uint32_t thread_i
     if (!send_all(client_fd, okpkt.data(), okpkt.size())) return;
 
     session.user = hr.user;
-    if (!hr.database.empty()) {
-        session.current_database = hr.database;
-    }
+    session.current_database = hr.database.empty() ? session.current_database : hr.database;
 
     // 事务状态位:让客户端能正确读到 autocommit / in-transaction (MySQL status flags)
     auto status_flags = [&]() -> uint16_t {
@@ -144,6 +169,14 @@ void handle_connection(int client_fd, const ServerConfig& cfg, uint32_t thread_i
             }
             case COM_INIT_DB: {
                 std::string db_name(reinterpret_cast<const char*>(cmd_payload.data() + 1), cmd_payload.size() - 1);
+                auto& cat = core::Database::instance().catalog();
+                if (!cat.database_exists(db_name)) {
+                    auto err = encode_err_packet(1049, "42000",
+                                                 fmt::format("Unknown database '{}'", db_name));
+                    auto p = encode_mysql_packet(err, seq++);
+                    if (!send_all(client_fd, p.data(), p.size())) return;
+                    break;
+                }
                 session.current_database = db_name;
                 auto r = encode_ok_packet(0, 0, status_flags(), 0, "");
                 auto p = encode_mysql_packet(r, seq++);

@@ -356,10 +356,11 @@ try:
     cols = insp.get_columns("users")
     names = {c["name"] for c in cols}
     ok("get_columns(users) 含 id/name/age", {"id", "name", "age"} <= names, f"got {names}")
-    pk = [c["name"] for c in cols if c.get("primary_key")]
-    ok("get_columns 识别主键 id", "id" in pk, f"pk={pk}")
+    # 注:SQLAlchemy 2.x get_columns 不再返回 primary_key 字段,主键经 get_pk_constraint 查询
+    pkc = insp.get_pk_constraint("users")
+    pk = pkc.get("constrained_columns", [])
+    ok("get_pk_constraint 识别主键 id", "id" in pk, f"pk={pk}")
 except Exception as e:
-    # SQLAlchemy 无法识别 SHOW COLUMNS 返回的 BIGINT/VARCHAR 类型名 → NullType 报错, 方言限制记 GAP
     ok("inspector.get_columns", False, str(e), gap=True)
 
 print(f"\n=== SQLAlchemy 测试完成: {N_PASS} PASS / {N_FAIL} FAIL / {N_GAP} GAP ===")

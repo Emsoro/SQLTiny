@@ -341,10 +341,10 @@ executor::ResultSet Session::execute(const std::string& sql) {
                 return last;
             }
 
-            // —— USE: 同步 Catalog + WAL ——
+            // —— USE: 只改本会话的 current_database (M6 P1 #7: per-session db) ——
             if (kind == ast::StmtKind::Use) {
                 auto& name = st->use_->database_name;
-                if (!exec_.catalog_ref().switch_database(name)) {
+                if (!exec_.catalog_ref().database_exists(name)) {
                     if (implicit_active) { rollbackTransaction(); implicit_active = false; }
                     return make_err(1049, "42000", fmt::format("Unknown database '{}'", name));
                 }

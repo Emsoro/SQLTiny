@@ -27,6 +27,10 @@ static uint64_t writer_txn(core::Session* s) {
     return (s && s->isInTransaction()) ? s->txnId() : 0;
 }
 
+std::string Executor::default_db() const {
+    return session_ ? session_->current_database : catalog_.current_database();
+}
+
 ResultSet Executor::execute(const ast::Statement& stmt) {
     ResultSet r;
     switch (stmt.kind) {
@@ -51,8 +55,8 @@ ResultSet Executor::execute(const ast::Statement& stmt) {
         case ast::StmtKind::Show: {
             auto& sh = *stmt.show_;
             switch (sh.kind) {
-                case ast::ShowStmt::Kind::Tables:      return exec_show_tables();
-                case ast::ShowStmt::Kind::Columns:     return exec_show_columns(sh.table_or_pattern);
+                case ast::ShowStmt::Kind::Tables:      return exec_show_tables(sh.full, sh.table_or_pattern);
+                case ast::ShowStmt::Kind::Columns:     return exec_show_columns(sh.db_name, sh.table_or_pattern);
                 case ast::ShowStmt::Kind::Databases:   return exec_show_databases();
                 case ast::ShowStmt::Kind::CreateTable: return exec_show_create_table(sh.db_name, sh.table_or_pattern);
                 case ast::ShowStmt::Kind::CreateDatabase: return exec_show_create_database(sh.table_or_pattern);
@@ -68,14 +72,14 @@ ResultSet Executor::execute(const ast::Statement& stmt) {
 // ---------- CREATE TABLE ----------
 ResultSet Executor::exec_create_table(const ast::CreateTableStmt& s) {
     ResultSet r;
-    bool ok = catalog_.create_table(s);
+    bool ok = catalog_.create_table(s, default_db());
     if (!ok) {
         r.ok = false; r.mysql_errno = 1050; r.sql_state = "42S01";
         r.error_message = fmt::format("Table '{}' already exists", s.table_name);
     } else {
         auto [db_part, tbl_part] = split_qname(s.table_name);
-        std::string db_name = db_part.empty() ? catalog_.current_database() : db_part;
-        auto* tbl = catalog_.get_table(s.table_name);
+        std::string db_name = db_part.empty() ? default_db() : db_part;
+        auto* tbl = catalog_.get_table(s.table_name, default_db());
         if (tbl) core::Database::instance().wal().append_create_table(db_name, tbl->def());
     }
     return r;
@@ -84,13 +88,13 @@ ResultSet Executor::exec_create_table(const ast::CreateTableStmt& s) {
 // ---------- DROP TABLE ----------
 ResultSet Executor::exec_drop_table(const ast::DropTableStmt& s) {
     ResultSet r;
-    bool ok = catalog_.drop_table(s.table_name, s.if_exists);
+    bool ok = catalog_.drop_table(s.table_name, s.if_exists, default_db());
     if (!ok) {
         r.ok = false; r.mysql_errno = 1051; r.sql_state = "42S02";
         r.error_message = fmt::format("Unknown table '{}'", s.table_name);
     } else {
         auto [db_part, tbl_part] = split_qname(s.table_name);
-        std::string db_name = db_part.empty() ? catalog_.current_database() : db_part;
+        std::string db_name = db_part.empty() ? default_db() : db_part;
         core::Database::instance().wal().append_drop_table(db_name, tbl_part);
     }
     return r;
@@ -99,7 +103,7 @@ ResultSet Executor::exec_drop_table(const ast::DropTableStmt& s) {
 // ---------- INSERT ----------
 ResultSet Executor::exec_insert(const ast::InsertStmt& s) {
     ResultSet r;
-    auto* tbl = catalog_.get_table(s.table_name);
+    auto* tbl = catalog_.get_table(s.table_name, default_db());
     if (!tbl) {
         r.ok = false; r.mysql_errno = 1146; r.sql_state = "42S02";
         r.error_message = fmt::format("Table '{}' doesn't exist", s.table_name);
@@ -155,7 +159,7 @@ ResultSet Executor::exec_insert(const ast::InsertStmt& s) {
         // WAL append: InsertRow
         {
             auto [db_part, tbl_part] = split_qname(s.table_name);
-            std::string db_name = db_part.empty() ? catalog_.current_database() : db_part;
+            std::string db_name = db_part.empty() ? default_db() : db_part;
             core::Database::instance().wal().append_insert_row(db_name, tbl_part, rid, row);
             core::Database::instance().wal().append_auto_inc_update(db_name, tbl_part,
                                                                     static_cast<uint64_t>(tbl->auto_inc_cursor()));
@@ -218,7 +222,7 @@ ResultSet Executor::exec_insert(const ast::InsertStmt& s) {
             // WAL append: InsertRow (INSERT...SELECT 分支)
             {
                 auto [db_part, tbl_part] = split_qname(s.table_name);
-                std::string db_name = db_part.empty() ? catalog_.current_database() : db_part;
+                std::string db_name = db_part.empty() ? default_db() : db_part;
                 core::Database::instance().wal().append_insert_row(db_name, tbl_part, rid, row);
                 core::Database::instance().wal().append_auto_inc_update(db_name, tbl_part,
                                                                         static_cast<uint64_t>(tbl->auto_inc_cursor()));
@@ -248,7 +252,7 @@ ResultSet Executor::exec_insert(const ast::InsertStmt& s) {
 // ---------- UPDATE ----------
 ResultSet Executor::exec_update(const ast::UpdateStmt& s) {
     ResultSet r;
-    auto* tbl = catalog_.get_table(s.table_name);
+    auto* tbl = catalog_.get_table(s.table_name, default_db());
     if (!tbl) {
         r.ok = false; r.mysql_errno = 1146; r.sql_state = "42S02";
         r.error_message = fmt::format("Table '{}' doesn't exist", s.table_name);
@@ -304,7 +308,7 @@ ResultSet Executor::exec_update(const ast::UpdateStmt& s) {
 
     // 循环外改
     auto [u_db, u_tbl] = split_qname(s.table_name);
-    std::string u_db_name = u_db.empty() ? catalog_.current_database() : u_db;
+    std::string u_db_name = u_db.empty() ? default_db() : u_db;
     for (auto& p : pending) {
         // M6: 拿 EXCLUSIVE 行锁
         if (session_ && !session_->tryLockRowWrite(*tbl, p.rid)) {
@@ -352,7 +356,7 @@ ResultSet Executor::exec_update(const ast::UpdateStmt& s) {
 // ---------- DELETE ----------
 ResultSet Executor::exec_delete(const ast::DeleteStmt& s) {
     ResultSet r;
-    auto* tbl = catalog_.get_table(s.table_name);
+    auto* tbl = catalog_.get_table(s.table_name, default_db());
     if (!tbl) {
         r.ok = false; r.mysql_errno = 1146; r.sql_state = "42S02";
         r.error_message = fmt::format("Table '{}' doesn't exist", s.table_name);
@@ -378,7 +382,7 @@ ResultSet Executor::exec_delete(const ast::DeleteStmt& s) {
 
     int affected = 0;
     auto [d_db, d_tbl] = split_qname(s.table_name);
-    std::string d_db_name = d_db.empty() ? catalog_.current_database() : d_db;
+    std::string d_db_name = d_db.empty() ? default_db() : d_db;
     for (int64_t rid : to_delete) {
         // M6: 拿 EXCLUSIVE 行锁
         if (session_ && !session_->tryLockRowWrite(*tbl, rid)) {
@@ -491,7 +495,7 @@ ResultSet Executor::exec_select(const ast::SelectStmt& s) {
 
     // FROM 首表
     std::string primary_table = s.from_tables[0];
-    auto* tbl = catalog_.get_table(primary_table);
+    auto* tbl = catalog_.get_table(primary_table, default_db());
     if (!tbl) {
         r.ok = false; r.mysql_errno = 1146; r.sql_state = "42S02";
         r.error_message = fmt::format("Table '{}' doesn't exist", primary_table);
@@ -519,7 +523,7 @@ ResultSet Executor::exec_select(const ast::SelectStmt& s) {
 
     // JOIN 表
     for (auto& jc : s.joins) {
-        auto* jtbl = catalog_.get_table(jc.table_name);
+        auto* jtbl = catalog_.get_table(jc.table_name, default_db());
         if (!jtbl) {
             r.ok = false; r.mysql_errno = 1146; r.sql_state = "42S02";
             r.error_message = fmt::format("Table '{}' doesn't exist", jc.table_name);
@@ -562,7 +566,7 @@ ResultSet Executor::exec_select(const ast::SelectStmt& s) {
     tbl->for_each_visible(sqscn, [&](int64_t, const storage::Row& row) { left_rows.push_back(row); return true; }, rtxn);
 
     for (auto& jc : s.joins) {
-        auto* jtbl = catalog_.get_table(jc.table_name);
+        auto* jtbl = catalog_.get_table(jc.table_name, default_db());
         std::vector<storage::Row> right_rows;
         jtbl->for_each_visible(sqscn, [&](int64_t, const storage::Row& row) { right_rows.push_back(row); return true; }, rtxn);
 
@@ -941,27 +945,39 @@ ResultSet Executor::exec_select(const ast::SelectStmt& s) {
     return r;
 }
 
-// ---------- SHOW TABLES ----------
-ResultSet Executor::exec_show_tables() {
+// ---------- SHOW TABLES / SHOW FULL TABLES ----------
+ResultSet Executor::exec_show_tables(bool full, const std::string& db_name) {
     ResultSet r;
-    auto col_name = fmt::format("Tables_in_{}", catalog_.current_database());
+    std::string db = db_name.empty() ? default_db() : db_name;
+    auto col_name = fmt::format("Tables_in_{}", db);
     r.column_names = { col_name };
     r.column_types = { types::SqlType::Varchar };
-    auto names = catalog_.table_names();
-    std::sort(names.begin(), names.end());
-    for (auto& n : names) r.rows.push_back({ types::Value::make_string(n) });
+    if (full) {
+        r.column_names.push_back("Table_type");
+        r.column_types.push_back(types::SqlType::Varchar);
+    }
+    auto names = catalog_.table_names(db);
+    for (auto& n : names) {
+        if (full)
+            r.rows.push_back({ types::Value::make_string(n),
+                               types::Value::make_string("BASE TABLE") });
+        else
+            r.rows.push_back({ types::Value::make_string(n) });
+    }
     return r;
 }
 
-ResultSet Executor::exec_show_columns(const std::string& table_name) {
+ResultSet Executor::exec_show_columns(const std::string& db_name, const std::string& table_name) {
     ResultSet r;
     r.column_names = { "Field", "Type", "Null", "Key", "Default", "Extra" };
     r.column_types = { types::SqlType::Varchar, types::SqlType::Varchar, types::SqlType::Varchar,
                        types::SqlType::Varchar, types::SqlType::Varchar, types::SqlType::Varchar };
-    auto* tbl = catalog_.get_table(table_name);
+    // 支持 SHOW COLUMNS FROM t FROM db / DESCRIBE db.t
+    std::string qualified = db_name.empty() ? table_name : db_name + "." + table_name;
+    auto* tbl = catalog_.get_table(qualified, default_db());
     if (!tbl) {
         r.ok = false; r.mysql_errno = 1146; r.sql_state = "42S02";
-        r.error_message = fmt::format("Table '{}' doesn't exist", table_name);
+        r.error_message = fmt::format("Table '{}' doesn't exist", qualified);
         return r;
     }
     auto& def = tbl->def();
@@ -1024,7 +1040,7 @@ ResultSet Executor::exec_show_create_table(const std::string& db_name, const std
 
     // 构造带 db 限定的表名
     std::string qualified = db_name.empty() ? table_name : (db_name + "." + table_name);
-    auto* tbl = catalog_.get_table(qualified);
+    auto* tbl = catalog_.get_table(qualified, default_db());
     if (!tbl) {
         r.ok = false; r.mysql_errno = 1146; r.sql_state = "42S02";
         r.error_message = fmt::format("Table '{}' doesn't exist", qualified);
@@ -1035,39 +1051,40 @@ ResultSet Executor::exec_show_create_table(const std::string& db_name, const std
     std::string sql = fmt::format("CREATE TABLE `{}` (\n", def.name);
     for (size_t i = 0; i < def.columns.size(); ++i) {
         auto& col = def.columns[i];
-        // 类型字符串
+        // 类型字符串 — MySQL 的 SHOW CREATE TABLE 输出小写类型名,
+        // SQLAlchemy 反射(ischema_names 小写键)依赖这一点
         std::string type_str;
         switch (col.type.type) {
-            case types::SqlType::BigInt:   type_str = "BIGINT"; break;
-            case types::SqlType::Int:      type_str = "INT"; break;
-            case types::SqlType::SmallInt: type_str = "SMALLINT"; break;
-            case types::SqlType::TinyInt:  type_str = "TINYINT"; break;
-            case types::SqlType::Double:   type_str = "DOUBLE"; break;
-            case types::SqlType::Float:    type_str = "FLOAT"; break;
-            case types::SqlType::Decimal:  type_str = fmt::format("DECIMAL({},{})", col.type.length, col.type.scale); break;
-            case types::SqlType::Varchar:  type_str = fmt::format("VARCHAR({})", col.type.length ? col.type.length : 255); break;
-            case types::SqlType::Char:     type_str = fmt::format("CHAR({})", col.type.length ? col.type.length : 1); break;
-            case types::SqlType::Text:     type_str = "TEXT"; break;
-            case types::SqlType::Blob:     type_str = "BLOB"; break;
-            case types::SqlType::Date:     type_str = "DATE"; break;
-            case types::SqlType::Time:     type_str = "TIME"; break;
-            case types::SqlType::DateTime: type_str = "DATETIME"; break;
-            case types::SqlType::Timestamp:type_str = "TIMESTAMP"; break;
-            case types::SqlType::Boolean:  type_str = "TINYINT(1)"; break;
-            case types::SqlType::Json:     type_str = "JSON"; break;
-            default: type_str = "UNKNOWN";
+            case types::SqlType::BigInt:   type_str = "bigint"; break;
+            case types::SqlType::Int:      type_str = "int"; break;
+            case types::SqlType::SmallInt: type_str = "smallint"; break;
+            case types::SqlType::TinyInt:  type_str = "tinyint"; break;
+            case types::SqlType::Double:   type_str = "double"; break;
+            case types::SqlType::Float:    type_str = "float"; break;
+            case types::SqlType::Decimal:  type_str = fmt::format("decimal({},{})", col.type.length, col.type.scale); break;
+            case types::SqlType::Varchar:  type_str = fmt::format("varchar({})", col.type.length ? col.type.length : 255); break;
+            case types::SqlType::Char:     type_str = fmt::format("char({})", col.type.length ? col.type.length : 1); break;
+            case types::SqlType::Text:     type_str = "text"; break;
+            case types::SqlType::Blob:     type_str = "blob"; break;
+            case types::SqlType::Date:     type_str = "date"; break;
+            case types::SqlType::Time:     type_str = "time"; break;
+            case types::SqlType::DateTime: type_str = "datetime"; break;
+            case types::SqlType::Timestamp:type_str = "timestamp"; break;
+            case types::SqlType::Boolean:  type_str = "tinyint(1)"; break;
+            case types::SqlType::Json:     type_str = "json"; break;
+            default: type_str = "unknown";
         }
         if (col.type.unsigned_) type_str += " UNSIGNED";
         sql += fmt::format("  `{}` {}", col.name, type_str);
         if (!col.nullable) sql += " NOT NULL";
         if (col.is_auto_increment) sql += " AUTO_INCREMENT";
-        if (col.is_primary_key) sql += " PRIMARY KEY";
+        // 注意:PRIMARY KEY 不内联到列上 —— MySQL 输出为表级 PRIMARY KEY 行,
+        // SQLAlchemy 方言只从表级行识别主键
         if (col.default_value) sql += " DEFAULT <expr>";
-        if (i + 1 < def.columns.size()) sql += ",";
-        sql += "\n";
+        sql += ",\n";
     }
-    // 表级 PK
-    if (def.primary_key_cols.size() == 1 && def.primary_key_cols[0].size() > 1) {
+    // 表级 PRIMARY KEY 行(MySQL 风格,单列/多列都输出)
+    if (!def.primary_key_cols.empty() && !def.primary_key_cols[0].empty()) {
         std::string pk_cols;
         for (size_t i = 0; i < def.primary_key_cols[0].size(); ++i) {
             if (i) pk_cols += ", ";
@@ -1182,13 +1199,10 @@ ResultSet Executor::exec_create_database(const ast::CreateDatabaseStmt& s) {
 // ---------- DROP DATABASE ----------
 ResultSet Executor::exec_drop_database(const ast::DropDatabaseStmt& s) {
     ResultSet r;
+    // MySQL 允许删除当前连接所在的库 (GAP #8)
     if (!catalog_.drop_database(s.database_name, s.if_exists)) {
         r.ok = false; r.mysql_errno = 1008; r.sql_state = "HY000";
-        if (catalog_.current_database() == s.database_name) {
-            r.error_message = fmt::format("Can't drop database '{}'; database doesn't exist or is current database", s.database_name);
-        } else {
-            r.error_message = fmt::format("Can't drop database '{}'; database doesn't exist", s.database_name);
-        }
+        r.error_message = fmt::format("Can't drop database '{}'; database doesn't exist", s.database_name);
     } else {
         core::Database::instance().wal().append_drop_database(s.database_name);
     }

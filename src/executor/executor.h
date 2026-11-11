@@ -75,6 +75,10 @@ public:
     catalog::Catalog& catalog_ref() { return catalog_; }
     const catalog::Catalog& catalog_ref() const { return catalog_; }
 
+    /// M6 P1: 未限定库名的表/DDL 归属哪个库 —— 有 session 用 session 的 current_database,
+    /// 否则退回 catalog 的 server 级 current_database(WAL replay 等)
+    std::string default_db() const;
+
     // M6: Session 可选关联 — 用于事务内拿锁 + 记录 RowAction
     void bind_session(core::Session* s) { session_ = s; }
     core::Session* bound_session() const { return session_; }
@@ -89,8 +93,8 @@ private:
     ResultSet exec_update(const ast::UpdateStmt& s);
     ResultSet exec_delete(const ast::DeleteStmt& s);
     ResultSet exec_select(const ast::SelectStmt& s);
-    ResultSet exec_show_tables();
-    ResultSet exec_show_columns(const std::string& table_name);
+    ResultSet exec_show_tables(bool full = false, const std::string& db_name = "");
+    ResultSet exec_show_columns(const std::string& db_name, const std::string& table_name);
     ResultSet exec_show_databases();
     ResultSet exec_show_create_table(const std::string& db_name, const std::string& table_name);
     ResultSet exec_show_create_database(const std::string& db_name);

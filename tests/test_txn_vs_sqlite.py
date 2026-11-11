@@ -105,6 +105,7 @@ class Harness:
             self.c1.exec("DROP DATABASE IF EXISTS txncmp")
             self.c1.exec("CREATE DATABASE txncmp")
             self.c1.exec("USE txncmp")
+            self.c2.exec("USE txncmp")   # M6 P1: current db 是 per-session 的
             self.c1.exec("CREATE TABLE t (id INT PRIMARY KEY, v VARCHAR(32))")
         else:
             self.c1 = LiteConn(lite_path)

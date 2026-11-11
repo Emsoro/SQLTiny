@@ -231,7 +231,7 @@ types::Value Executor::eval_function(
         if (star) {
             // COUNT(*):当前表行数
             if (ctx.primary_table.empty()) return types::Value::make_int(0);
-            auto* tbl = ctx.catalog.get_table(ctx.primary_table);
+            auto* tbl = ctx.catalog.get_table(ctx.primary_table, default_db());
             if (!tbl) return types::Value::make_int(0);
             return types::Value::make_int(static_cast<int64_t>(tbl->row_count()));
         }
@@ -279,7 +279,9 @@ types::Value Executor::eval_function(
         return types::Value::make_string("root@localhost");
     }
     if (lower == "database" || lower == "schema") {
-        return types::Value::make_string(ctx.catalog.current_database());
+        // M6 P1: current db 是 per-session 状态 (#7)
+        return types::Value::make_string(session_ ? session_->current_database
+                                                  : ctx.catalog.current_database());
     }
     if (lower == "now" || lower == "current_timestamp") {
         std::time_t t = std::time(nullptr);

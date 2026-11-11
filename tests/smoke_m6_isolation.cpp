@@ -74,8 +74,11 @@ static void reset(core::Session& a, core::Session& b) {
     ok(a, "ROLLBACK"); ok(b, "ROLLBACK");
     level(a, "READ COMMITTED"); level(b, "READ COMMITTED");
     ok(a, "SET AUTOCOMMIT = 1"); ok(b, "SET AUTOCOMMIT = 1");
-    ok(a, "USE default"); ok(a, "DROP DATABASE IF EXISTS iso");
-    ok(a, "CREATE DATABASE iso"); ok(a, "USE iso");
+    // M6 P1: current db 是 per-session 的 —— 两个会话都要显式 USE
+    ok(a, "USE default"); ok(b, "USE default");
+    ok(a, "DROP DATABASE IF EXISTS iso");
+    ok(a, "CREATE DATABASE iso");
+    ok(a, "USE iso"); ok(b, "USE iso");
     ok(a, "CREATE TABLE t (id INT PRIMARY KEY, v VARCHAR(32))");
 }
 static const char* kLevels[] = {"READ UNCOMMITTED", "READ COMMITTED",

@@ -59,6 +59,7 @@ add_smoke_test(smoke_m25_e2e  tests/smoke_m25_e2e.cpp)
 add_smoke_test(smoke_m5_wal   tests/smoke_m5_wal.cpp)
 add_smoke_test(smoke_m6_isolation tests/smoke_m6_isolation.cpp)
 add_smoke_test(smoke_m6_hsqldb_matrix tests/smoke_m6_hsqldb_matrix.cpp)
+add_smoke_test(smoke_m6_session_db tests/smoke_m6_session_db.cpp)
 
 if(GTest_FOUND)
   function(add_sqltiny_test name source)

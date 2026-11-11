@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 #include <string>
+#include <set>
 
 namespace sqltiny::parser {
 
@@ -160,6 +161,7 @@ ast::StmtPtr Parser::parse_top() {
         }
         case TokenKind::KwUse:       return parse_use();
         case TokenKind::KwShow:      return parse_show();
+        case TokenKind::KwDescribe: case TokenKind::KwDesc: return parse_describe();
         case TokenKind::KwSet:       return parse_set();
         case TokenKind::KwCommit: {
             consume();
@@ -464,24 +466,37 @@ ast::ExprPtr Parser::parse_primary() {
     }
 
     // 标识符 / 关键字(函数名 或 列名)
+    // M6 P1 GAP #5: 关键字与列名冲突时按标识符处理(如 WHERE status = 'paid')。
+    // 只拒绝会终结/结构化表达式的保留字,其余关键字(STATUS/SQL 类型名等)都可作为列名。
     bool is_ident = (t.kind == TokenKind::Ident || t.kind == TokenKind::QuotedIdent);
-    bool is_func_kw = false;
-    if (!is_ident && static_cast<int>(t.kind) >= static_cast<int>(TokenKind::Kw_START) &&
-        static_cast<int>(t.kind) <= static_cast<int>(TokenKind::Kw_END)) {
-        // 允许一些函数关键字作为函数名
-        static const char* func_names[] = {
-            "COUNT", "SUM", "AVG", "MIN", "MAX", "CONCAT", "COALESCE", "IFNULL",
-            "ROUND", "ABS", "LENGTH", "NOW", "CURRENT_TIMESTAMP", "CURRENT_DATE",
-            "CURRENT_TIME", "USER", "DATABASE", "CAST", "CONVERT",
-            "VERSION", "SCHEMA"
+    bool is_kw = static_cast<int>(t.kind) >= static_cast<int>(TokenKind::Kw_START) &&
+                 static_cast<int>(t.kind) <= static_cast<int>(TokenKind::Kw_END);
+    if (is_kw) {
+        // 结构性保留字 —— 存小写,查找时把 token 文本转小写比较
+        static const std::set<std::string> reserved = {
+            // 表达式结构 / 子句边界
+            "select", "from", "where", "and", "or", "not", "is", "in", "like",
+            "between", "as", "on", "join", "inner", "left", "right", "outer",
+            "full", "cross", "natural", "group", "by", "having", "order",
+            "asc", "desc", "limit", "offset", "union", "intersect", "except",
+            "case", "when", "then", "else", "end",
+            // 语句级保留字 (database/schema 不在内 —— 是 DATABASE()/SCHEMA() 函数)
+            "insert", "into", "values", "set", "update", "delete", "create",
+            "drop", "table", "tables", "databases", "schemas", "use", "show",
+            "describe", "explain", "primary", "foreign", "references",
+            "constraint", "unique", "index", "check", "auto_increment",
+            "if", "exists", "begin", "commit", "rollback", "savepoint",
+            "release", "start", "transaction", "work", "to", "alter",
+            "add", "column", "truncate", "temporary",
         };
-        for (auto n : func_names) {
-            if (_stricmp(t.text.c_str(), n) == 0) { is_func_kw = true; break; }
-        }
-        // 关键字也可以当列名(宽松处理)
+        std::string low;
+        low.resize(t.text.size());
+        std::transform(t.text.begin(), t.text.end(), low.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (reserved.count(low)) is_kw = false;
     }
 
-    if (is_ident || is_func_kw) {
+    if (is_ident || is_kw) {
         consume();
         std::string name = t.text;
         int line = t.line, col = t.col;
@@ -844,7 +859,7 @@ std::vector<ast::ColumnDef> Parser::parse_column_defs() {
     std::vector<ast::ColumnDef> cols;
     expect(TokenKind::LParen, "(");
     while (!match(TokenKind::RParen)) {
-        // 表级约束: PRIMARY KEY(a,b), UNIQUE INDEX idx(a), INDEX idx(a), CONSTRAINT ...
+        // 表级约束: PRIMARY KEY(a,b), FOREIGN KEY(a) REFERENCES t(b), CONSTRAINT ...
         if (match_consume(TokenKind::KwPrimary)) {
             expect(TokenKind::KwKey, "KEY");
             expect(TokenKind::LParen, "(");
@@ -858,6 +873,64 @@ std::vector<ast::ColumnDef> Parser::parse_column_defs() {
             cols.back().name = "__pk__";
             cols.back().is_primary_key = true;
             cols.back().default_pk_cols = pk_cols;
+        } else if (match_consume(TokenKind::KwForeign)) {
+            // 表级 FOREIGN KEY(a) REFERENCES t(b) [ON DELETE/UPDATE ...]
+            // 引擎暂不强制外键 —— 解析并忽略,保证 MySQL 风格 DDL 可建表
+            expect(TokenKind::KwKey, "KEY");
+            expect(TokenKind::LParen, "(");
+            do { (void)kw_or_ident(); } while (match_consume(TokenKind::Comma));
+            expect(TokenKind::RParen, ")");
+            expect(TokenKind::KwReferences, "REFERENCES");
+            (void)kw_or_ident();                       // 目标表(可带 db. 前缀)
+            if (match_consume(TokenKind::Dot)) (void)kw_or_ident();
+            if (match_consume(TokenKind::LParen)) {
+                do { (void)kw_or_ident(); } while (match_consume(TokenKind::Comma));
+                expect(TokenKind::RParen, ")");
+            }
+            // ON DELETE / ON UPDATE 动作 (CASCADE / RESTRICT / SET NULL / NO ACTION)
+            while (match_consume(TokenKind::KwOn)) {
+                if (!match_consume(TokenKind::KwDelete) && !match_consume(TokenKind::KwUpdate)) {
+                    throw ParseError(peek().line, peek().col, "expected DELETE or UPDATE after ON");
+                }
+                // 动作子句没有专用关键字 —— 直接吞到逗号/右括号为止
+                while (!match(TokenKind::Comma) && !match(TokenKind::RParen) && !match(TokenKind::Eof))
+                    consume();
+            }
+        } else if (match_consume(TokenKind::KwConstraint)) {
+            // CONSTRAINT name PRIMARY KEY/UNIQUE/FOREIGN KEY ... —— 跳过名字后按对应约束处理
+            (void)kw_or_ident();
+            if (match_consume(TokenKind::KwPrimary)) {
+                expect(TokenKind::KwKey, "KEY");
+                expect(TokenKind::LParen, "(");
+                std::vector<std::string> pk_cols;
+                do { pk_cols.push_back(kw_or_ident()); } while (match_consume(TokenKind::Comma));
+                expect(TokenKind::RParen, ")");
+                cols.push_back(ast::ColumnDef{});
+                cols.back().name = "__pk__";
+                cols.back().is_primary_key = true;
+                cols.back().default_pk_cols = pk_cols;
+            } else if (match_consume(TokenKind::KwForeign)) {
+                expect(TokenKind::KwKey, "KEY");
+                expect(TokenKind::LParen, "(");
+                do { (void)kw_or_ident(); } while (match_consume(TokenKind::Comma));
+                expect(TokenKind::RParen, ")");
+                expect(TokenKind::KwReferences, "REFERENCES");
+                (void)kw_or_ident();
+                if (match_consume(TokenKind::Dot)) (void)kw_or_ident();
+                if (match_consume(TokenKind::LParen)) {
+                    do { (void)kw_or_ident(); } while (match_consume(TokenKind::Comma));
+                    expect(TokenKind::RParen, ")");
+                }
+                while (match_consume(TokenKind::KwOn)) {
+                    if (!match_consume(TokenKind::KwDelete) && !match_consume(TokenKind::KwUpdate)) {
+                        throw ParseError(peek().line, peek().col, "expected DELETE or UPDATE after ON");
+                    }
+                    while (!match(TokenKind::Comma) && !match(TokenKind::RParen) && !match(TokenKind::Eof))
+                        consume();
+                }
+            } else {
+                throw ParseError(peek().line, peek().col, "unsupported CONSTRAINT type");
+            }
         } else {
             cols.push_back(parse_column_def());
         }
@@ -946,6 +1019,28 @@ ast::StmtPtr Parser::parse_use() {
     return r;
 }
 
+// DESCRIBE [db.]tbl —— 等价 SHOW COLUMNS FROM
+ast::StmtPtr Parser::parse_describe() {
+    consume(); // DESCRIBE / DESC
+    auto stmt = std::make_unique<ast::ShowStmt>();
+    stmt->kind = ast::ShowStmt::Kind::Columns;
+    std::string first = kw_or_ident();
+    if (match_consume(TokenKind::Dot)) {
+        stmt->db_name = first;
+        stmt->table_or_pattern = kw_or_ident();
+    } else {
+        stmt->table_or_pattern = first;
+    }
+    // DESCRIBE FROM db tbl (MySQL 语法顺序:DESCRIBE tbl FROM db)
+    if (match_consume(TokenKind::KwFrom)) {
+        stmt->db_name = kw_or_ident();
+    }
+    auto r = std::make_unique<ast::Statement>();
+    r->kind = ast::StmtKind::Show;
+    r->show_ = std::move(stmt);
+    return r;
+}
+
 ast::StmtPtr Parser::parse_show() {
     consume(); // SHOW
     auto stmt = std::make_unique<ast::ShowStmt>();
@@ -956,8 +1051,13 @@ ast::StmtPtr Parser::parse_show() {
         global_or_session = true;  // 记录但 ShowStmt 里没字段,忽略
 
     Token t = peek();
+    // SHOW [FULL] TABLES
+    bool full = false;
+    if (match_consume(TokenKind::KwFull))
+        full = true;
     if (match_consume(TokenKind::KwTables)) {
         stmt->kind = ast::ShowStmt::Kind::Tables;
+        stmt->full = full;
         if (match_consume(TokenKind::KwFrom) || match_consume(TokenKind::KwIn)) {
             stmt->table_or_pattern = kw_or_ident();
         }

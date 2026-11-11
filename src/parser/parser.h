@@ -61,6 +61,7 @@ private:
     ast::StmtPtr parse_drop_database();
     ast::StmtPtr parse_use();
     ast::StmtPtr parse_show();
+    ast::StmtPtr parse_describe();
     /// SET:识别 AUTOCOMMIT / 四个隔离级别,其余兼容忽略(SET NAMES 等)
     ast::StmtPtr parse_set();
 

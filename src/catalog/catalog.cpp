@@ -59,10 +59,8 @@ bool Catalog::drop_database(const std::string& name, bool if_exists) {
         if (if_exists) return true;
         return false;
     }
-    // 不能删当前库
-    if (low == current_database_) {
-        return false;
-    }
+    // MySQL 允许删除当前连接所在的库 (GAP #8);
+    // 引用该库的 session 之后查询会得到 "table doesn't exist"。
     databases_.erase(it);
     return true;
 }
@@ -90,10 +88,10 @@ std::vector<std::string> Catalog::list_databases() const {
 
 // ---------- Table ----------
 
-bool Catalog::create_table(const ast::CreateTableStmt& stmt) {
+bool Catalog::create_table(const ast::CreateTableStmt& stmt, const std::string& default_db) {
     std::lock_guard<std::mutex> lock(mu_);
-    // 解析 db.table 格式:指定了 db 就到那个库建,没指定就到 current_database
-    std::string db_name = current_database_;
+    // 解析 db.table 格式:指定了 db 就到那个库建,没指定就到 default_db
+    std::string db_name = default_db;
     std::string table_name = stmt.table_name;
     auto dot = table_name.find('.');
     if (dot != std::string::npos) {
@@ -119,10 +117,10 @@ bool Catalog::create_table(const ast::CreateTableStmt& stmt) {
     return true;
 }
 
-bool Catalog::drop_table(const std::string& name, bool if_exists) {
+bool Catalog::drop_table(const std::string& name, bool if_exists, const std::string& default_db) {
     std::lock_guard<std::mutex> lock(mu_);
     // 支持 db.table 格式
-    std::string db_name = current_database_;
+    std::string db_name = default_db;
     std::string table_name = name;
     auto dot = table_name.find('.');
     if (dot != std::string::npos) {
@@ -142,15 +140,24 @@ bool Catalog::drop_table(const std::string& name, bool if_exists) {
     return true;
 }
 
-bool Catalog::table_exists(const std::string& name) const {
+bool Catalog::table_exists(const std::string& name, const std::string& default_db) const {
     std::lock_guard<std::mutex> lock(mu_);
-    const DbTables* db = current_db();
+    // 支持 db.table 格式
+    std::string db_name = default_db;
+    std::string table_name = lower_name(name);
+    auto dot = table_name.find('.');
+    if (dot != std::string::npos) {
+        db_name = table_name.substr(0, dot);
+        table_name = table_name.substr(dot + 1);
+    }
+    const DbTables* db = get_db(db_name);
     if (!db) return false;
-    return db->tables.count(lower_name(name)) > 0;
+    return db->tables.count(table_name) > 0;
 }
 
-storage::Table* Catalog::get_table(const std::string& name) {
-    DbTables* db = current_db();
+storage::Table* Catalog::get_table(const std::string& name, const std::string& default_db) {
+    std::lock_guard<std::mutex> lock(mu_);
+    DbTables* db = get_db(default_db);
     if (!db) return nullptr;
     std::string lower = lower_name(name);
 
@@ -171,8 +178,9 @@ storage::Table* Catalog::get_table(const std::string& name) {
     return it->second.get();
 }
 
-const storage::Table* Catalog::get_table(const std::string& name) const {
-    const DbTables* db = current_db();
+const storage::Table* Catalog::get_table(const std::string& name, const std::string& default_db) const {
+    std::lock_guard<std::mutex> lock(mu_);
+    const DbTables* db = get_db(default_db);
     if (!db) return nullptr;
     std::string lower = lower_name(name);
 
@@ -207,9 +215,10 @@ const storage::Table* Catalog::get_table_in_db(const std::string& db_name, const
     return it->second.get();
 }
 
-std::vector<std::string> Catalog::table_names() const {
+std::vector<std::string> Catalog::table_names(const std::string& default_db) const {
     std::vector<std::string> out;
-    const DbTables* db = current_db();
+    std::lock_guard<std::mutex> lock(mu_);
+    const DbTables* db = get_db(default_db);
     if (!db) return out;
     out.reserve(db->tables.size());
     for (auto& [name, _] : db->tables) out.push_back(name);

@@ -177,6 +177,8 @@ static void group_catalog(core::Session& s) {
 static void group_txn_visibility(core::Session& a) {
     printf("\n[F] 事务内可见性与回滚 (HSQLDB TestSelfTransaction / TestSelf:381)\n");
     core::Session b;
+    // M6 P1: current db 是 per-session 的 —— a/b 各自切到 hsm
+    ok(a, "USE hsm"); ok(b, "USE hsm");
     ok(a, "BEGIN");
     ok(a, "INSERT INTO n VALUES (6,60,'pending')");
     ok(a, "DELETE FROM n WHERE id=5");
