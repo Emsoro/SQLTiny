@@ -251,13 +251,10 @@ with Session(engine) as s:
         ).scalar()
         ok("text():param 聚合 user_id=2 → 1", r == 1, f"got {r}")
 
-        # `status` 列名在 SQLTiny 词法层疑似保留字 (整型字面量前解析失败) — 已知 GAP
-        try:
-            s.execute(text("SELECT COUNT(*) FROM orders WHERE status = :st"),
+        # `status` 列名曾因保留字冲突无法作 WHERE 条件 (CODEPLAN §8.4 #5, 已修复)
+        r = s.execute(text("SELECT COUNT(*) FROM orders WHERE status = :st"),
                       {"st": "paid"}).scalar()
-            ok("status 列可作 WHERE 绑定条件", True)
-        except Exception as e2:
-            ok("status 列可作 WHERE 绑定条件", False, str(e2), gap=True)
+        ok("status 列可作 WHERE 绑定条件 (paid=3)", r == 3, f"got {r}")
     except Exception as e:
         ok("text() 绑定参数", False, str(e))
 

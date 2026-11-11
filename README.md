@@ -57,7 +57,7 @@ SQL 语法:`SET SESSION TRANSACTION ISOLATION LEVEL <级别>`(会话默认)、`S
 | M2.5 MySQL 协议 | ✅ | Wire Protocol 握手 + 编解码 + TCP server |
 | M3 子查询 + JOIN 补全 | ✅ | GROUP BY · HAVING · 子查询 IN · INSERT SELECT · INNER/LEFT JOIN |
 | M4 协议层补全 | ✅ | Catalog 多库化 · SHOW 系列(含 LIKE) · SQLAlchemy 系统变量兼容 |
-| **M5 持久化 + MVCC + SQLAlchemy** | ✅ | WAL+Replay+Checkpoint · MVCC SCN 可见性 · AUTO_INCREMENT · 全局 mutex 并发安全 · **SQLAlchemy 8/10 核心路径 PASS · 4 个集成测试** |
+| **M5 持久化 + MVCC + SQLAlchemy** | ✅ | WAL+Replay+Checkpoint · MVCC SCN 可见性 · AUTO_INCREMENT · 全局 mutex 并发安全 · **SQLAlchemy 全场景 33/0/0 PASS · 4+ 集成测试** |
 | **M6 行锁 + 事务 + JOIN 优化** | 📋 | 行级锁替换全局 mutex → 真正事务 → JOIN 索引优化 → 存储过程 |
 
 ---
@@ -91,7 +91,7 @@ cmake --build build --config Debug
 | `build/Debug/smoke_m6_hsqldb_matrix.exe` | HSQLDB 语义矩阵 | NULL 三值 / 空集聚合 / JOIN 基数 / 语句原子性 / 多库隔离 — **56 PASS / 4 GAP**(GAP 见 CODEPLAN §8.4) |
 | `tests/test_txn_vs_sqlite.py` | 事务行为对比 | SQLTiny vs SQLite 四级别 + WAL 重启 — **70/70 一致** |
 | `tests/test_full_flow.py` | PyMySQL 全链路(双连接) | DDL/INSERT→SELECT*含NULL→WHERE/ORDER/聚合/HAVING→JOIN→UPDATE/DELETE→约束与错误码→事务/SAVEPOINT/autocommit→四隔离级别/40001→多库→清理 — **47 PASS / 1 GAP**(GAP 见 CODEPLAN §8.4) |
-| `tests/test_sqlalchemy.py` | SQLAlchemy 2.x | Engine/Core/ORM/2.0 风格表达式/`text():param`/rollback/relationship/`engine.begin()`/类型映射/Inspector — **29 PASS / 0 FAIL / 4 GAP**(GAP 见 CODEPLAN §8.4 #5–#8) |
+| `tests/test_sqlalchemy.py` | SQLAlchemy 2.x | Engine/Core/ORM/2.0 风格表达式/`text():param`/rollback/relationship/`engine.begin()`/类型映射/Inspector — **33 PASS / 0 FAIL / 0 GAP**(`DESCRIBE`/`SHOW FULL TABLES` 已支持) |
 | `tests/test_vs_sqlite.py` | 行为对比 | 同一逻辑 SQLTiny vs SQLite 全场景 assert — **全绿** |
 | `tests/test_perf_vs_sqlite.py` | 性能对比 | 200 users + 800 orders INSERT + JOIN 性能 — **跑通无 crash** |
 | `tests/test_concurrency.py` | 并发安全 | 5 线程(2W+2R+1D)15s 并发读写 — **通过** |
@@ -123,7 +123,7 @@ python tests\test_concurrency.py
 python tests\test_txn_vs_sqlite.py   # 自动起停 server,不占用 3306
 ```
 
-### 测试总览 (CTest 8/8 · Python 8 scripts)
+### 测试总览 (CTest 9/9 · Python 8 scripts)
 ```
 smoke_m1              3/3   PASS  Value / AVL / Lexer
 smoke_m2              5/5   PASS  CRUD / 聚合 / 表达式 / DDL edge / IS NULL
@@ -133,9 +133,10 @@ smoke_m5_wal         28/28  PASS  WAL Replay + CRC + Checkpoint + 启动恢复
 smoke_m25_e2e        13/13  PASS  MySQL wire C++ client E2E
 smoke_m6_isolation  451/451 PASS  四隔离级别 + 事务 / 保存点 / 冲突
 smoke_m6_hsqldb_matrix 56 PASS / 4 GAP   HSQLDB 可移植 SQL 语义矩阵
+smoke_m6_session_db  PASS        多库会话级隔离(每连接 USE/握手 db 互不干扰)
 test_full_flow       47 PASS / 1 GAP    PyMySQL 全链路(双连接):DDL→DML→聚合→JOIN→事务→四隔离级别→多库→清理
 test_txn_vs_sqlite   70/70 对比        四隔离级别 + WAL 重启与 SQLite 逐项比对
-test_sqlalchemy      29 PASS / 0 FAIL / 4 GAP  15 组:Engine/Core/ORM/2.0 表达式/绑定/事务/relationship/类型映射/Inspector
+test_sqlalchemy      33 PASS / 0 FAIL / 0 GAP  15 组:Engine/Core/ORM/2.0 表达式/绑定/事务/relationship/类型映射/Inspector
 test_vs_sqlite       全绿             同逻辑 SQLTiny vs SQLite 行为一致
 test_wal_recovery    全通过            server 重启 / UPDATE / DELETE 状态恢复
 test_perf_vs_sqlite  跑通              200 users / 800 orders INSERT + JOIN 性能对比

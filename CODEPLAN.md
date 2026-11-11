@@ -37,13 +37,14 @@
 
 | 测试 | 结果 |
 |---|---|
-| `ctest -C Debug` | 8/8(含 `smoke_m6_isolation` 与 `smoke_m6_hsqldb_matrix`) |
+| `ctest -C Debug` | 9/9(含 `smoke_m6_isolation`、`smoke_m6_hsqldb_matrix`、`smoke_m6_session_db`) |
 | `smoke_m6_isolation` | 451/451 PASS — 四级别、脏读、快照、冲突、autocommit、SAVEPOINT、DML 回滚 |
 | `smoke_m6_hsqldb_matrix` | 56 PASS / 4 GAP — HSQLDB 可移植 SQL 语义矩阵;GAP 见 §8.4 |
+| `smoke_m6_session_db` | PASS — 多库会话级隔离(每个连接的 `USE`/握手 db 互不干扰,验证 §8.4 #6/#7 修复) |
 | `test_txn_vs_sqlite.py` | 70/70 与 SQLite 一致 + 2 项预期差异(RC 事务内语义、RU 提升 vs SQLite 脏读) |
 | `test_full_flow.py` / `test_vs_sqlite.py` | 47 PASS / 0 FAIL / 1 GAP(GAP 见 §8.4)/ 全场景一致 |
 | `test_wal_recovery.py` / `test_concurrency.py` | 重启恢复全通过 / 5 线程 15s 无 crash |
-| `test_sqlalchemy.py` | 29 PASS / 0 FAIL / 4 GAP(方言与反射限制,见 §8.4 #5–#8) |
+| `test_sqlalchemy.py` | 33 PASS / 0 FAIL / 0 GAP(原 #5–#8 与 DESCRIBE/SHOW FULL TABLES 反射限制均已修复) |
 
 ---
 
@@ -278,7 +279,7 @@ LIMIT 10;
 - [ ] `caching_sha2_password` 认证(→ M6)
 - [ ] `CLIENT_SSL` 握手(→ M6)
 
-**验收**:Navicat 打开连接不弹警告,能列出数据库/表/列;SQLAlchemy 8/10 核心路径 PASS(现按断言计 29 PASS / 0 FAIL / 4 GAP,后两项见 M6 P1 1.2 与 §8.4 #5–#8)。
+**验收**:Navicat 打开连接不弹警告,能列出数据库/表/列;SQLAlchemy 全场景 PASS(现 `test_sqlalchemy.py` 33 PASS / 0 FAIL / 0 GAP,见 M6 P1 1.2 与 §8.4 #5–#8 修复记录)。
 
 ---
 
@@ -585,16 +586,15 @@ SQLTiny 第一版可以简化:
 | `SELECT ... LOCK IN SHARE MODE` | ⬜ | 未实现 | MySQL 兼容 |
 | 死锁检测 / 等待队列 | ⬜ | 当前冲突立即 40001 中止,不做等待与循环检测 | Derby 死锁检测 |
 
-##### 1.2 SQLAlchemy 反射类语句(仍待办)
+##### 1.2 SQLAlchemy 反射类语句(✅ 已落地 9e752ba)
 
-> **【2026-11-11 更新】** `test_sqlalchemy.py` 补全至 15 组 33 项断言后,当前为 **29 PASS / 0 FAIL / 4 GAP**:`DESCRIBE` / `SHOW FULL TABLES` 仍不支持,但已由测试侧改为 GAP 标记(测试通过 raw DDL / `get_table_names` 异常分支绕行),不再计入 FAIL。新发现的两项 server 缺陷见 §8.4 #6/#7(握手 database 忽略、current db 全局共享),优先级高于本表。
+> **【2026-11-11 更新】** `test_sqlalchemy.py` 补全至 15 组 33 项断言,并随协议/会话层修复(§8.4 #5–#8)一并实现了反射语句,当前为 **33 PASS / 0 FAIL / 0 GAP**。`DESCRIBE` / `SHOW FULL TABLES` / `SHOW COLUMNS` 均已在 server 端支持,`get_table_names` / `get_columns` 正常返回。
 
-| FAIL | 修复 |
-|---|---|
-| `DESCRIBE table` | parser 加 `DESCRIBE` 关键字解析 → 内部转调 `SHOW COLUMNS FROM table`(一行 map) |
-| `SHOW FULL TABLES FROM db` | parser 加可选 `FULL` 关键字,executor `exec_show_tables` 返回额外一列 `table_type`(BASE TABLE / VIEW) |
-
-> 另:`SHOW COLUMNS` 返回的类型名(`BIGINT`/`VARCHAR`)SQLAlchemy 反射层报 `Did not recognize type` → `NullType()` 构造错误,属类型名规范化问题,随 `DESCRIBE` 一并修。
+| 语句 | 状态 | 说明 |
+|---|---|---|
+| `DESCRIBE table` | ✅ | parser 加 `DESCRIBE` 关键字解析 → 内部转调 `SHOW COLUMNS FROM table` |
+| `SHOW FULL TABLES FROM db` | ✅ | parser 加可选 `FULL` 关键字,`exec_show_tables` 返回 `table_type`(BASE TABLE / VIEW) |
+| `SHOW COLUMNS` 类型名规范化 | ✅ | 类型名(`int`/`varchar(32)` 等)已可被 SQLAlchemy 反射层识别,不再 `NullType()` 报错 |
 
 ##### 1.3 事务与隔离级别测试项(自设计)
 
@@ -676,7 +676,7 @@ SQLTiny 第一版可以简化:
 | MySQL 协议版本碎片化 | 低 | 当前模拟 5.7 协议(`5.7.0-SQLTiny`)+ `mysql_native_password`;`caching_sha2_password` / SSL 列在 M6 P3 |
 | 并发 MVCC 冲突 | 中 | M6 P0/P1 已落地行锁 + 事务边界 + 40001;**剩余**:无等待队列,高冲突场景需客户端重试;`versions_` 未做压缩,长事务下内存增长 |
 | JOIN 纯嵌套循环 O(N×M) | 高 | 已知瓶颈(200/800 数据量的 INNER JOIN+GROUP BY 约 12s);M6 P2 计划 Index Nested Loop / Hash Join |
-| SQLAlchemy inspector 兼容 | 中 | `DESCRIBE` / `SHOW FULL TABLES` / `SHOW COLUMNS` 类型名规范化待补(测试侧已 GAP 绕行);新发现的握手 database 忽略与 current db 全局共享见 §8.4 #6/#7 |
+| SQLAlchemy inspector 兼容 | 低 | `DESCRIBE` / `SHOW FULL TABLES` / `SHOW COLUMNS` 已在 9e752ba 落地(§8.4 #5–#8 一并修复),`get_table_names` / `get_columns` 正常使用 |
 | AVL 大表性能不如 B+Tree | 低 | 当前继续用 AVL,替换计划列在 M6 P3,对外 `Index` 接口不变 |
 | 磁盘持久化二进制兼容未来升级 | 中 | 文件头 magic + version 字段,启动时检查;不承诺跨大版本兼容 |
 
@@ -697,7 +697,7 @@ SQLTiny 第一版可以简化:
 
 **下一步优先级(2026-11-11)**
 
-1. **协议层缺陷**:握手 `database` 字段被忽略(§8.4 #6)与 current db 全局共享(§8.4 #7)——影响所有按库连接的客户端,优先于边缘语法项;随后 `DESCRIBE` / `SHOW FULL TABLES`、`FOR UPDATE` / `LOCK IN SHARE MODE`、等待队列与死锁检测。
+1. **协议层收尾**:`DESCRIBE` / `SHOW FULL TABLES` / `SHOW COLUMNS` 反射(§8.4 #6/#7 关联项)已在 9e752ba 落地;`FOR UPDATE` / `LOCK IN SHARE MODE`、等待队列与死锁检测、Prepared Statement(`COM_STMT_PREPARE`)、`INFORMATION_SCHEMA` 仍为后续项。
 2. **M6 P2**:JOIN 从 O(N×M) 升级为 Index Nested Loop / Hash Join,补 `EXPLAIN`。
 3. **版本回收**:`merge_expired_transactions()` 目前只清理冲突检测队列,`versions_` 不做压缩,长事务/长生命周期进程内存会增长,需补表压缩。
 4. **HSQLDB 语义 GAP**:补齐 §8.4 的三值逻辑、空集聚合、`COALESCE(SUM(...))` 与「SELECT 列表无聚合时的 GROUP BY/HAVING」,并按 §8.3 待补清单扩展 `TestSelfNot.txt` 真值表与解析器负向用例。
@@ -748,7 +748,7 @@ SQLTiny 第一版可以简化:
 | C05 | HSQLDB 可移植 SQL 语义矩阵 | `smoke_m6_hsqldb_matrix.cpp` | A NULL 三值、B 空集聚合、C JOIN 基数、D 主键与语句原子性、E 多库隔离、F 事务内可见性 | ✅ 56 PASS / 4 GAP |
 | C06 | 事务 / 四隔离级别 / MVCC | `smoke_m6_isolation.cpp`、`test_txn_vs_sqlite.py` | 四级别提升、无脏读、不可重复读、40001 冲突、autocommit、SAVEPOINT、DML 回滚、WAL 重启 | ✅ 451/451、70/70 对比 |
 | C07 | WAL / 快照 / 恢复 | `smoke_m5_wal.cpp`、`test_wal_recovery.py` | Replay、CRC 截断、Checkpoint、重启后数据与 UPDATE/DELETE 状态 | ✅ |
-| C08 | MySQL 协议 / 客户端兼容 | `smoke_m25_e2e.cpp`、`test_sqlalchemy.py` | 握手与 packet、COM_QUERY、OK/EOF/ERR;SQLAlchemy 15 组:Engine、Core DDL/CRUD、聚合、ORM、2.0 风格 select/insert/update/delete、`text():param`、Session rollback、relationship 级联、`engine.begin()` 事务块、类型映射(DateTime/Boolean/Float)、Inspector | ✅ 29 PASS / 0 FAIL / 4 GAP(§8.4 #5–#8) |
+| C08 | MySQL 协议 / 客户端兼容 | `smoke_m25_e2e.cpp`、`test_sqlalchemy.py` | 握手与 packet、COM_QUERY、OK/EOF/ERR;SQLAlchemy 15 组:Engine、Core DDL/CRUD、聚合、ORM、2.0 风格 select/insert/update/delete、`text():param`、Session rollback、relationship 级联、`engine.begin()` 事务块、类型映射(DateTime/Boolean/Float)、Inspector(`DESCRIBE`/`SHOW FULL TABLES` 已支持) | ✅ 33 PASS / 0 FAIL / 0 GAP |
 | C09 | 并发 / 性能 | `test_concurrency.py`、`test_perf_vs_sqlite.py` | 5 线程 15s 读写一致性、大数据量 INSERT + JOIN 对比 | ✅ 无 crash |
 
 **分层**:C01–C07 为进程内 C++ smoke(无需 server,纳入 `CTest`);C08–C09 需要 server(端口 3306 或由脚本自动起停的随机端口);`test_txn_vs_sqlite.py` 自带 server 生命周期管理。当前 `ctest` **8/8**。
@@ -794,9 +794,10 @@ C05(`smoke_m6_hsqldb_matrix.cpp`)与 `test_full_flow.py` 把与 HSQLDB / SQL 标
 | 2 | 空集 `SUM` / `AVG` | NULL | 0 | 聚合无输入行时返回 NULL(`MAX` 已正确) |
 | 3 | `COALESCE(SUM(id),0)` | 0 | 空结果集 | 补齐「聚合函数作为标量函数参数」的求值路径 |
 | 4 | `SELECT user_id FROM orders GROUP BY user_id HAVING SUM(total)>100` | 2 行 `(1),(3)` | 5 行 `(1),(1),(2),(3),(4)`(逐行输出) | SELECT 列表不含聚合时也必须走 GROUP BY 路径并应用 HAVING;**同一查询把 `SUM(total)` 放入 SELECT 列表即返回正确的 `(1),(3)`**,说明分组/HAVING 逻辑本身可用,是路径选择的问题 |
-| 5 | `SELECT COUNT(*) FROM orders WHERE status = :st`(SQLAlchemy `text()` 绑定) | 正常执行 | 1064 `unexpected token in expression: 'status'`(`status` 疑似被词法层当保留字,且仅在该位置冲突) | 复查关键字表,列名与保留字冲突时按标识符处理 |
-| 6 | 连接握手 `database` 字段 | 连接即切到指定库(`SELECT DATABASE()` 返回该库) | 字段被忽略,`SELECT DATABASE()` 仍返回全局 current db | 握手响应后执行等价 `USE <db>`(写入 session 状态) |
-| 7 | 多连接 current database 隔离 | per-session(连接 A 的 `USE` 不影响连接 B) | **服务器全局单例**:B 未 `USE` 却看到 A 的库;A 的库被 B 的 `USE` 覆盖,后续查询落到错误的库 | 把 current db 从全局变量移入 Session 状态(C02 多库用例均为单连接顺序执行,故未暴露) |
-| 8 | `DROP DATABASE` 当前库 | MySQL 允许删除当前连接所在库 | 报 1008 `database doesn't exist or is current database` | 判定改为仅校验库存在;删除后把引用该库的 session current db 置空 |
+| 5 | `SELECT COUNT(*) FROM orders WHERE status = :st`(SQLAlchemy `text()` 绑定) | 正常执行 | 1064 `unexpected token in expression: 'status'`(`status` 疑似被词法层当保留字,且仅在该位置冲突) | **✅ 已修复 9e752ba**:列名与保留字冲突处按标识符处理 |
+| 6 | 连接握手 `database` 字段 | 连接即切到指定库(`SELECT DATABASE()` 返回该库) | 字段被忽略,`SELECT DATABASE()` 仍返回全局 current db | **✅ 已修复 9e752ba**:握手响应后执行等价 `USE <db>`(写入 session 状态) |
+| 7 | 多连接 current database 隔离 | per-session(连接 A 的 `USE` 不影响连接 B) | **服务器全局单例**:B 未 `USE` 却看到 A 的库;A 的库被 B 的 `USE` 覆盖,后续查询落到错误的库 | **✅ 已修复 9e752ba**:current db 移入 Session 状态(`smoke_m6_session_db` 覆盖) |
+| 8 | `DROP DATABASE` 当前库 | MySQL 允许删除当前连接所在库 | 报 1008 `database doesn't exist or is current database` | **✅ 已修复 9e752ba**:判定改为仅校验库存在,删除成功即不再报 1008 |
+| 5–8 | 协议/会话层(见上) | — | — | **✅ 已于 commit `9e752ba` 全部修复**:`status` 关键字冲突、`USE` 握手生效、current db 移入 Session 状态、`DROP DATABASE` 当前库改判;并顺带实现 `DESCRIBE` / `SHOW FULL TABLES` / `SHOW COLUMNS`(见 M6 P1 1.2)。`test_sqlalchemy.py` 现为 33 PASS / 0 FAIL / 0 GAP |
 
-> #1–#4 属 SQL 语义层,不影响 C06 的事务/隔离级别结论;#5–#8 是补全 `test_sqlalchemy.py`(15 组 / 33 项断言)时新发现的协议/会话层缺陷,其中 **#7 影响所有多连接客户端的库隔离,优先级最高**。`DESCRIBE` / `SHOW FULL TABLES` / `SHOW COLUMNS` 类型名规范化(SQLAlchemy 反射 `NullType` 报错)与 SQLAlchemy 生成的 `BOOL` 类型 DDL 不识别,归入 M6 P1 1.2 一并处理;测试侧已通过 raw DDL + `init_command USE` + GAP 标记绕行,当前 29 PASS / 0 FAIL / 4 GAP。第 4 项是被旧脚本 `len(rows) >= 2` 恒真断言掩盖的缺陷,完善 full_flow 后才暴露。
+> #1–#4 属 SQL 语义层,不影响 C06 的事务/隔离级别结论,列入 M6 P2 之后待办;**第 4 项是被旧脚本 `len(rows) >= 2` 恒真断言掩盖的缺陷,完善 full_flow 后才暴露**。#5–#8 协议/会话层缺陷与反射语句(`DESCRIBE` / `SHOW FULL TABLES` / `SHOW COLUMNS`)已在 `9e752ba` 一并修复,`smoke_m6_session_db.cpp` 与 `test_session_db.py` 覆盖多库会话隔离,`test_sqlalchemy.py` 升至 33 PASS / 0 FAIL / 0 GAP。
