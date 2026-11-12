@@ -677,20 +677,27 @@ ResultSet Executor::exec_select(const ast::SelectStmt& s) {
         if (match) after_where.push_back(std::move(row));
     }
 
-    // 聚合:如果有聚合函数(COUNT/SUM/AVG/MIN/MAX)
-    bool has_agg = false;
-    auto check_agg = [&](const ast::Expression& e) {
-        if (e.kind == ast::ExprKind::FunctionCall) {
-            std::string lower; lower.resize(e.func_name.size());
-            std::transform(e.func_name.begin(), e.func_name.end(), lower.begin(),
-                           [](unsigned char c) { return std::tolower(c); });
-            if (lower == "count" || lower == "sum" || lower == "avg" || lower == "min" || lower == "max") {
-                has_agg = true;
-            }
-        }
+    // 聚合检测: SELECT 列(含嵌套在标量函数内的聚合)、GROUP BY、HAVING 任一出现即走聚合路径。
+    // 旧实现只扫 SELECT 顶层,COALESCE(SUM(x),0) 与「SELECT 无聚合但有 GROUP BY/HAVING」会被漏掉。
+    auto is_agg_func = [](const std::string& n) {
+        std::string low = n;
+        std::transform(low.begin(), low.end(), low.begin(),
+                       [](unsigned char c) { return std::tolower(c); });
+        return low == "count" || low == "sum" || low == "avg" || low == "min" || low == "max";
     };
-    for (auto& [e, _] : s.columns) check_agg(*e);
-    if (s.having) { /* HAVING 先忽略 */ }
+    std::function<bool(const ast::Expression&)> contains_agg =
+        [&](const ast::Expression& e) -> bool {
+            if (e.kind == ast::ExprKind::FunctionCall) {
+                if (is_agg_func(e.func_name)) return true;
+                for (auto& a : e.func_args) if (a && contains_agg(*a)) return true;
+            }
+            if (e.lhs && contains_agg(*e.lhs)) return true;
+            if (e.rhs && contains_agg(*e.rhs)) return true;
+            if (e.operand && contains_agg(*e.operand)) return true;
+            return false;
+        };
+    bool has_agg = !s.group_by.empty() || static_cast<bool>(s.having);
+    for (auto& [e, _] : s.columns) if (contains_agg(*e)) has_agg = true;
 
     // 输出列别名
     r.column_names.clear();
@@ -806,7 +813,9 @@ ResultSet Executor::exec_select(const ast::SelectStmt& s) {
                         double d;
                         if (v.try_to_double(d)) { acc += d; c++; }
                     }
-                    if (lower == "avg") agg_row.push_back(types::Value::make_double(c ? acc / c : 0));
+                    // SQL 标准: 空集 SUM / AVG 返回 NULL (只有 COUNT 返回 0)
+                    if (c == 0) agg_row.push_back(types::Value::make_null());
+                    else if (lower == "avg") agg_row.push_back(types::Value::make_double(acc / c));
                     else agg_row.push_back(types::Value::make_double(acc));
                 } else if (lower == "min") {
                     double best = 0; bool first = true;
@@ -826,6 +835,55 @@ ResultSet Executor::exec_select(const ast::SelectStmt& s) {
                         if (first || d > best) { best = d; first = false; }
                     }
                     agg_row.push_back(first ? types::Value::make_null() : types::Value::make_double(best));
+                } else if (contains_agg(*e)) {
+                    // 标量函数嵌套聚合 (COALESCE(SUM(x),0)): 纯值递归,不构造临时 AST
+                    std::function<types::Value(const ast::Expression&)> eval_nested =
+                        [&](const ast::Expression& src) -> types::Value {
+                            if (src.kind == ast::ExprKind::Literal) return src.literal;
+                            if (src.kind == ast::ExprKind::FunctionCall) {
+                                std::string low = src.func_name;
+                                std::transform(low.begin(), low.end(), low.begin(),
+                                               [](unsigned char c) { return std::tolower(c); });
+                                if (is_agg_func(low)) {
+                                    // 按当前桶重算该聚合 (与上面 sum/avg/min/max 分支同语义)
+                                    std::vector<types::Value> vals;
+                                    for (auto& row : flat_rows)
+                                        vals.push_back(eval(*src.func_args[0], build_ctx(row)));
+                                    if (low == "count") {
+                                        if (src.func_star_arg)
+                                            return types::Value::make_int(static_cast<int64_t>(flat_rows.size()));
+                                        int64_t n = 0;
+                                        for (auto& v : vals) if (!v.is_null()) ++n;
+                                        return types::Value::make_int(n);
+                                    }
+                                    double acc = 0, best = 0; int64_t n = 0; bool first = true;
+                                    for (auto& v : vals) {
+                                        double d;
+                                        if (!v.try_to_double(d)) continue;
+                                        if (low == "min" || low == "max") {
+                                            if (first || (low == "min" ? d < best : d > best)) {
+                                                best = d; first = false;
+                                            }
+                                        } else acc += d;
+                                        ++n;
+                                    }
+                                    if (n == 0) return types::Value::make_null();
+                                    if (low == "avg") return types::Value::make_double(acc / n);
+                                    if (low == "sum") return types::Value::make_double(acc);
+                                    return types::Value::make_double(best);
+                                }
+                                if (low == "coalesce" || low == "ifnull") {
+                                    for (auto& a : src.func_args) {
+                                        auto v = eval_nested(*a);
+                                        if (!v.is_null()) return v;
+                                    }
+                                    return types::Value::make_null();
+                                }
+                            }
+                            if (flat_rows.empty()) return types::Value::make_null();
+                            return eval(src, build_ctx(flat_rows.front()));
+                        };
+                    agg_row.push_back(eval_nested(*e));
                 } else {
                     // 普通函数在聚合上下文用桶内第一行
                     if (!flat_rows.empty()) agg_row.push_back(eval(*e, build_ctx(flat_rows.front())));

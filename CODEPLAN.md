@@ -43,13 +43,14 @@
 |---|---|
 | `ctest -C Debug` | 10/10(含 `smoke_m6_isolation`、`smoke_m6_hsqldb_matrix`、`smoke_m6_session_db` 与 v1.1.0 新增的 `dbx_probe`);`smoke_m25_e2e` 需先启动 server 连 3306,未启动时为 9/10 |
 | `smoke_m6_isolation` | 451/451 PASS — 四级别、脏读、快照、冲突、autocommit、SAVEPOINT、DML 回滚 |
-| `smoke_m6_hsqldb_matrix` | 56 PASS / 4 GAP — HSQLDB 可移植 SQL 语义矩阵;GAP 见 §8.4 |
+| `smoke_m6_hsqldb_matrix` | 62 PASS / 0 FAIL / 0 GAP — HSQLDB 可移植 SQL 语义矩阵(§8.4 #1–#4 已修复) |
 | `smoke_m6_session_db` | PASS — 多库会话级隔离(每个连接的 `USE`/握手 db 互不干扰,验证 §8.4 #6/#7 修复) |
 | `dbx_probe` | 58/58 PASS — 进程内 `Session::execute` 跑 DBX/dbExpress 连接/元数据/事务阶段的典型 SQL(含 SHOW/information_schema) |
 | `test_stmt_prepare.py` | 7/7 PASS — 预编译语句 binary protocol 全流程(PREPARE/EXECUTE/CLOSE、NULL 参数、转义、语法错误) |
 | `test_txn_vs_sqlite.py` | 70/70 与 SQLite 一致 + 2 项预期差异(RC 事务内语义、RU 提升 vs SQLite 脏读) |
-| `test_full_flow.py` / `test_vs_sqlite.py` | 47 PASS / 0 FAIL / 1 GAP(GAP 见 §8.4)/ 全场景一致 |
+| `test_full_flow.py` / `test_vs_sqlite.py` | 48 PASS / 0 FAIL / 0 GAP / 全场景一致 |
 | `test_wal_recovery.py` / `test_concurrency.py` | 重启恢复全通过 / 5 线程 15s 无 crash |
+| `test_perf_vs_sqlite.py` | Release 版 server 单进程 / 多进程(`multiprocessing.Pool`)两种模式对比 SQLite,结果保存 `benchmark/`(带时间戳 JSON + CSV、`history.csv` 追加、`latest.json`) |
 | `test_sqlalchemy.py` | 33 PASS / 0 FAIL / 0 GAP(原 #5–#8 与 DESCRIBE/SHOW FULL TABLES 反射限制均已修复) |
 | **实测客户端** | DBX/dbExpress(Delphi)连接 + 打开表 + 浏览索引/列正常;类 Navicat 图形工具浏览表/索引/列正常;PyMySQL / mysql CLI 正常 |
 
@@ -719,7 +720,7 @@ SQLTiny 第一版可以简化:
 1. **协议层收尾**:`DESCRIBE` / `SHOW FULL TABLES` 反射(9e752ba)、Prepared Statement(`COM_STMT_*`)、`INFORMATION_SCHEMA`、SHOW / CASE / EOF 帧兼容(v1.1.0)均已落地;**剩余**:`FOR UPDATE` / `LOCK IN SHARE MODE`、等待队列与死锁检测。
 2. **M6 P2**:JOIN 从 O(N×M) 升级为 Index Nested Loop / Hash Join,补 `EXPLAIN`。
 3. **版本回收**:`merge_expired_transactions()` 目前只清理冲突检测队列,`versions_` 不做压缩,长事务/长生命周期进程内存会增长,需补表压缩。
-4. **HSQLDB 语义 GAP**:补齐 §8.4 的三值逻辑、空集聚合、`COALESCE(SUM(...))` 与「SELECT 列表无聚合时的 GROUP BY/HAVING」,并按 §8.3 待补清单扩展 `TestSelfNot.txt` 真值表与解析器负向用例。
+4. **HSQLDB 语义扩展**:§8.4 的 8 项 GAP 已全部修复(2026-11-12);后续按 §8.3 待补清单扩展 `TestSelfNot.txt` 完整三值真值表(8 类型 × AND/OR/NOT/BETWEEN/IN/ALL/ANY)、解析器负向用例与 GROUP BY 合法性组合。
 5. **M6 P3 剩余 / P4**:`caching_sha2_password` / SSL、B+Tree、复制与更大的 HSQLDB TestSelf* 覆盖。
 
 ---
@@ -762,9 +763,9 @@ SQLTiny 第一版可以简化:
 |---|---|---|---|---|
 | C01 | 类型 / 值 / 索引 / Lexer | `smoke_m1.cpp` | `Value` 比较与转换、AVL insert/find/remove/range、Tokenizer 关键字与引号 | ✅ |
 | C02 | DDL / 多库 Catalog | `smoke_m4.cpp`、`test_full_flow.py` | CREATE/DROP DATABASE/TABLE、`USE`、SHOW 系列、两段式 `db.table`、未知库 1049 | ✅ |
-| C03 | DML / 表达式 / NULL / 全链路 | `smoke_m2.cpp`、`test_full_flow.py`、`test_vs_sqlite.py` | CRUD、WHERE/ORDER/LIMIT、聚合、内置函数、NULL 列、LIKE、错误码;`test_full_flow.py` 另跨 C02/C06/C08 覆盖 DDL、事务、四隔离级别、多库 | ✅ 47 PASS / 1 GAP、全场景一致 |
+| C03 | DML / 表达式 / NULL / 全链路 | `smoke_m2.cpp`、`test_full_flow.py`、`test_vs_sqlite.py` | CRUD、WHERE/ORDER/LIMIT、聚合、内置函数、NULL 列、LIKE、错误码;`test_full_flow.py` 另跨 C02/C06/C08 覆盖 DDL、事务、四隔离级别、多库 | ✅ 48 PASS / 0 GAP、全场景一致 |
 | C04 | 聚合 / 子查询 / JOIN | `smoke_m3.cpp` | GROUP BY / HAVING / 子查询 IN / `INSERT…SELECT` / 各类 JOIN | ✅ |
-| C05 | HSQLDB 可移植 SQL 语义矩阵 | `smoke_m6_hsqldb_matrix.cpp` | A NULL 三值、B 空集聚合、C JOIN 基数、D 主键与语句原子性、E 多库隔离、F 事务内可见性 | ✅ 56 PASS / 4 GAP |
+| C05 | HSQLDB 可移植 SQL 语义矩阵 | `smoke_m6_hsqldb_matrix.cpp` | A NULL 三值、B 空集聚合、C JOIN 基数、D 主键与语句原子性、E 多库隔离、F 事务内可见性 | ✅ 62 PASS / 0 GAP |
 | C06 | 事务 / 四隔离级别 / MVCC | `smoke_m6_isolation.cpp`、`test_txn_vs_sqlite.py` | 四级别提升、无脏读、不可重复读、40001 冲突、autocommit、SAVEPOINT、DML 回滚、WAL 重启 | ✅ 451/451、70/70 对比 |
 | C07 | WAL / 快照 / 恢复 | `smoke_m5_wal.cpp`、`test_wal_recovery.py` | Replay、CRC 截断、Checkpoint、重启后数据与 UPDATE/DELETE 状态 | ✅ |
 | C08 | MySQL 协议 / 客户端兼容 | `smoke_m25_e2e.cpp`、`test_sqlalchemy.py` | 握手与 packet、COM_QUERY、OK/EOF/ERR;SQLAlchemy 15 组:Engine、Core DDL/CRUD、聚合、ORM、2.0 风格 select/insert/update/delete、`text():param`、Session rollback、relationship 级联、`engine.begin()` 事务块、类型映射(DateTime/Boolean/Float)、Inspector(`DESCRIBE`/`SHOW FULL TABLES` 已支持) | ✅ 33 PASS / 0 FAIL / 0 GAP |
@@ -810,14 +811,16 @@ C05(`smoke_m6_hsqldb_matrix.cpp`)与 `test_full_flow.py` 把与 HSQLDB / SQL 标
 
 | # | 测试点 | HSQLDB 期望 | SQLTiny 当前实际 | 建议 |
 |---|---|---|---|---|
-| 1 | `WHERE NOT (a = NULL)` | 0 行(UNKNOWN 取反仍是 UNKNOWN) | 3 行(UNKNOWN 被当作 FALSE 取反) | 表达式求值引入三值逻辑 |
-| 2 | 空集 `SUM` / `AVG` | NULL | 0 | 聚合无输入行时返回 NULL(`MAX` 已正确) |
-| 3 | `COALESCE(SUM(id),0)` | 0 | 空结果集 | 补齐「聚合函数作为标量函数参数」的求值路径 |
-| 4 | `SELECT user_id FROM orders GROUP BY user_id HAVING SUM(total)>100` | 2 行 `(1),(3)` | 5 行 `(1),(1),(2),(3),(4)`(逐行输出) | SELECT 列表不含聚合时也必须走 GROUP BY 路径并应用 HAVING;**同一查询把 `SUM(total)` 放入 SELECT 列表即返回正确的 `(1),(3)`**,说明分组/HAVING 逻辑本身可用,是路径选择的问题 |
+| 1 | `WHERE NOT (a = NULL)` | 0 行(UNKNOWN 取反仍是 UNKNOWN) | 3 行(UNKNOWN 被当作 FALSE 取反) | **✅ 已修复**:`expr.cpp` 比较遇 NULL 返回 UNKNOWN,`NOT UNKNOWN` 仍是 UNKNOWN,`AND/OR` 实现完整三值逻辑 |
+| 2 | 空集 `SUM` / `AVG` | NULL | 0 | **✅ 已修复**:`agg_one_bucket` 在无输入行时返回 NULL(只有 `COUNT` 返回 0) |
+| 3 | `COALESCE(SUM(id),0)` | 0 | 空结果集 | **✅ 已修复**:递归检测标量函数内嵌的聚合,聚合上下文用纯值递归求值 |
+| 4 | `SELECT user_id FROM orders GROUP BY user_id HAVING SUM(total)>100` | 2 行 `(1),(3)` | 5 行 `(1),(1),(2),(3),(4)`(逐行输出) | **✅ 已修复**:`has_agg` 改为递归检测 SELECT 列,并让 GROUP BY / HAVING 也触发聚合路径 |
 | 5 | `SELECT COUNT(*) FROM orders WHERE status = :st`(SQLAlchemy `text()` 绑定) | 正常执行 | 1064 `unexpected token in expression: 'status'`(`status` 疑似被词法层当保留字,且仅在该位置冲突) | **✅ 已修复 9e752ba**:列名与保留字冲突处按标识符处理 |
 | 6 | 连接握手 `database` 字段 | 连接即切到指定库(`SELECT DATABASE()` 返回该库) | 字段被忽略,`SELECT DATABASE()` 仍返回全局 current db | **✅ 已修复 9e752ba**:握手响应后执行等价 `USE <db>`(写入 session 状态) |
 | 7 | 多连接 current database 隔离 | per-session(连接 A 的 `USE` 不影响连接 B) | **服务器全局单例**:B 未 `USE` 却看到 A 的库;A 的库被 B 的 `USE` 覆盖,后续查询落到错误的库 | **✅ 已修复 9e752ba**:current db 移入 Session 状态(`smoke_m6_session_db` 覆盖) |
 | 8 | `DROP DATABASE` 当前库 | MySQL 允许删除当前连接所在库 | 报 1008 `database doesn't exist or is current database` | **✅ 已修复 9e752ba**:判定改为仅校验库存在,删除成功即不再报 1008 |
 | 5–8 | 协议/会话层(见上) | — | — | **✅ 已于 commit `9e752ba` 全部修复**:`status` 关键字冲突、`USE` 握手生效、current db 移入 Session 状态、`DROP DATABASE` 当前库改判;并顺带实现 `DESCRIBE` / `SHOW FULL TABLES` / `SHOW COLUMNS`(见 M6 P1 1.2)。`test_sqlalchemy.py` 现为 33 PASS / 0 FAIL / 0 GAP |
 
-> #1–#4 属 SQL 语义层,不影响 C06 的事务/隔离级别结论,列入 M6 P2 之后待办;**第 4 项是被旧脚本 `len(rows) >= 2` 恒真断言掩盖的缺陷,完善 full_flow 后才暴露**。#5–#8 协议/会话层缺陷与反射语句(`DESCRIBE` / `SHOW FULL TABLES` / `SHOW COLUMNS`)已在 `9e752ba` 一并修复,`smoke_m6_session_db.cpp` 与 `test_session_db.py` 覆盖多库会话隔离,`test_sqlalchemy.py` 升至 33 PASS / 0 FAIL / 0 GAP。
+> **【2026-11-12 更新】§8.4 的 8 项 GAP 已全部消除**。#1–#4 是 SQL 语义层,本次在 `src/executor/expr.cpp` / `src/executor/executor.cpp` 落地三值逻辑、空集聚合、嵌套聚合与聚合路径判定后,`smoke_m6_hsqldb_matrix` 由 56 PASS / 4 GAP 升至 **62 PASS / 0 FAIL / 0 GAP**,`test_full_flow.py` 由 47 PASS / 1 GAP 升至 **48 PASS / 0 FAIL / 0 GAP**(第 4 项是被旧脚本 `len(rows) >= 2` 恒真断言掩盖的缺陷)。#5–#8 协议/会话层缺陷与反射语句已在 `9e752ba` 修复。当前所有 GAP 计数为 0,后续 HSQLDB 语义补充方向见 §8.3 待补清单。
+>
+> **构建注意**:曾出现 `Debug Assertion Failed: __acrt_first_block == header`(`debug_heap.cpp:996`),根因是 `build/` 缓存的 `VCPKG_TARGET_TRIPLET=x64-windows`(动态 fmt + 动态 CRT)与 `CMakeLists.txt` 要求的 `x64-windows-static` + 静态 CRT 不一致,两套 CRT 堆并存导致跨堆 `free`。用 `cmake --preset windows-vcpkg` 重新配置并全量重建 Debug/Release 后消除;**新环境务必用 preset 配置**,不要直接 `cmake -S . -B build`。

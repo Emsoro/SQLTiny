@@ -98,6 +98,8 @@ types::Value Executor::eval(const ast::Expression& e, const ExecContext& ctx) co
                     if (v.is_double()) return types::Value::make_double(-v.v_double);
                     return types::Value::make_null();
                 case ast::Expression::UnaryKind::Not:
+                    // 三值逻辑: NOT UNKNOWN 仍是 UNKNOWN
+                    if (v.is_null()) return types::Value::make_null();
                     return types::Value::make_bool(!to_bool(v));
                 case ast::Expression::UnaryKind::IsNull:
                     return types::Value::make_bool(v.is_null());
@@ -109,16 +111,20 @@ types::Value Executor::eval(const ast::Expression& e, const ExecContext& ctx) co
 
         case ast::ExprKind::BinaryOp: {
             auto l = eval(*e.lhs, ctx);
-            // AND / OR 短路
-            if (e.binop == ast::BinOp::And) {
-                if (!to_bool(l)) return types::Value::make_bool(false);
+            // AND / OR 三值逻辑 (TRUE / FALSE / UNKNOWN)
+            if (e.binop == ast::BinOp::And || e.binop == ast::BinOp::Or) {
+                bool is_and = (e.binop == ast::BinOp::And);
+                // 短路: FALSE AND x = FALSE, TRUE OR x = TRUE
+                if (!l.is_null() && to_bool(l) != is_and) {
+                    return types::Value::make_bool(!is_and);
+                }
                 auto r = eval(*e.rhs, ctx);
-                return types::Value::make_bool(to_bool(r));
-            }
-            if (e.binop == ast::BinOp::Or) {
-                if (to_bool(l)) return types::Value::make_bool(true);
-                auto r = eval(*e.rhs, ctx);
-                return types::Value::make_bool(to_bool(r));
+                auto decisive = [&](const types::Value& v) {
+                    return !v.is_null() && (to_bool(v) != is_and);
+                };
+                if (decisive(l) || decisive(r)) return types::Value::make_bool(!is_and);
+                if (l.is_null() || r.is_null()) return types::Value::make_null();
+                return types::Value::make_bool(is_and);
             }
             // IN 表达式会被 parser 转成 __in function call
             if (e.binop == ast::BinOp::Concat) {
@@ -168,13 +174,14 @@ types::Value Executor::eval(const ast::Expression& e, const ExecContext& ctx) co
                 return types::Value::make_double(std::fmod(a, b));
             }
 
-            // 比较
+            // 比较: 任一操作数为 NULL → UNKNOWN (三值逻辑), WHERE 层 to_bool 仍视为不匹配
+            if (l.is_null() || r.is_null()) return types::Value::make_null();
             if (e.binop == ast::BinOp::Eq)   return types::Value::make_bool(l.sql_equals(r));
-            if (e.binop == ast::BinOp::Ne)   return types::Value::make_bool(!l.is_null() && !r.is_null() && l.compare(r) != 0);
-            if (e.binop == ast::BinOp::Lt)   return types::Value::make_bool(!l.is_null() && !r.is_null() && l.compare(r) <  0);
-            if (e.binop == ast::BinOp::Gt)   return types::Value::make_bool(!l.is_null() && !r.is_null() && l.compare(r) >  0);
-            if (e.binop == ast::BinOp::Le)   return types::Value::make_bool(!l.is_null() && !r.is_null() && l.compare(r) <= 0);
-            if (e.binop == ast::BinOp::Ge)   return types::Value::make_bool(!l.is_null() && !r.is_null() && l.compare(r) >= 0);
+            if (e.binop == ast::BinOp::Ne)   return types::Value::make_bool(l.compare(r) != 0);
+            if (e.binop == ast::BinOp::Lt)   return types::Value::make_bool(l.compare(r) <  0);
+            if (e.binop == ast::BinOp::Gt)   return types::Value::make_bool(l.compare(r) >  0);
+            if (e.binop == ast::BinOp::Le)   return types::Value::make_bool(l.compare(r) <= 0);
+            if (e.binop == ast::BinOp::Ge)   return types::Value::make_bool(l.compare(r) >= 0);
 
             return types::Value::make_null();
         }

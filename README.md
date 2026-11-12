@@ -112,6 +112,13 @@ SQL 语法:`SET SESSION TRANSACTION ISOLATION LEVEL <级别>`(会话默认)、`S
 ```powershell
 cmake --preset windows-vcpkg
 cmake --build build --config Debug
+cmake --build build --config Release
+```
+
+> **排障**:若 Debug 版运行时报 `Debug Assertion Failed: __acrt_first_block == header`(`debug_heap.cpp:996`),说明 `build/` 缓存的 triplet/CRT 与配置不一致(两套 CRT 堆并存,跨堆 `free`)。删除 `build/` 后用上面的 preset 重新配置并全量重建即可,不要直接 `cmake -S . -B build`。
+
+```powershell
+python tests\test_perf_vs_sqlite.py --mode both   # Release server 单/多进程对比,结果存 benchmark/
 ```
 
 ### 构建产物
@@ -127,14 +134,14 @@ cmake --build build --config Debug
 | `build/Debug/smoke_m5_wal.exe` | 冒烟测试 | WAL Replay + CRC 校验 + Checkpoint 恢复 — **28/28 PASS** |
 | `build/Debug/smoke_m25_e2e.exe` | E2E 测试 | Winsock 直连 server — **13/13 PASS** |
 | `build/Debug/smoke_m6_isolation.exe` | 隔离级别测试 | 四级别 + 事务/保存点/冲突 — **451/451 PASS** |
-| `build/Debug/smoke_m6_hsqldb_matrix.exe` | HSQLDB 语义矩阵 | NULL 三值 / 空集聚合 / JOIN 基数 / 语句原子性 / 多库隔离 — **56 PASS / 4 GAP**(GAP 见 CODEPLAN §8.4) |
+| `build/Debug/smoke_m6_hsqldb_matrix.exe` | HSQLDB 语义矩阵 | NULL 三值 / 空集聚合 / JOIN 基数 / 语句原子性 / 多库隔离 — **62 PASS / 0 GAP** |
 | `build/Debug/smoke_m6_session_db.exe` | 多库会话隔离 | 每连接 `USE` / 握手 database 互不干扰 — **PASS** |
 | `build/Debug/dbx_probe.exe` | 客户端兼容性探针 | 进程内逐条跑 DBX/dbExpress 连接/元数据/事务阶段的典型 SQL — **58/58 PASS** |
 | `tests/test_txn_vs_sqlite.py` | 事务行为对比 | SQLTiny vs SQLite 四级别 + WAL 重启 — **70/70 一致** |
-| `tests/test_full_flow.py` | PyMySQL 全链路(双连接) | DDL/INSERT→SELECT*含NULL→WHERE/ORDER/聚合/HAVING→JOIN→UPDATE/DELETE→约束与错误码→事务/SAVEPOINT/autocommit→四隔离级别/40001→多库→清理 — **47 PASS / 1 GAP**(GAP 见 CODEPLAN §8.4) |
+| `tests/test_full_flow.py` | PyMySQL 全链路(双连接) | DDL/INSERT→SELECT*含NULL→WHERE/ORDER/聚合/HAVING→JOIN→UPDATE/DELETE→约束与错误码→事务/SAVEPOINT/autocommit→四隔离级别/40001→多库→清理 — **48 PASS / 0 GAP** |
 | `tests/test_sqlalchemy.py` | SQLAlchemy 2.x | Engine/Core/ORM/2.0 风格表达式/`text():param`/rollback/relationship/`engine.begin()`/类型映射/Inspector — **33 PASS / 0 FAIL / 0 GAP**(`DESCRIBE`/`SHOW FULL TABLES` 已支持) |
 | `tests/test_vs_sqlite.py` | 行为对比 | 同一逻辑 SQLTiny vs SQLite 全场景 assert — **全绿** |
-| `tests/test_perf_vs_sqlite.py` | 性能对比 | 200 users + 800 orders INSERT + JOIN 性能 — **跑通无 crash** |
+| `tests/test_perf_vs_sqlite.py` | 性能对比 | Release 版 server,单进程 / 多进程两种模式对比 SQLite,结果保存 `benchmark/`(JSON + CSV + `latest.json`) — **跑通无 crash** |
 | `tests/test_concurrency.py` | 并发安全 | 5 线程(2W+2R+1D)15s 并发读写 — **通过** |
 | `tests/test_stmt_prepare.py` | 预编译语句协议 | 裸 socket 走 COM_STMT_PREPARE/EXECUTE/CLOSE 全流程(含 NULL/转义/语法错误) — **7/7 PASS** |
 
@@ -184,14 +191,14 @@ smoke_m4              6/6   PASS  CREATE/DROP DB / USE / SHOW
 smoke_m5_wal         28/28  PASS  WAL Replay + CRC + Checkpoint + 启动恢复
 smoke_m25_e2e        13/13  PASS  MySQL wire C++ client E2E
 smoke_m6_isolation  451/451 PASS  四隔离级别 + 事务 / 保存点 / 冲突
-smoke_m6_hsqldb_matrix 56 PASS / 4 GAP   HSQLDB 可移植 SQL 语义矩阵
+smoke_m6_hsqldb_matrix 62 PASS / 0 GAP   HSQLDB 可移植 SQL 语义矩阵
 smoke_m6_session_db  PASS        多库会话级隔离(每连接 USE/握手 db 互不干扰)
-test_full_flow       47 PASS / 1 GAP    PyMySQL 全链路(双连接):DDL→DML→聚合→JOIN→事务→四隔离级别→多库→清理
+test_full_flow       48 PASS / 0 GAP    PyMySQL 全链路(双连接):DDL→DML→聚合→JOIN→事务→四隔离级别→多库→清理
 test_txn_vs_sqlite   70/70 对比        四隔离级别 + WAL 重启与 SQLite 逐项比对
 test_sqlalchemy      33 PASS / 0 FAIL / 0 GAP  15 组:Engine/Core/ORM/2.0 表达式/绑定/事务/relationship/类型映射/Inspector
 test_vs_sqlite       全绿             同逻辑 SQLTiny vs SQLite 行为一致
 test_wal_recovery    全通过            server 重启 / UPDATE / DELETE 状态恢复
-test_perf_vs_sqlite  跑通              200 users / 800 orders INSERT + JOIN 性能对比
+test_perf_vs_sqlite  跑通              Release server 单/多进程 vs SQLite,结果存 benchmark/
 test_concurrency     通过              5 线程 15s 并发读写
 dbx_probe           58/58 PASS         DBX/dbExpress SQL 探针(进程内:连接/元数据/事务)
 test_stmt_prepare    7/7   PASS        预编译语句 binary protocol 全流程
