@@ -47,6 +47,9 @@ private:
     bool match(TokenKind k);
     bool match_consume(TokenKind k);
     void skip_semicolon();
+    /// 跳过 MySQL DDL 尾部选项(DEFAULT CHARACTER SET / COLLATE / ENGINE ...),
+    /// 停在分号/Eof,避免它们被 parse_all() 当成下一条语句
+    void skip_ddl_options();
     std::string ident_text();
     std::string kw_or_ident();  // 关键字但在标识符位置接受(如 t.name 中 t 是 Ident 还是 KwTable)
 

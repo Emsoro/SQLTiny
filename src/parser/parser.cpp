@@ -9,6 +9,41 @@ namespace sqltiny::parser {
 
 namespace {
 
+/// SHOW ... LIKE / WHERE 表达式里取第一个字符串字面量作过滤条件。
+/// DBeaver 建表后发 `SHOW FULL TABLES FROM db WHERE Tables_in_db = 'NewTable'`,
+/// 把 'NewTable' 提到 AST, 同时消费掉 WHERE, 避免被 parse_all() 当成下一条语句。
+bool first_string_literal(const ast::Expression& e, std::string& out) {
+    if (e.kind == ast::ExprKind::Literal && e.literal.is_string()) {
+        out = e.literal.v_str;
+        return true;
+    }
+    if (e.lhs && first_string_literal(*e.lhs, out)) return true;
+    if (e.rhs && first_string_literal(*e.rhs, out)) return true;
+    if (e.operand && first_string_literal(*e.operand, out)) return true;
+    for (auto& a : e.func_args) if (a && first_string_literal(*a, out)) return true;
+    return false;
+}
+
+/// 无 AS 时允许作别名的非保留关键字白名单(MySQL 语义)。
+/// 结构关键字(FROM/WHERE/GROUP/ORDER...)绝不能进白名单, 否则会被误当成别名破坏语句解析。
+/// 典型场景: Database Client 的列元数据查询 `COLUMN_COMMENT comment, COLUMN_KEY \`key\``。
+bool is_bare_alias_keyword(TokenKind k) {
+    switch (k) {
+        case TokenKind::KwComment: case TokenKind::KwKey:
+        case TokenKind::KwInt: case TokenKind::KwInteger: case TokenKind::KwTinyInt:
+        case TokenKind::KwSmallInt: case TokenKind::KwBigInt:
+        case TokenKind::KwDecimal: case TokenKind::KwNumeric:
+        case TokenKind::KwFloat: case TokenKind::KwDouble: case TokenKind::KwReal:
+        case TokenKind::KwChar: case TokenKind::KwVarchar: case TokenKind::KwText:
+        case TokenKind::KwBlob: case TokenKind::KwDate: case TokenKind::KwTime:
+        case TokenKind::KwDateTime: case TokenKind::KwTimestamp:
+        case TokenKind::KwBoolean: case TokenKind::KwJson:
+        case TokenKind::KwUnsigned: case TokenKind::KwSigned: case TokenKind::KwZerofill:
+            return true;
+        default: return false;
+    }
+}
+
 std::string upper_copy(std::string s) {
     for (char& c : s) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
     return s;
@@ -90,6 +125,24 @@ void Parser::skip_semicolon() {
     // 允许末尾没分号
     if (!match(TokenKind::Eof)) {
         // 有些场景下分号可省,暂时 tolerate
+    }
+}
+
+void Parser::skip_ddl_options() {
+    // MySQL/DBeaver 会在 CREATE DATABASE/SCHEMA/TABLE 后附加
+    //   DEFAULT CHARACTER SET utf8 / DEFAULT COLLATE utf8_general_ci /
+    //   ENGINE=InnoDB / AUTO_INCREMENT=1 / COMMENT='...' ...
+    // SQLTiny 不实现这些选项,但必须消费掉,否则 parse_all() 会把它们
+    // 当作下一条语句并抛 "unexpected start of statement: 'DEFAULT'"。
+    // 停在分号/Eof,让多语句 SQL 仍能被正确切分。
+    int depth = 0;
+    while (true) {
+        Token t = peek();
+        if (t.kind == TokenKind::Eof || t.kind == TokenKind::Error ||
+            (t.kind == TokenKind::Semi && depth == 0)) break;
+        if (t.kind == TokenKind::LParen) ++depth;
+        else if (t.kind == TokenKind::RParen && depth > 0) --depth;
+        consume();
     }
 }
 
@@ -593,10 +646,15 @@ ast::StmtPtr Parser::parse_select() {
         auto expr = parse_expr();
         std::string alias;
         if (match_consume(TokenKind::KwAs)) {
+            // MySQL 默认语义: AS "alias" / AS 'alias' 双引号或单引号串均可作列别名
+            alias = match(TokenKind::String) ? consume().text : kw_or_ident();
+        } else if (match(TokenKind::Ident) || match(TokenKind::QuotedIdent) ||
+                   is_bare_alias_keyword(peek().kind)) {
+            // 无 AS 也允许(含 COMMENT/类型类等非保留关键字)
             alias = kw_or_ident();
-        } else if (match(TokenKind::Ident) || match(TokenKind::QuotedIdent)) {
-            // 无 AS 也允许
-            alias = kw_or_ident();
+        } else if (match(TokenKind::String)) {
+            // SELECT expr "alias" —— Database Client / DBeaver 元数据查询大量使用
+            alias = consume().text;
         }
         stmt->columns.push_back({ std::move(expr), std::move(alias) });
         if (!match_consume(TokenKind::Comma)) break;
@@ -669,8 +727,10 @@ void Parser::parse_from(ast::SelectStmt& s) {
 std::pair<std::string, std::string> Parser::parse_table_ref_alias() {
     std::string table = parse_table_ref();
     std::string alias;
-    if (match_consume(TokenKind::KwAs)) alias = kw_or_ident();
-    else if (match(TokenKind::Ident) || match(TokenKind::QuotedIdent)) alias = kw_or_ident();
+    if (match_consume(TokenKind::KwAs)) alias = match(TokenKind::String) ? consume().text : kw_or_ident();
+    else if (match(TokenKind::Ident) || match(TokenKind::QuotedIdent) ||
+             is_bare_alias_keyword(peek().kind)) alias = kw_or_ident();
+    else if (match(TokenKind::String)) alias = consume().text;   // FROM t "alias"
     return { table, alias };
 }
 
@@ -1009,6 +1069,7 @@ ast::StmtPtr Parser::parse_create_table() {
     auto r = std::make_unique<ast::Statement>();
     r->kind = ast::StmtKind::CreateTable;
     r->create_table_ = std::move(stmt);
+    skip_ddl_options();   // ENGINE= / DEFAULT CHARSET= / COLLATE= 等表选项
     return r;
 }
 
@@ -1087,6 +1148,13 @@ ast::StmtPtr Parser::parse_show() {
         stmt->full = full;
         if (match_consume(TokenKind::KwFrom) || match_consume(TokenKind::KwIn)) {
             stmt->table_or_pattern = kw_or_ident();
+        }
+        // MySQL: SHOW [FULL] TABLES [FROM db] [LIKE 'pat' | WHERE col='pat']
+        // 没有这一句, DBeaver 的 `WHERE Tables_in_default = 'NewTable'` 会被
+        // parse_all() 当成下一条语句并抛 1064 unexpected start of statement: 'WHERE'。
+        if (match_consume(TokenKind::KwLike) || match_consume(TokenKind::KwWhere)) {
+            auto e = parse_expr();
+            (void)first_string_literal(*e, stmt->filter_pattern);
         }
     } else if (match_consume(TokenKind::KwDatabases) || match_consume(TokenKind::KwSchemas)) {
         stmt->kind = ast::ShowStmt::Kind::Databases;
@@ -1207,6 +1275,7 @@ ast::StmtPtr Parser::parse_create_database() {
     auto r = std::make_unique<ast::Statement>();
     r->kind = ast::StmtKind::CreateDatabase;
     r->create_database_ = std::move(stmt);
+    skip_ddl_options();   // DEFAULT CHARACTER SET / DEFAULT COLLATE 等 schema 选项
     return r;
 }
 

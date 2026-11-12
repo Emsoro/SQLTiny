@@ -7,7 +7,7 @@
 
 ---
 
-## 0. 当前状态(2026-11-12,v1.1.0)
+## 0. 当前状态(2026-11-12,v1.1.2)
 
 > 下文 M1–M5 为原始规划、M6 各节含设计稿伪代码,均保留供追溯。**落地状态以本节与各节 ✅ 标记为准;实际目录与运行方式见 `README.md`,架构图见 `architecture.svg`。**
 
@@ -53,17 +53,17 @@
 | `test_sqlalchemy.py` | 33 PASS / 0 FAIL / 0 GAP(原 #5–#8 与 DESCRIBE/SHOW FULL TABLES 反射限制均已修复) |
 | **实测客户端** | DBX/dbExpress(Delphi)连接 + 打开表 + 浏览索引/列正常;类 Navicat 图形工具浏览表/索引/列正常;PyMySQL / mysql CLI 正常 |
 
-### 版本标识(v1.1.0)
+### 版本标识(v1.1.2)
 
 | 位置 | 内容 |
 |---|---|
-| `CMakeLists.txt` | `project(SQLTiny VERSION 1.1.0 LANGUAGES CXX)` |
-| `vcpkg.json` | `"version-string": "1.1.0"` |
-| `src/main.cpp` | 启动横幅 `SQLTiny v1.1.0 — MySQL wire protocol server` |
+| `CMakeLists.txt` | `project(SQLTiny VERSION 1.1.2 LANGUAGES CXX)` |
+| `vcpkg.json` | `"version-string": "1.1.2"` |
+| `src/main.cpp` | 启动横幅 `SQLTiny v1.1.2 — MySQL wire protocol server` |
 | `README.md` / `CODEPLAN.md` | 本版本变更清单与验证基线 |
 | 协议层 `@@version` / `VERSION()` | 仍为 `5.7.0-SQLTiny` —— MySQL 客户端兼容用伪装版本,**不是**产品版本,不随产品版本改动 |
 
-> 上一版(M1–M5 + M6 事务/四隔离级别基线)版本号分散:启动横幅 `SQLTiny v1.0`、manifest `0.1.0`、CMake 未声明版本。v1.1.0 统一上述三处,并交付本轮第三方客户端兼容性改动。
+> v1.1.0 统一了此前分散的版本号(启动横幅 `v1.0`、manifest `0.1.0`、CMake 未声明),交付 Prepared Statement、information_schema、SHOW 扩展与 EOF 帧兼容。**v1.1.2** 在此基础上交付 DBeaver / Database Client 实测兼容修复(DDL 选项跳过、SHOW TABLES WHERE/LIKE 过滤、`REFERENTIAL_CONSTRAINTS` 虚拟表、系统变量补齐、双引号与裸关键字别名、`INSTR/LOCATE/POSITION` 函数),详见 README「v1.1.2 更新内容」。
 
 ---
 

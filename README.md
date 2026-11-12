@@ -1,6 +1,6 @@
 # SQLTiny — 轻量级嵌入式数据库 · MySQL 协议兼容
 
-> **当前版本 `v1.1.0`(2026-11-12)** · 版本号统一维护在 `CMakeLists.txt`(`project(SQLTiny VERSION 1.1.0)`)、`vcpkg.json`(`version-string`)与 `src/main.cpp` 启动横幅。协议层对外仍伪装为 `5.7.0-SQLTiny` 以兼容 MySQL 客户端,与产品版本无关。
+> **当前版本 `v1.1.2`(2026-11-12)** · 版本号统一维护在 `CMakeLists.txt`(`project(SQLTiny VERSION 1.1.2)`)、`vcpkg.json`(`version-string`)与 `src/main.cpp` 启动横幅。协议层对外仍伪装为 `5.7.0-SQLTiny` 以兼容 MySQL 客户端,与产品版本无关。
 
 **SQLTiny** 是用现代 C++20 从零重写的轻量级关系型数据库,核心设计灵感来自 [HSQLDB](http://hsqldb.org/),额外暴露 **MySQL Wire Protocol**——标准 MySQL 客户端(`mysql` CLI、Navicat、DBeaver、Connector/J、PyMySQL、DBX/dbExpress)直接连接。
 
@@ -32,6 +32,22 @@
 > 🔒 **锁分层**: Catalog.mu_(DDL) → Table.mu_ shared_lock(SELECT 多读者并行) / unique_lock(DML 独占) → RowLockMap(行级冲突检测) → TransactionManager.writeLock_(提交边界) → WalManager.mu_(WAL 文件读写)
 >
 > 🧊 **MVCC**: SELECT 完全不加锁,`for_each_visible(querySCN, readerTxn)` 按 `createSCN/deleteSCN` 与 `pendingTxn` 过滤;未提交行只对所属事务可见,commit 才 `finalize_commit` 对外发布
+
+---
+
+## 🆕 v1.1.2 更新内容
+
+本版本聚焦 **GUI 客户端实测兼容修复**(以 DBeaver 26.2.4 / Connector/J 8.2.0 与 VS Code Database Client 实测驱动):
+
+| 类别 | 内容 |
+|---|---|
+| **DDL 选项** | `CREATE DATABASE/SCHEMA/TABLE` 尾部的 `DEFAULT CHARACTER SET / COLLATE / ENGINE / AUTO_INCREMENT / COMMENT` 等选项被正确跳过,不再被当成下一条语句(修复 DBeaver 建库建表 1064 `unexpected start of statement: 'DEFAULT'`) |
+| **SHOW TABLES 过滤** | `SHOW [FULL] TABLES [FROM db] [LIKE 'pat' \| WHERE col='pat']` 完整解析,表名过滤大小写不敏感(修复 DBeaver 建表校验 1064 `'WHERE'`) |
+| **information_schema** | 新增 `REFERENTIAL_CONSTRAINTS` 虚拟表(空结果集),DBeaver 打开表时的外键查询不再报 1146 |
+| **系统变量** | `SHOW VARIABLES` 补齐 `lower_case_table_names` / `max_allowed_packet` / `net_read_timeout` / `net_write_timeout` |
+| **别名语法** | 双引号串(`AS "alias"` / 无 AS 裸 `"alias"`)与裸非保留关键字(`COLUMN_COMMENT comment`)可作列/表别名——Database Client 元数据查询的 1064 |
+| **新函数** | `INSTR(str,sub)` / `LOCATE(sub,str)` / `POSITION`(大小写不敏感,1 起,未找到 0) |
+| **回归** | `tests/smoke_m4.cpp` 扩展上述场景断言;`ctest` 10/10 |
 
 ---
 
@@ -80,6 +96,7 @@ SQL 语法:`SET SESSION TRANSACTION ISOLATION LEVEL <级别>`(会话默认)、`S
 | **M5 持久化 + MVCC + SQLAlchemy** | ✅ | WAL+Replay+Checkpoint · MVCC SCN 可见性 · AUTO_INCREMENT · 并发安全(M5 为全局 mutex,M6 起改为行锁 + MVCC 快照) · **SQLAlchemy 全场景 33/0/0 PASS · 4+ 集成测试** |
 | **M6 事务 + 四隔离级别 (HSQLDB 2.7.4)** | ✅ | 行级锁 · 四隔离级别与提升规则 · SAVEPOINT · 事务级 WAL 缓冲 · 提交期冲突检测 40001 |
 | **M6 客户端兼容性 (v1.1.0)** | ✅ | 服务端预编译语句 · information_schema 虚拟表 · SHOW 扩展 · CASE 表达式 · EOF 帧兼容 · **DBX/dbExpress + 类 Navicat 工具实测通过 · dbx_probe 58/58 · test_stmt_prepare 7/7** |
+| **M6 客户端兼容性 (v1.1.2)** | ✅ | DBeaver / Database Client 实测修复:DDL 选项跳过 · SHOW TABLES WHERE/LIKE · REFERENTIAL_CONSTRAINTS · 双引号与裸关键字别名 · INSTR 系列函数 |
 | **后续** | 📋 | JOIN 索引优化 → 等待队列/死锁检测 → 存储过程 · caching_sha2_password / SSL |
 
 ---

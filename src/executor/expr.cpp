@@ -378,6 +378,20 @@ types::Value Executor::eval_function(
         if (args.size() >= 2) return eval(*args[1], ctx);
         return types::Value::make_null();
     }
+    if (lower == "instr" || lower == "locate" || lower == "position") {
+        // INSTR(str, sub) / LOCATE(sub, str) —— 子串位置, 1 起, 未找到为 0。
+        // Database Client 用 INSTR(COLUMN_TYPE,'zerofill')>0 判断 zerofill / unsigned。
+        if (args.size() < 2) return types::Value::make_int(0);
+        auto lc = [](std::string s) {
+            std::transform(s.begin(), s.end(), s.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            return s;
+        };
+        std::string s   = lower == "instr" ? eval(*args[0], ctx).v_str : eval(*args[1], ctx).v_str;
+        std::string sub = lower == "instr" ? eval(*args[1], ctx).v_str : eval(*args[0], ctx).v_str;
+        auto pos = lc(s).find(lc(sub));
+        return types::Value::make_int(pos == std::string::npos ? 0 : static_cast<int64_t>(pos) + 1);
+    }
     if (lower == "database" || lower == "schema") {
         return types::Value::make_string("default");
     }

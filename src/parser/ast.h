@@ -187,6 +187,7 @@ struct ShowStmt {
     bool full = false;              // SHOW FULL TABLES —— 多返回一列 table_type
     std::string table_or_pattern;   // Tables:db / Columns:table / CreateTable:tbl / CreateDatabase:db / Index:tbl / TableStatus:LIKE 模式
     std::string db_name;            // Columns / CreateTable / Index / TableStatus 里可选限定
+    std::string filter_pattern;     // SHOW TABLES 的 LIKE 'pat' / WHERE col='pat' 表名过滤
 };
 
 // ---------- CREATE DATABASE ----------

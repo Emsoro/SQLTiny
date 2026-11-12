@@ -11,6 +11,27 @@
 
 namespace sqltiny::executor {
 
+/// SHOW TABLES [LIKE 'pat' | WHERE col='pat'] 的表名过滤。
+/// Catalog 内部表名是小写,客户端常传建表时的原始大小写,故大小写不敏感比较。
+static bool show_table_matches(const std::string& name, std::string pattern) {
+    if (pattern.empty()) return true;
+    if (pattern.size() >= 2 && pattern.front() == '\'' && pattern.back() == '\'')
+        pattern = pattern.substr(1, pattern.size() - 2);
+    auto lower = [](std::string s) {
+        std::transform(s.begin(), s.end(), s.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return s;
+    };
+    std::string n = lower(name), p = lower(pattern);
+    if (p == "%" || p == "%%") return true;
+    if (p.find('%') == std::string::npos) return n == p;
+    if (p.size() >= 2 && p.front() == '%' && p.back() == '%')
+        return n.find(p.substr(1, p.size() - 2)) != std::string::npos;
+    if (p.back() == '%') return n.starts_with(p.substr(0, p.size() - 1));
+    if (p.front() == '%') return n.ends_with(p.substr(1));
+    return n == p;
+}
+
 // WAL 小工具:拆 "db.table" 或 "table" → (db_or_empty, table)
 static std::pair<std::string, std::string> split_qname(const std::string& q) {
     auto dot = q.find('.');
@@ -57,7 +78,7 @@ ResultSet Executor::execute(const ast::Statement& stmt) {
         case ast::StmtKind::Show: {
             auto& sh = *stmt.show_;
             switch (sh.kind) {
-                case ast::ShowStmt::Kind::Tables:      return exec_show_tables(sh.full, sh.table_or_pattern);
+                case ast::ShowStmt::Kind::Tables:      return exec_show_tables(sh.full, sh.table_or_pattern, sh.filter_pattern);
                 case ast::ShowStmt::Kind::Columns:     return exec_show_columns(sh.db_name, sh.table_or_pattern);
                 case ast::ShowStmt::Kind::Databases:   return exec_show_databases();
                 case ast::ShowStmt::Kind::CreateTable: return exec_show_create_table(sh.db_name, sh.table_or_pattern);
@@ -973,7 +994,8 @@ ResultSet Executor::exec_select(const ast::SelectStmt& s) {
 }
 
 // ---------- SHOW TABLES / SHOW FULL TABLES ----------
-ResultSet Executor::exec_show_tables(bool full, const std::string& db_name) {
+ResultSet Executor::exec_show_tables(bool full, const std::string& db_name,
+                                     const std::string& filter_pattern) {
     ResultSet r;
     std::string db = db_name.empty() ? default_db() : db_name;
     auto col_name = fmt::format("Tables_in_{}", db);
@@ -985,6 +1007,7 @@ ResultSet Executor::exec_show_tables(bool full, const std::string& db_name) {
     }
     auto names = catalog_.table_names(db);
     for (auto& n : names) {
+        if (!show_table_matches(n, filter_pattern)) continue;
         if (full)
             r.rows.push_back({ types::Value::make_string(n),
                                types::Value::make_string("BASE TABLE") });
@@ -1178,7 +1201,9 @@ ResultSet Executor::exec_show_variables(const std::string& pattern) {
         {"collation_server", "utf8mb4_general_ci"},
         {"default_storage_engine", "InnoDB"}, {"engine_condition_pushdown", "ON"},
         {"innodb_version", "5.7.0"}, {"interactive_timeout", "28800"},
-        {"join_buffer_size", "262144"}, {"max_connections", "151"},
+        {"join_buffer_size", "262144"}, {"lower_case_table_names", "0"},
+        {"max_allowed_packet", "67108864"}, {"net_read_timeout", "30"},
+        {"net_write_timeout", "60"}, {"max_connections", "151"},
         {"net_buffer_length", "16384"}, {"sql_mode", "ONLY_FULL_GROUP_BY"},
         {"thread_cache_size", "9"}, {"wait_timeout", "28800"},
         {"version", "5.7.0-SQLTiny"},
@@ -1459,7 +1484,8 @@ bool Executor::is_information_schema_name(const std::string& qualified) {
     return ci_eq(tbl, "TABLES") || ci_eq(tbl, "COLUMNS") || ci_eq(tbl, "SCHEMATA") ||
            ci_eq(tbl, "TRIGGERS") || ci_eq(tbl, "ROUTINES") || ci_eq(tbl, "EVENTS") ||
            ci_eq(tbl, "VIEWS") || ci_eq(tbl, "TABLE_CONSTRAINTS") ||
-           ci_eq(tbl, "KEY_COLUMN_USAGE") || ci_eq(tbl, "STATISTICS");
+           ci_eq(tbl, "KEY_COLUMN_USAGE") || ci_eq(tbl, "STATISTICS") ||
+           ci_eq(tbl, "REFERENTIAL_CONSTRAINTS");
 }
 
 namespace {
@@ -1756,6 +1782,25 @@ std::unique_ptr<storage::Table> Executor::build_information_schema_table(
             is_col("REFERENCED_COLUMN_NAME", types::SqlType::Varchar),
         };
         return make_empty("KEY_COLUMN_USAGE", std::move(cols));
+    }
+
+    if (ci_eq(table_name, "REFERENTIAL_CONSTRAINTS")) {
+        // SQLTiny 不支持外键,返回结构正确但为空的表,
+        // 否则 DBeaver 打开任意表时查外键信息都会报 1146。
+        std::vector<ast::ColumnDef> cols = {
+            is_col("CONSTRAINT_CATALOG", types::SqlType::Varchar),
+            is_col("CONSTRAINT_SCHEMA", types::SqlType::Varchar),
+            is_col("CONSTRAINT_NAME", types::SqlType::Varchar),
+            is_col("UNIQUE_CONSTRAINT_CATALOG", types::SqlType::Varchar),
+            is_col("UNIQUE_CONSTRAINT_SCHEMA", types::SqlType::Varchar),
+            is_col("UNIQUE_CONSTRAINT_NAME", types::SqlType::Varchar),
+            is_col("MATCH_OPTION", types::SqlType::Varchar),
+            is_col("UPDATE_RULE", types::SqlType::Varchar),
+            is_col("DELETE_RULE", types::SqlType::Varchar),
+            is_col("TABLE_NAME", types::SqlType::Varchar),
+            is_col("REFERENCED_TABLE_NAME", types::SqlType::Varchar),
+        };
+        return make_empty("REFERENTIAL_CONSTRAINTS", std::move(cols));
     }
 
     if (ci_eq(table_name, "STATISTICS")) {

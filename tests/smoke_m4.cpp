@@ -55,6 +55,45 @@ int test_create_drop_database() {
     r = s.execute("DROP DATABASE mydb");
     CHECK_FAIL(r, 1008);
 
+    // DBeaver 26.2.4 建 schema 会附加 DEFAULT CHARACTER SET / DEFAULT COLLATE
+    // (曾报 1064: unexpected start of statement: 'DEFAULT' at line 2 col 1)
+    r = s.execute("CREATE SCHEMA `dbeaver_db`\n"
+                  "DEFAULT CHARACTER SET utf8\n"
+                  "DEFAULT COLLATE utf8_general_ci");
+    CHECK_OK(r);
+    r = s.execute("SHOW DATABASES");
+    CHECK_OK(r);
+    bool has_dbeaver_db = false;
+    for (auto& row : r.rows) if (row[0].v_str == "dbeaver_db") has_dbeaver_db = true;
+    CHECK(has_dbeaver_db);
+    r = s.execute("DROP DATABASE dbeaver_db");
+    CHECK_OK(r);
+
+    // 建表选项(ENGINE / DEFAULT CHARSET / COLLATE)也不能被当成下一条语句
+    r = s.execute("CREATE TABLE dbeaver_t(id INT PRIMARY KEY) "
+                  "ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci");
+    CHECK_OK(r);
+    r = s.execute("INSERT INTO dbeaver_t VALUES (1)");
+    CHECK_OK(r);
+    r = s.execute("SELECT id FROM dbeaver_t");
+    CHECK_OK(r);
+    CHECK(r.rows.size() == 1);
+
+    // DBeaver 建表后用它校验表是否存在: WHERE 子句 + 原始大小写表名
+    r = s.execute("SHOW FULL TABLES FROM `default` WHERE Tables_in_default = 'DBeaver_T'");
+    CHECK_OK(r);
+    CHECK(r.rows.size() == 1);
+    r = s.execute("SHOW FULL TABLES FROM `default` WHERE Tables_in_default = 'NoSuchTable'");
+    CHECK_OK(r);
+    CHECK(r.rows.empty());
+    // DBeaver 握手后查询该系统变量, 之前返回 0 行
+    r = s.execute("SHOW VARIABLES LIKE 'lower_case_table_names'");
+    CHECK_OK(r);
+    CHECK(r.rows.size() == 1);
+
+    r = s.execute("DROP TABLE dbeaver_t");
+    CHECK_OK(r);
+
     printf("  CREATE/DROP DATABASE .. PASS\n");
     return 0;
 }
@@ -124,8 +163,41 @@ int test_show_tables_columns() {
     r = s.execute("SHOW COLUMNS FROM nope");
     CHECK_FAIL(r, 1146);
 
+    // Database Client / DBeaver 风格: 双引号字符串作列别名 (MySQL 默认语义),
+    // 之前报 1064 unexpected start of statement: 'comment'
+    r = s.execute("SELECT name \"n\", id AS \"id\" FROM t1 WHERE id <> 0 ORDER BY name");
+    CHECK_OK(r);
+    // 元数据查询全风格: 反引号列名 + 双引号别名 + <> 比较 + information_schema
+    r = s.execute("SELECT TABLE_COMMENT \"comment\", TABLE_NAME \"name\", TABLE_ROWS \"rows\", "
+                  "`ENGINE` engine FROM information_schema.TABLES "
+                  "WHERE TABLE_SCHEMA = 'default' AND TABLE_TYPE <> 'VIEW' ORDER BY TABLE_NAME");
+    CHECK_OK(r);
+    // 列元数据风格: 裸关键字别名(comment) + 表别名限定 + INSTR 函数
+    r = s.execute("SELECT c.COLUMN_NAME name, COLUMN_COMMENT comment, `COLUMN_KEY` `key`, "
+                  "INSTR(COLUMN_TYPE,'zerofill')>0 \"zerofill\" "
+                  "FROM information_schema.columns c "
+                  "WHERE c.table_schema = 'default' ORDER BY c.ORDINAL_POSITION");
+    CHECK_OK(r);
+    r = s.execute("SELECT INSTR('abcabc','ABC') AS i, INSTR('abc','zz') AS j");
+    CHECK_OK(r);
+    CHECK(r.rows.size() == 1 && r.rows[0][0].v_int == 1 && r.rows[0][1].v_int == 0);
+
     s.execute("DROP TABLE t1");
     s.execute("DROP TABLE t2");
+
+    // DBeaver 打开表时查外键信息: 该虚拟表须存在且为 0 行(SQLTiny 不支持外键),
+    // 且能被 JOIN / WHERE 正常处理, 否则会报 1146 Table '...REFERENTIAL_CONSTRAINTS' doesn't exist
+    r = s.execute("SELECT * FROM information_schema.REFERENTIAL_CONSTRAINTS");
+    CHECK_OK(r);
+    CHECK(r.rows.empty());
+    r = s.execute("SELECT rc.CONSTRAINT_NAME, kcu.COLUMN_NAME "
+                  "FROM information_schema.REFERENTIAL_CONSTRAINTS rc "
+                  "JOIN information_schema.KEY_COLUMN_USAGE kcu "
+                  "ON kcu.CONSTRAINT_NAME = rc.CONSTRAINT_NAME "
+                  "WHERE rc.REFERENCED_TABLE_NAME = 't1'");
+    CHECK_OK(r);
+    CHECK(r.rows.empty());
+
     printf("  SHOW TABLES/COLUMNS .. PASS\n");
     return 0;
 }

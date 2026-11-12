@@ -7,7 +7,7 @@ if(WIN32 AND CMAKE_TOOLCHAIN_FILE AND NOT DEFINED VCPKG_TARGET_TRIPLET)
   set(VCPKG_TARGET_TRIPLET "x64-windows-static" CACHE STRING "vcpkg target triplet")
 endif()
 
-project(SQLTiny VERSION 1.1.0 LANGUAGES CXX)
+project(SQLTiny VERSION 1.1.2 LANGUAGES CXX)
 
 # MSVC 静态 CRT: 与 x64-windows-static 的 VCPKG_CRT_LINKAGE=static 保持一致,
 # 避免 CMake 默认 /MD 与 toolchain 的 /MT 冲突 (LNK2038 / D9025)。
