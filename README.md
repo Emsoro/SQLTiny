@@ -151,6 +151,16 @@ cmake --build build --config Release
 python tests\test_perf_vs_sqlite.py --mode both   # Release server 单/多进程对比,结果存 benchmark/
 ```
 
+### 稳定性压测
+
+专为「本地数据库服务本地程序」场景设计的压力与稳定性套件(密码不测,专攻稳定性):
+
+```powershell
+python tests\stress_stability.py --self-server --phase all --duration 30 --workers 16
+```
+
+`--self-server` 自动拉起/管理 server(内存或临时 `--data-dir`);`--phase` 可选 `complex`(复杂查询计时)/ `soak`(并发长时)/ `crash`(崩溃恢复)/ `all`。覆盖:10 条复杂查询(多表 JOIN+聚合 / 子查询 / GROUP BY+HAVING / CASE / 自连接 / NULL 聚合)、并发读写与事务冲突(40001 后无丢写/幻行不变量)、`kill -9` 后 WAL replay 原子性、soak 期间 RSS 内存稳定。详见脚本头部与 `CODEPLAN.md` §8.2 C09。
+
 ### JOIN 优化与 EXPLAIN
 
 等值 JOIN 走 **Hash Join**(右表按 key 分桶、左表 O(1) probe),复杂度 O(N×M) → O(N+M);
@@ -190,6 +200,7 @@ FROM users u INNER JOIN orders o ON o.user_id = u.id;
 | `tests/test_vs_sqlite.py` | 行为对比 | 同一逻辑 SQLTiny vs SQLite 全场景 assert — **全绿** |
 | `tests/test_perf_vs_sqlite.py` | 性能对比 | Release 版 server,单进程 / 多进程两种模式对比 SQLite,结果保存 `benchmark/`(JSON + CSV + `latest.json`) — **跑通无 crash** |
 | `tests/test_concurrency.py` | 并发安全 | 5 线程(2W+2R+1D)15s 并发读写 — **通过** |
+| `tests/stress_stability.py` | 稳定性压测 | 自带 server 的并发/soak/崩溃恢复/内存稳定套件(`--self-server --phase all`) — **全 PASS** |
 | `tests/test_stmt_prepare.py` | 预编译语句协议 | 裸 socket 走 COM_STMT_PREPARE/EXECUTE/CLOSE 全流程(含 NULL/转义/语法错误) — **7/7 PASS** |
 
 ### 一键跑全量测试
@@ -225,6 +236,7 @@ python tests\test_concurrency.py
 python tests\test_wal_recovery.py    # server 重启恢复(需 server)
 python tests\test_txn_vs_sqlite.py   # 自动起停 server,不占用 3306
 python tests\test_stmt_prepare.py    # COM_STMT_* 预编译协议(需 server)
+python tests\stress_stability.py --self-server --phase all   # 稳定性压测(自带 server)
 ```
 
 ### 测试总览 (CTest 10/10 · Python 8 scripts)
@@ -247,6 +259,7 @@ test_vs_sqlite       全绿             同逻辑 SQLTiny vs SQLite 行为一致
 test_wal_recovery    全通过            server 重启 / UPDATE / DELETE 状态恢复
 test_perf_vs_sqlite  跑通              Release server 单/多进程 vs SQLite,结果存 benchmark/
 test_concurrency     通过              5 线程 15s 并发读写
+stress_stability    全 PASS           自带 server:复杂查询计时/并发soak不变量/kill-9崩溃恢复/RSS稳定
 dbx_probe           58/58 PASS         DBX/dbExpress SQL 探针(进程内:连接/元数据/事务)
 test_stmt_prepare    7/7   PASS        预编译语句 binary protocol 全流程
 ```

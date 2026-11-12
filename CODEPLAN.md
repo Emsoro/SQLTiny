@@ -52,6 +52,7 @@
 | `test_full_flow.py` / `test_vs_sqlite.py` | 48 PASS / 0 FAIL / 0 GAP / 全场景一致 |
 | `test_wal_recovery.py` / `test_concurrency.py` | 重启恢复全通过 / 5 线程 15s 无 crash |
 | `test_perf_vs_sqlite.py` | Release 版 server 单进程 / 多进程(`multiprocessing.Pool`)两种模式对比 SQLite,结果保存 `benchmark/`(带时间戳 JSON + CSV、`history.csv` 追加、`latest.json`) |
+| `stress_stability.py` | 稳定性压测:复杂查询计时 / 并发 soak(ops·错误率·p50/p95/p99) / 事务冲突不变量 / `kill -9` 崩溃恢复(WAL replay 原子性) / RSS 内存稳定;`--self-server` 自动拉起实例 |
 | `test_sqlalchemy.py` | 33 PASS / 0 FAIL / 0 GAP(原 #5–#8 与 DESCRIBE/SHOW FULL TABLES 反射限制均已修复) |
 | **实测客户端** | DBX/dbExpress(Delphi)连接 + 打开表 + 浏览索引/列正常;类 Navicat 图形工具浏览表/索引/列正常;PyMySQL / mysql CLI 正常 |
 
@@ -740,6 +741,10 @@ SQLTiny 第一版可以简化:
 4. **HSQLDB 语义扩展**:§8.4 的 8 项 GAP 已全部修复(2026-11-12);后续按 §8.3 待补清单扩展 `TestSelfNot.txt` 完整三值真值表(8 类型 × AND/OR/NOT/BETWEEN/IN/ALL/ANY)、解析器负向用例与 GROUP BY 合法性组合。
 5. **M6 P3 剩余 / P4**:`caching_sha2_password` / SSL、B+Tree、复制与更大的 HSQLDB TestSelf* 覆盖。
 
+6. **稳定性压测专项(后续)**:`stress_stability.py` 已覆盖并发 / soak / 崩溃恢复 / 内存稳定;**待补两项专项用例**:
+   - **大结果集(>16MB 分包)**:`src/net/mysql_proto.cpp` 当前对 >16MB 结果包未处理(注释明说"先不考虑"),需补分包并加专项压测(超大 SELECT 结果、流式返回)
+   - **超长事务**:配合 #3 版本回收(长事务导致 `versions_` 不压缩、内存增长),加"开事务→持续写入→长时 hold→崩溃恢复"专项压测
+
 ---
 
 ## 8. 测试体系:用例分类与测试点
@@ -786,7 +791,7 @@ SQLTiny 第一版可以简化:
 | C06 | 事务 / 四隔离级别 / MVCC | `smoke_m6_isolation.cpp`、`test_txn_vs_sqlite.py` | 四级别提升、无脏读、不可重复读、40001 冲突、autocommit、SAVEPOINT、DML 回滚、WAL 重启 | ✅ 451/451、70/70 对比 |
 | C07 | WAL / 快照 / 恢复 | `smoke_m5_wal.cpp`、`test_wal_recovery.py` | Replay、CRC 截断、Checkpoint、重启后数据与 UPDATE/DELETE 状态 | ✅ |
 | C08 | MySQL 协议 / 客户端兼容 | `smoke_m25_e2e.cpp`、`test_sqlalchemy.py` | 握手与 packet、COM_QUERY、OK/EOF/ERR;SQLAlchemy 15 组:Engine、Core DDL/CRUD、聚合、ORM、2.0 风格 select/insert/update/delete、`text():param`、Session rollback、relationship 级联、`engine.begin()` 事务块、类型映射(DateTime/Boolean/Float)、Inspector(`DESCRIBE`/`SHOW FULL TABLES` 已支持) | ✅ 33 PASS / 0 FAIL / 0 GAP |
-| C09 | 并发 / 性能 | `test_concurrency.py`、`test_perf_vs_sqlite.py` | 5 线程 15s 读写一致性、大数据量 INSERT + JOIN 对比 | ✅ 无 crash |
+| C09 | 并发 / 性能 / 稳定性 | `test_concurrency.py`、`test_perf_vs_sqlite.py`、`stress_stability.py` | 5 线程 15s 读写一致性、大数据量 INSERT + JOIN 对比、10 条复杂查询计时、并发 soak + 事务冲突不变量(无丢写/幻行)、`kill -9` 崩溃恢复(WAL replay 原子性)、RSS 内存稳定 | ✅ 无 crash / PASS |
 | C10 | 第三方客户端兼容(v1.1.0) | `dbx_probe.cpp`、`test_stmt_prepare.py`、`smoke_m6_session_db.cpp` | 进程内跑 DBX/dbExpress 连接/元数据/事务典型 SQL(58 断言)、裸 socket 走 `COM_STMT_PREPARE/EXECUTE/CLOSE` binary protocol 全流程(7 断言)、多库会话级隔离、`smoke_m25_e2e` 适配经典 EOF 帧 | ✅ 58/58、7/7、PASS |
 
 **分层**:C01–C07 为进程内 C++ smoke(无需 server,纳入 `CTest`);C08–C10 需要 server(端口 3306 或由脚本自动起停的随机端口);`test_txn_vs_sqlite.py` 自带 server 生命周期管理。当前 `ctest` **10/10**(10 个 CTest 目标,含 v1.1.0 新增的 `dbx_probe`;需先启动 3306 端口的 server 供 `smoke_m25_e2e` 连接)。
