@@ -8,6 +8,8 @@
 #include <cstdio>
 #include <set>
 #include <map>
+#include <unordered_map>
+#include <unordered_set>
 
 namespace sqltiny::executor {
 
@@ -30,6 +32,90 @@ static bool show_table_matches(const std::string& name, std::string pattern) {
     if (p.back() == '%') return n.starts_with(p.substr(0, p.size() - 1));
     if (p.front() == '%') return n.ends_with(p.substr(1));
     return n == p;
+}
+
+// ---------- M6 P2 · JOIN 优化 ----------
+/// 等值 JOIN 的 hash key。数值统一提升到 double 再格式化,与 Value::compare 的
+/// "数值类统一提升" 语义一致 (int 1 与 double 1.0 视为同一 key)。
+static std::string join_hash_key(const types::Value& v) {
+    if (v.is_null()) return {};              // NULL 不参与等值匹配 (SQL 三值逻辑)
+    if (v.is_numeric()) {
+        double d = 0.0;
+        v.try_to_double(d);
+        return "n:" + fmt::format("{:.17g}", d);
+    }
+    if (v.is_string()) return "s:" + v.v_str;
+    if (v.kind == types::Value::Kind::Bool) return std::string("b:") + (v.v_bool ? "1" : "0");
+    return "o:" + v.to_string();
+}
+
+/// 从 ON 表达式提取一个「左表列 = 右表列」的等值条件。
+/// 支持 AND 连接的复合条件:取第一个等值项做 hash probe,其余谓词仍由完整 eval 兜底。
+struct EquiJoinKey {
+    bool valid = false;
+    int  left_col  = -1;   // flat row 中的下标 (左侧已累积的 join 结果)
+    int  right_col = -1;   // 右表行内的下标
+    std::string left_name, right_name;
+    bool right_is_pk = false;
+};
+static bool is_equi_pair(const ast::Expression& e) {
+    return e.kind == ast::ExprKind::BinaryOp && e.binop == ast::BinOp::Eq &&
+           e.lhs && e.rhs &&
+           e.lhs->kind == ast::ExprKind::Column && e.rhs->kind == ast::ExprKind::Column;
+}
+static EquiJoinKey extract_equi(const ast::Expression& on,
+                                const std::map<std::string, int>& col_index,
+                                const std::set<std::string>& ambiguous_cols,
+                                int right_offset, int right_cols,
+                                const storage::TableDef& rdef) {
+    EquiJoinKey k;
+    const ast::Expression* eq = nullptr;
+    std::function<const ast::Expression*(const ast::Expression&)> find_eq =
+        [&](const ast::Expression& e) -> const ast::Expression* {
+            if (is_equi_pair(e)) return &e;
+            if (e.kind == ast::ExprKind::BinaryOp && e.binop == ast::BinOp::And &&
+                e.lhs && e.rhs) {
+                if (auto* a = find_eq(*e.lhs)) return a;
+                return find_eq(*e.rhs);
+            }
+            return nullptr;
+        };
+    eq = find_eq(on);
+    if (!eq) return k;
+
+    auto lookup = [&](const ast::Expression& c) -> int {
+        std::string qualified = c.table_name.empty() ? "" : c.table_name + "." + c.column_name;
+        if (!qualified.empty()) {
+            auto it = col_index.find(qualified);
+            if (it != col_index.end()) return it->second;
+            return -1;
+        }
+        // 裸列名歧义时放弃优化 (退化到嵌套循环,由 eval 决定语义)
+        if (ambiguous_cols.count(c.column_name)) return -1;
+        auto it = col_index.find(c.column_name);
+        return it == col_index.end() ? -1 : it->second;
+    };
+    int a = lookup(*eq->lhs), b = lookup(*eq->rhs);
+    auto in_right = [&](int off) { return off >= right_offset && off < right_offset + right_cols; };
+    auto in_left  = [&](int off) { return off >= 0 && off < right_offset; };
+    int lo = -1, ro = -1;
+    const ast::Expression* lc = nullptr;
+    const ast::Expression* rc = nullptr;
+    if (in_right(a) && in_left(b))      { ro = a; lo = b; rc = eq->lhs.get(); lc = eq->rhs.get(); }
+    else if (in_right(b) && in_left(a)) { ro = b; lo = a; rc = eq->rhs.get(); lc = eq->lhs.get(); }
+    else return k;
+
+    k.valid = true;
+    k.left_col = lo;
+    k.right_col = ro - right_offset;
+    k.left_name  = lc->column_name;
+    k.right_name = rc->column_name;
+    // 右表 join 列是否为单列主键 (供 EXPLAIN 标注 key=PRIMARY)
+    if (rdef.primary_key_cols.size() == 1 && rdef.primary_key_cols[0].size() == 1) {
+        int pk_idx = rdef.column_index(rdef.primary_key_cols[0][0]);
+        k.right_is_pk = (pk_idx == k.right_col);
+    }
+    return k;
 }
 
 // WAL 小工具:拆 "db.table" 或 "table" → (db_or_empty, table)
@@ -515,6 +601,25 @@ ResultSet Executor::exec_select(const ast::SelectStmt& s) {
 
     if (s.from_tables.empty() && s.joins.empty()) {
         // 无表 SELECT:例如 SELECT 1, NOW()
+        if (s.explain) {
+            r.column_names = {"id", "select_type", "table", "type", "possible_keys",
+                              "key", "rows", "Extra"};
+            r.column_types = { types::SqlType::BigInt, types::SqlType::Varchar,
+                               types::SqlType::Varchar, types::SqlType::Varchar,
+                               types::SqlType::Varchar, types::SqlType::Varchar,
+                               types::SqlType::BigInt, types::SqlType::Varchar };
+            storage::Row row;
+            row.push_back(types::Value::make_int(1));
+            row.push_back(types::Value::make_string("SIMPLE"));
+            row.push_back(types::Value::make_string(""));
+            row.push_back(types::Value::make_string("constant"));
+            row.push_back(types::Value::make_string(""));   // possible_keys
+            row.push_back(types::Value::make_string(""));   // key
+            row.push_back(types::Value::make_int(1));       // rows
+            row.push_back(types::Value::make_string("No tables used"));
+            r.rows.push_back(std::move(row));
+            return r;
+        }
         ExecContext ctx{ catalog_, "", {}, {} };
         storage::Row row;
         ctx.col_index.clear();
@@ -586,23 +691,117 @@ ResultSet Executor::exec_select(const ast::SelectStmt& s) {
         total_cols += static_cast<int>(js.def->columns.size());
     }
 
-    // 建立 ctx.col_index
-    auto build_ctx = [&](const storage::Row& flat_row) {
-        ExecContext ctx{ catalog_, primary_table, {}, flat_row };
-        ctx.exec = this;   // 子查询递归求值需要
+    // 列索引只构建一次;旧实现在 O(N×M) 的每个组合里重建 map + 拼接字符串,是主要常数开销
+    std::map<std::string, int> base_col_index;
+    std::set<std::string> ambiguous_cols;
+    {
+        std::map<std::string, int> name_count;
         for (auto& slot : slots) {
             for (size_t i = 0; i < slot.def->columns.size(); ++i) {
                 std::string bare = slot.def->columns[i].name;
                 std::string qualified = slot.real_name + "." + bare;
                 std::string alias_q = slot.alias.empty() ? "" : (slot.alias + "." + bare);
                 int offset = slot.col_offset + static_cast<int>(i);
-                ctx.col_index[bare] = offset;
-                ctx.col_index[qualified] = offset;
-                if (!alias_q.empty()) ctx.col_index[alias_q] = offset;
+                base_col_index[bare] = offset;
+                base_col_index[qualified] = offset;
+                if (!alias_q.empty()) base_col_index[alias_q] = offset;
+                ++name_count[bare];
             }
         }
+        for (auto& [n, c] : name_count) if (c > 1) ambiguous_cols.insert(n);
+    }
+    auto build_ctx = [&](const storage::Row& flat_row) {
+        ExecContext ctx{ catalog_, primary_table, {}, flat_row };
+        ctx.exec = this;   // 子查询递归求值需要
+        ctx.col_index = base_col_index;
         return ctx;
     };
+
+    // M6 P2 · JOIN 执行计划: 每个 join 选 HASH / NESTED_LOOP / CROSS。
+    // Hash Join 把等值 JOIN 从 O(N×M) 降到 O(N+M);非等值条件仍退化到嵌套循环,
+    // 但列索引只构建一次(见上方 base_col_index),常数开销大幅下降。
+    struct JoinPlan {
+        ast::JoinKind kind;
+        EquiJoinKey equi;
+        bool pure_equi = false;         // ON 就是单个等值条件
+        bool hash_join = false;
+        size_t right_rows = 0, left_rows = 0;
+        size_t est_cost = 0;
+        std::string table;
+    };
+    std::vector<JoinPlan> join_plans;
+    size_t est_left = tbl->row_count();
+    for (size_t ji = 0; ji < s.joins.size(); ++ji) {
+        auto& jc = s.joins[ji];
+        auto* jtbl = resolve_table(jc.table_name);
+        JoinPlan p;
+        p.kind = jc.kind;
+        p.table = jc.table_name;
+        p.left_rows = est_left;
+        p.right_rows = jtbl ? jtbl->row_count() : 0;
+        int right_offset = (1 + ji < slots.size()) ? slots[1 + ji].col_offset : total_cols;
+        int right_cols = jtbl ? static_cast<int>(jtbl->def().columns.size()) : 0;
+        if (jc.on && jtbl && (jc.kind == ast::JoinKind::Inner || jc.kind == ast::JoinKind::Left)) {
+            p.equi = extract_equi(*jc.on, base_col_index, ambiguous_cols,
+                                  right_offset, right_cols, jtbl->def());
+            p.pure_equi = is_equi_pair(*jc.on);
+            p.hash_join = p.equi.valid;
+        }
+        // 成本估算: nested loop = left×right, hash = left+right。
+        // 下一轮的输入行数按「上一轮输出」粗估: hash 取 max(left,right),嵌套循环取乘积上界。
+        p.est_cost = p.hash_join ? (p.left_rows + p.right_rows) : (p.left_rows * p.right_rows);
+        est_left = p.hash_join ? std::max(p.left_rows, p.right_rows)
+                               : p.left_rows * p.right_rows;
+        join_plans.push_back(std::move(p));
+    }
+
+    // EXPLAIN: 只输出执行计划,不扫描数据、不执行 JOIN (MySQL 风格最小版)
+    if (s.explain) {
+        r.column_names = {"id", "select_type", "table", "type", "possible_keys",
+                          "key", "rows", "Extra"};
+        r.column_types = { types::SqlType::BigInt, types::SqlType::Varchar,
+                           types::SqlType::Varchar, types::SqlType::Varchar,
+                           types::SqlType::Varchar, types::SqlType::Varchar,
+                           types::SqlType::BigInt, types::SqlType::Varchar };
+        auto put = [&](int id, const char* sel, const std::string& table,
+                       const char* type, const char* possible, const char* key,
+                       int64_t rows, const std::string& extra) {
+            storage::Row row;
+            row.push_back(types::Value::make_int(id));
+            row.push_back(types::Value::make_string(sel));
+            row.push_back(types::Value::make_string(table));
+            row.push_back(types::Value::make_string(type));
+            row.push_back(types::Value::make_string(possible));
+            row.push_back(types::Value::make_string(key));
+            row.push_back(types::Value::make_int(rows));
+            row.push_back(types::Value::make_string(extra));
+            r.rows.push_back(std::move(row));
+        };
+        put(1, "SIMPLE", primary_table, "ALL", "", "",
+            static_cast<int64_t>(tbl->row_count()), s.where ? "Using where" : "");
+        for (size_t ji = 0; ji < join_plans.size(); ++ji) {
+            const auto& p = join_plans[ji];
+            std::string extra;
+            if (p.kind == ast::JoinKind::Cross) {
+                extra = "Using cross join (cartesian)";
+            } else if (p.hash_join) {
+                extra = fmt::format("Using hash join (build: {}, cost {} vs nested {})",
+                                    p.table, p.est_cost, p.left_rows * p.right_rows);
+                if (!p.pure_equi) extra += "; Using where (residual predicate)";
+            } else {
+                extra = fmt::format("Using nested loop (cost {})", p.est_cost);
+            }
+            const char* type = p.kind == ast::JoinKind::Cross ? "ALL"
+                             : p.hash_join ? (p.equi.right_is_pk ? "eq_ref" : "ref")
+                             : "ALL";
+            std::string key = p.hash_join ? (p.equi.right_is_pk ? "PRIMARY" : p.equi.right_name) : "";
+            put(static_cast<int>(ji + 2), "SIMPLE", p.table, type,
+                key.empty() ? "" : key.c_str(), key.c_str(),
+                static_cast<int64_t>(p.right_rows), extra);
+        }
+        r.affected_rows = static_cast<int64_t>(r.rows.size());
+        return r;
+    }
 
     // 生成候选行:先主表遍历,CROSS/INNER/LEFT/RIGHT JOIN 追加
     std::vector<storage::Row> candidate_rows;
@@ -613,43 +812,78 @@ ResultSet Executor::exec_select(const ast::SelectStmt& s) {
     std::vector<storage::Row> left_rows;
     tbl->for_each_visible(sqscn, [&](int64_t, const storage::Row& row) { left_rows.push_back(row); return true; }, rtxn);
 
-    for (auto& jc : s.joins) {
+    for (size_t ji = 0; ji < s.joins.size(); ++ji) {
+        auto& jc = s.joins[ji];
         auto* jtbl = resolve_table(jc.table_name);
         std::vector<storage::Row> right_rows;
         jtbl->for_each_visible(sqscn, [&](int64_t, const storage::Row& row) { right_rows.push_back(row); return true; }, rtxn);
+        const JoinPlan& plan = join_plans[ji];
+
+        // ---- Hash Join: 右表按等值 key 分桶,左表 O(1) probe ----
+        std::unordered_map<std::string, std::vector<size_t>> buckets;
+        if (plan.hash_join) {
+            for (size_t ri = 0; ri < right_rows.size(); ++ri) {
+                if (plan.equi.right_col < 0 ||
+                    plan.equi.right_col >= static_cast<int>(right_rows[ri].size())) continue;
+                std::string key = join_hash_key(right_rows[ri][plan.equi.right_col]);
+                if (!key.empty()) buckets[std::move(key)].push_back(ri);
+            }
+        }
 
         std::vector<storage::Row> new_left;
         for (auto& l : left_rows) {
             if (jc.kind == ast::JoinKind::Cross) {
                 for (auto& r : right_rows) {
                     storage::Row flat = l; flat.insert(flat.end(), r.begin(), r.end());
-                    new_left.push_back(flat);
+                    new_left.push_back(std::move(flat));
                 }
                 continue;
             }
-            if (jc.kind == ast::JoinKind::Inner || jc.kind == ast::JoinKind::Left || jc.kind == ast::JoinKind::Right) {
-                std::vector<storage::Row> matches;
+            if (jc.kind != ast::JoinKind::Inner && jc.kind != ast::JoinKind::Left &&
+                jc.kind != ast::JoinKind::Right) continue;
+
+            std::vector<storage::Row> matches;
+            if (plan.hash_join && plan.equi.left_col >= 0 &&
+                plan.equi.left_col < static_cast<int>(l.size())) {
+                std::string key = join_hash_key(l[plan.equi.left_col]);
+                auto it = key.empty() ? buckets.end() : buckets.find(key);
+                if (it != buckets.end()) {
+                    for (size_t ri : it->second) {
+                        const auto& r = right_rows[ri];
+                        // 纯等值: hash key 已保证相等,只需 O(1) 复核(避免 to_string 撞 key)
+                        // 复合 ON (等值 AND 其它谓词): 仍完整 eval 兜底,语义与旧实现一致
+                        if (plan.pure_equi) {
+                            if (plan.equi.right_col >= static_cast<int>(r.size()) ||
+                                !l[plan.equi.left_col].sql_equals(r[plan.equi.right_col])) continue;
+                        } else {
+                            storage::Row flat = l; flat.insert(flat.end(), r.begin(), r.end());
+                            auto ctx = build_ctx(flat);
+                            if (!to_bool(eval(*jc.on, ctx))) continue;
+                        }
+                        storage::Row flat = l; flat.insert(flat.end(), r.begin(), r.end());
+                        matches.push_back(std::move(flat));
+                    }
+                }
+            } else {
+                // ---- 退化路径: 非等值 / CROSS / RIGHT / 无 ON ----
                 for (auto& r : right_rows) {
                     storage::Row flat = l; flat.insert(flat.end(), r.begin(), r.end());
                     auto ctx = build_ctx(flat);
                     bool ok = true;
-                    if (jc.on) {
-                        auto v = eval(*jc.on, ctx);
-                        ok = to_bool(v);
-                    }
+                    if (jc.on) ok = to_bool(eval(*jc.on, ctx));
                     if (ok) matches.push_back(std::move(flat));
                 }
-                if (!matches.empty()) {
-                    for (auto& m : matches) new_left.push_back(std::move(m));
-                } else if (jc.kind == ast::JoinKind::Left) {
-                    // LEFT JOIN:保留左表,右表列 NULL
-                    storage::Row flat = l;
-                    for (size_t i = 0; i < jtbl->def().columns.size(); ++i)
-                        flat.push_back(types::Value::make_null());
-                    new_left.push_back(std::move(flat));
-                }
-                // Right/Full JOIN 暂不完整处理
             }
+            if (!matches.empty()) {
+                for (auto& m : matches) new_left.push_back(std::move(m));
+            } else if (jc.kind == ast::JoinKind::Left) {
+                // LEFT JOIN:保留左表,右表列 NULL
+                storage::Row flat = l;
+                for (size_t i = 0; i < jtbl->def().columns.size(); ++i)
+                    flat.push_back(types::Value::make_null());
+                new_left.push_back(std::move(flat));
+            }
+            // Right/Full JOIN 暂不完整处理(保持既有语义)
         }
         left_rows = std::move(new_left);
     }

@@ -1,6 +1,6 @@
 # SQLTiny — 轻量级嵌入式数据库 · MySQL 协议兼容
 
-> **当前版本 `v1.1.2`(2026-11-12)** · 版本号统一维护在 `CMakeLists.txt`(`project(SQLTiny VERSION 1.1.2)`)、`vcpkg.json`(`version-string`)与 `src/main.cpp` 启动横幅。协议层对外仍伪装为 `5.7.0-SQLTiny` 以兼容 MySQL 客户端,与产品版本无关。
+> **当前版本 `v1.2.0`(2026-11-12)** · 版本号统一维护在 `CMakeLists.txt`(`project(SQLTiny VERSION 1.2.0)`)、`vcpkg.json`(`version-string`)与 `src/main.cpp` 启动横幅。协议层对外仍伪装为 `5.7.0-SQLTiny` 以兼容 MySQL 客户端,与产品版本无关。
 
 **SQLTiny** 是用现代 C++20 从零重写的轻量级关系型数据库,核心设计灵感来自 [HSQLDB](http://hsqldb.org/),额外暴露 **MySQL Wire Protocol**——标准 MySQL 客户端(`mysql` CLI、Navicat、DBeaver、Connector/J、PyMySQL、DBX/dbExpress)直接连接。
 
@@ -32,6 +32,35 @@
 > 🔒 **锁分层**: Catalog.mu_(DDL) → Table.mu_ shared_lock(SELECT 多读者并行) / unique_lock(DML 独占) → RowLockMap(行级冲突检测) → TransactionManager.writeLock_(提交边界) → WalManager.mu_(WAL 文件读写)
 >
 > 🧊 **MVCC**: SELECT 完全不加锁,`for_each_visible(querySCN, readerTxn)` 按 `createSCN/deleteSCN` 与 `pendingTxn` 过滤;未提交行只对所属事务可见,commit 才 `finalize_commit` 对外发布
+
+---
+
+## 🆕 v1.2.0 更新内容
+
+本版本聚焦 **JOIN 性能优化**(CODEPLAN §M6 P2):从纯嵌套循环 O(N×M) 升级为 Hash Join,并补齐 `EXPLAIN` 与查询成本估算。
+
+### 性能报告(2026-11-12,Release 版,PyMySQL 单进程,200 users × 800 orders)
+
+| 查询 | 优化前 | 优化后 | 提升 |
+|---|---|---|---|
+| `INNER JOIN` | 298.40 ms | **3.91 ms** | 约 **77x** |
+| `LEFT JOIN` | 297.20 ms | **4.77 ms** | 约 **62x** |
+| 单进程整体 wall | 1822 ms | **73 ms** | 约 **25x** |
+
+**线性扩展**:500 users × 2000 orders 大表 `INNER JOIN` 仅 **9.05 ms**(不再 100 万行 explode)。
+
+### 做了什么
+
+- **Hash Join**:从 `ON` 表达式递归提取「左表列 = 右表列」等值项(支持 `AND` 复合条件),右表按 key 分桶、左表 O(1) probe,复杂度 **O(N×M) → O(N+M)**;数值 key 统一提升 double、NULL 不参与等值;纯等值只做 `sql_equals` 复核,复合 `ON` 仍完整 `eval` 兜底保证语义完全一致
+- **预建列索引**:列名→偏移映射只构建一次,消除旧实现里每个行组合都重建 map 的高额常数开销
+- **`EXPLAIN` 最小版**:`EXPLAIN SELECT …` 只生成执行计划、不扫描数据,输出 MySQL 风格 8 列(`id / select_type / table / type / possible_keys / key / rows / Extra`);右表 join 列是单列主键时 `type=eq_ref`、`key=PRIMARY`,非等值 `ON` 显示 `Using nested loop (cost …)`
+- **成本估算**:按表 `row_count()` 估算 `nested loop = left×right` / `hash = left+right`,多表 JOIN 逐轮传递基数,写入 `EXPLAIN` 的 `rows` 与 `Extra`
+
+完整实现与回归说明见 `CODEPLAIN.md` §M6 P2。基准数据由 `tests/test_perf_vs_sqlite.py` 生成并保存在 `benchmark/`(`latest.json` 含各查询平均耗时与提速倍数)。
+
+### 回归
+
+`smoke_m6_hsqldb_matrix` C 组新增 11 项断言(等值 / 反向等值 / 复合 ON / 非等值退化 / CROSS / LEFT 补 NULL / NULL key / 多表连续 Hash Join / EXPLAIN type 与 cost),现为 **73 PASS / 0 GAP**;`ctest` 10/10,Python 端到端全绿。
 
 ---
 
@@ -97,7 +126,8 @@ SQL 语法:`SET SESSION TRANSACTION ISOLATION LEVEL <级别>`(会话默认)、`S
 | **M6 事务 + 四隔离级别 (HSQLDB 2.7.4)** | ✅ | 行级锁 · 四隔离级别与提升规则 · SAVEPOINT · 事务级 WAL 缓冲 · 提交期冲突检测 40001 |
 | **M6 客户端兼容性 (v1.1.0)** | ✅ | 服务端预编译语句 · information_schema 虚拟表 · SHOW 扩展 · CASE 表达式 · EOF 帧兼容 · **DBX/dbExpress + 类 Navicat 工具实测通过 · dbx_probe 58/58 · test_stmt_prepare 7/7** |
 | **M6 客户端兼容性 (v1.1.2)** | ✅ | DBeaver / Database Client 实测修复:DDL 选项跳过 · SHOW TABLES WHERE/LIKE · REFERENTIAL_CONSTRAINTS · 双引号与裸关键字别名 · INSTR 系列函数 |
-| **后续** | 📋 | JOIN 索引优化 → 等待队列/死锁检测 → 存储过程 · caching_sha2_password / SSL |
+| **M6 P2 JOIN 优化 (v1.2.0)** | ✅ | Hash Join + 预建列索引 + 成本估算 + `EXPLAIN`;INNER/LEFT JOIN 约 77x / 62x 提速 · 500×2000 大表 INNER JOIN 仅 9ms |
+| **后续** | 📋 | 等待队列/死锁检测 → 存储过程 · caching_sha2_password / SSL · 复制 |
 
 ---
 
@@ -121,6 +151,23 @@ cmake --build build --config Release
 python tests\test_perf_vs_sqlite.py --mode both   # Release server 单/多进程对比,结果存 benchmark/
 ```
 
+### JOIN 优化与 EXPLAIN
+
+等值 JOIN 走 **Hash Join**(右表按 key 分桶、左表 O(1) probe),复杂度 O(N×M) → O(N+M);
+非等值 / CROSS / RIGHT JOIN 仍走嵌套循环,但列索引只构建一次。实测 200 users × 800 orders:
+`INNER JOIN` 298ms → **3.9ms**(约 77x),`LEFT JOIN` 297ms → **4.8ms**(约 62x)。
+
+```sql
+EXPLAIN SELECT u.name, o.total
+FROM users u INNER JOIN orders o ON o.user_id = u.id;
+-- id | select_type | table | type | possible_keys | key | rows | Extra
+-- 1  | SIMPLE      | users | ALL  |               |     | 200  |
+-- 2  | SIMPLE      | orders| ref  | user_id       | user_id | 800 | Using hash join (build: orders, cost 1000 vs nested 160000)
+```
+
+`EXPLAIN` 只生成计划、不扫描数据;右表 join 列是单列主键时 `type=eq_ref`、`key=PRIMARY`。
+非等值 ON 显示 `Using nested loop (cost ...)`。完整实现说明见 `CODEPLAN.md` §M6 P2。
+
 ### 构建产物
 
 | 产物 | 类型 | 说明 |
@@ -134,7 +181,7 @@ python tests\test_perf_vs_sqlite.py --mode both   # Release server 单/多进程
 | `build/Debug/smoke_m5_wal.exe` | 冒烟测试 | WAL Replay + CRC 校验 + Checkpoint 恢复 — **28/28 PASS** |
 | `build/Debug/smoke_m25_e2e.exe` | E2E 测试 | Winsock 直连 server — **13/13 PASS** |
 | `build/Debug/smoke_m6_isolation.exe` | 隔离级别测试 | 四级别 + 事务/保存点/冲突 — **451/451 PASS** |
-| `build/Debug/smoke_m6_hsqldb_matrix.exe` | HSQLDB 语义矩阵 | NULL 三值 / 空集聚合 / JOIN 基数 / 语句原子性 / 多库隔离 — **62 PASS / 0 GAP** |
+| `build/Debug/smoke_m6_hsqldb_matrix.exe` | HSQLDB 语义矩阵 + JOIN 优化回归 | NULL 三值 / 空集聚合 / JOIN 基数(Hash Join、EXPLAIN) / 语句原子性 / 多库隔离 — **73 PASS / 0 GAP** |
 | `build/Debug/smoke_m6_session_db.exe` | 多库会话隔离 | 每连接 `USE` / 握手 database 互不干扰 — **PASS** |
 | `build/Debug/dbx_probe.exe` | 客户端兼容性探针 | 进程内逐条跑 DBX/dbExpress 连接/元数据/事务阶段的典型 SQL — **58/58 PASS** |
 | `tests/test_txn_vs_sqlite.py` | 事务行为对比 | SQLTiny vs SQLite 四级别 + WAL 重启 — **70/70 一致** |
@@ -191,7 +238,7 @@ smoke_m4              6/6   PASS  CREATE/DROP DB / USE / SHOW
 smoke_m5_wal         28/28  PASS  WAL Replay + CRC + Checkpoint + 启动恢复
 smoke_m25_e2e        13/13  PASS  MySQL wire C++ client E2E
 smoke_m6_isolation  451/451 PASS  四隔离级别 + 事务 / 保存点 / 冲突
-smoke_m6_hsqldb_matrix 62 PASS / 0 GAP   HSQLDB 可移植 SQL 语义矩阵
+smoke_m6_hsqldb_matrix 73 PASS / 0 GAP   HSQLDB 语义矩阵 + JOIN 优化/EXPLAIN 回归
 smoke_m6_session_db  PASS        多库会话级隔离(每连接 USE/握手 db 互不干扰)
 test_full_flow       48 PASS / 0 GAP    PyMySQL 全链路(双连接):DDL→DML→聚合→JOIN→事务→四隔离级别→多库→清理
 test_txn_vs_sqlite   70/70 对比        四隔离级别 + WAL 重启与 SQLite 逐项比对

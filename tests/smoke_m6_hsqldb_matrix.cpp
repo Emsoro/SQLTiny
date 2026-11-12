@@ -134,6 +134,40 @@ static void group_join(core::Session& s) {
     eq_i(s, "SELECT COUNT(*) FROM j WHERE id IN (1,3) ORDER BY id", 2,
          "索引可用时 IN 过滤结果");
     eq_i(s, "SELECT COUNT(*) FROM j WHERE v > 'a'", 2, "全表扫描结果");
+
+    // ---- M6 P2 JOIN 优化回归: Hash Join 与嵌套循环必须给出完全相同的语义 ----
+    eq_i(s, "SELECT COUNT(*) FROM n a INNER JOIN j b ON b.id = a.id", 3,
+         "Hash Join 等值(右表列在左)= 3");
+    eq_i(s, "SELECT COUNT(*) FROM n a INNER JOIN j b ON a.id = b.id AND a.a >= 10", 2,
+         "复合 ON 的附加谓词仍生效");
+    eq_i(s, "SELECT COUNT(*) FROM n a INNER JOIN j b ON a.id > b.id", 3,
+         "非等值 ON 退化嵌套循环");
+    eq_i(s, "SELECT COUNT(*) FROM n a LEFT JOIN j b ON a.a = b.id", 3,
+         "无匹配时 LEFT JOIN 保留左表");
+    eq_i(s, "SELECT COUNT(*) FROM n a LEFT JOIN j b ON a.a = b.id WHERE b.id IS NULL", 3,
+         "LEFT JOIN 补的右表列是 NULL");
+    eq_i(s, "SELECT COUNT(*) FROM n a INNER JOIN n b ON a.a = b.a", 2,
+         "NULL 不参与等值 JOIN");
+    eq_i(s, "SELECT COUNT(*) FROM n a INNER JOIN j b ON a.id = b.id "
+            "INNER JOIN j c ON c.id = b.id", 3,
+         "多表连续 Hash Join");
+
+    // EXPLAIN: 不执行查询,输出计划行 (type / key / rows / cost)
+    auto plan = q(s, "EXPLAIN SELECT a.id FROM n a INNER JOIN j b ON b.id = a.id");
+    check(plan.ok && plan.column_names.size() == 8 && plan.rows.size() == 2,
+          "EXPLAIN 返回 8 列 / 2 行计划");
+    if (plan.ok && plan.rows.size() == 2 && plan.rows[1].size() >= 6) {
+        const auto& prow = plan.rows[1];
+        check(prow[3].v_str == "eq_ref" && prow[5].v_str == "PRIMARY",
+              "EXPLAIN 标注 eq_ref / PRIMARY (右表主键等值)");
+        check(prow[7].v_str.find("hash join") != std::string::npos,
+              "EXPLAIN 标注 Using hash join");
+    }
+    auto plan2 = q(s, "EXPLAIN SELECT a.id FROM n a INNER JOIN j b ON a.id > b.id");
+    if (plan2.ok && plan2.rows.size() == 2 && plan2.rows[1].size() >= 8) {
+        check(plan2.rows[1][7].v_str.find("nested loop") != std::string::npos,
+              "EXPLAIN 非等值标注 nested loop");
+    }
 }
 
 // D · 主键约束与语句原子性 —— TestSelfPrimaryKeys.txt / TestSelf.txt:245,409

@@ -191,6 +191,12 @@ ast::StmtPtr Parser::parse_top() {
     switch (t.kind) {
         case TokenKind::KwSelect: case TokenKind::KwAll: case TokenKind::KwDistinct:
             return parse_select();
+        case TokenKind::KwExplain: {
+            consume();  // EXPLAIN
+            auto s = parse_select();
+            s->select_->explain = true;
+            return s;
+        }
         case TokenKind::KwInsert:    return parse_insert();
         case TokenKind::KwUpdate:    return parse_update();
         case TokenKind::KwDelete:    return parse_delete();

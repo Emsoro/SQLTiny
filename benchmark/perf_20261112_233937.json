@@ -1,0 +1,476 @@
+{
+  "meta": {
+    "timestamp": "2026-11-12T23:39:37",
+    "python": "3.11.9",
+    "platform": "Windows-10-10.0.26300-SP0",
+    "server_exe": "D:\\Cplusplus\\SQLTiny\\build\\Release\\sqltiny_server.exe",
+    "server_config": "Release / memory-only",
+    "port": 3307,
+    "modes": {
+      "single": [
+        [
+          {
+            "engine": "sqltiny",
+            "workers": 1,
+            "ok": 1,
+            "wall_ms": 73.39,
+            "insert_users_avg_ms": 2.274,
+            "insert_users_max_ms": 2.274,
+            "insert_orders_avg_ms": 6.286,
+            "insert_orders_max_ms": 6.286,
+            "agg_user_avg_ms": 0.821,
+            "agg_user_max_ms": 0.821,
+            "groupby_avg_ms": 0.573,
+            "groupby_max_ms": 0.573,
+            "inner_join_avg_ms": 3.909,
+            "inner_join_max_ms": 3.909,
+            "left_join_avg_ms": 4.769,
+            "left_join_max_ms": 4.769,
+            "rows": 1000,
+            "rows_per_s": 13625.2,
+            "errors": []
+          },
+          {
+            "engine": "sqlite",
+            "workers": 1,
+            "ok": 1,
+            "wall_ms": 3.71,
+            "insert_users_avg_ms": 0.181,
+            "insert_users_max_ms": 0.181,
+            "insert_orders_avg_ms": 0.605,
+            "insert_orders_max_ms": 0.605,
+            "agg_user_avg_ms": 0.021,
+            "agg_user_max_ms": 0.021,
+            "groupby_avg_ms": 0.039,
+            "groupby_max_ms": 0.039,
+            "inner_join_avg_ms": 0.175,
+            "inner_join_max_ms": 0.175,
+            "left_join_avg_ms": 0.337,
+            "left_join_max_ms": 0.337,
+            "rows": 1000,
+            "rows_per_s": 269738.1,
+            "errors": []
+          }
+        ],
+        [
+          {
+            "engine": "sqltiny",
+            "worker": 0,
+            "timings_ms": {
+              "insert_users": 2.273899968713522,
+              "insert_orders": 6.285700015723705,
+              "agg_user": 0.8208000023538867,
+              "groupby": 0.5729666833455364,
+              "inner_join": 3.909166669473052,
+              "left_join": 4.768666656066974
+            },
+            "error": null
+          },
+          {
+            "engine": "sqlite",
+            "worker": 0,
+            "timings_ms": {
+              "insert_users": 0.18089998047798872,
+              "insert_orders": 0.6046000635251403,
+              "agg_user": 0.02096667109678189,
+              "groupby": 0.03940002837528785,
+              "inner_join": 0.17513330870618424,
+              "left_join": 0.3374666751672824
+            },
+            "error": null
+          }
+        ]
+      ],
+      "multi": [
+        [
+          {
+            "engine": "sqltiny",
+            "workers": 4,
+            "ok": 4,
+            "wall_ms": 323.14,
+            "insert_users_avg_ms": 2.434,
+            "insert_users_max_ms": 2.961,
+            "insert_orders_avg_ms": 7.142,
+            "insert_orders_max_ms": 8.34,
+            "agg_user_avg_ms": 0.978,
+            "agg_user_max_ms": 1.27,
+            "groupby_avg_ms": 0.766,
+            "groupby_max_ms": 1.086,
+            "inner_join_avg_ms": 4.152,
+            "inner_join_max_ms": 4.763,
+            "left_join_avg_ms": 5.286,
+            "left_join_max_ms": 6.081,
+            "rows": 4000,
+            "rows_per_s": 12378.7,
+            "errors": []
+          },
+          {
+            "engine": "sqlite",
+            "workers": 4,
+            "ok": 4,
+            "wall_ms": 220.17,
+            "insert_users_avg_ms": 0.192,
+            "insert_users_max_ms": 0.231,
+            "insert_orders_avg_ms": 0.631,
+            "insert_orders_max_ms": 0.636,
+            "agg_user_avg_ms": 0.021,
+            "agg_user_max_ms": 0.024,
+            "groupby_avg_ms": 0.04,
+            "groupby_max_ms": 0.054,
+            "inner_join_avg_ms": 0.186,
+            "inner_join_max_ms": 0.201,
+            "left_join_avg_ms": 0.336,
+            "left_join_max_ms": 0.343,
+            "rows": 4000,
+            "rows_per_s": 18167.5,
+            "errors": []
+          }
+        ],
+        [
+          {
+            "engine": "sqltiny",
+            "worker": 0,
+            "timings_ms": {
+              "insert_users": 2.8201999375596642,
+              "insert_orders": 7.2191000217571855,
+              "agg_user": 0.8563666682069501,
+              "groupby": 0.6342666456475854,
+              "inner_join": 4.763400026907523,
+              "left_join": 6.081000009241204
+            },
+            "error": null
+          },
+          {
+            "engine": "sqltiny",
+            "worker": 1,
+            "timings_ms": {
+              "insert_users": 2.9605000745505095,
+              "insert_orders": 8.340499945916235,
+              "agg_user": 0.8715666675319275,
+              "groupby": 1.086166671787699,
+              "inner_join": 3.9592666629080973,
+              "left_join": 4.7553000040352345
+            },
+            "error": null
+          },
+          {
+            "engine": "sqltiny",
+            "worker": 2,
+            "timings_ms": {
+              "insert_users": 1.9959999481216073,
+              "insert_orders": 6.616399972699583,
+              "agg_user": 0.9146667240808407,
+              "groupby": 0.6726666664083799,
+              "inner_join": 3.8730999998127422,
+              "left_join": 5.140233319252729
+            },
+            "error": null
+          },
+          {
+            "engine": "sqltiny",
+            "worker": 3,
+            "timings_ms": {
+              "insert_users": 1.9610999152064323,
+              "insert_orders": 6.390700000338256,
+              "agg_user": 1.2697667116299272,
+              "groupby": 0.6721666626011332,
+              "inner_join": 4.012266678425173,
+              "left_join": 5.168899971370895
+            },
+            "error": null
+          },
+          {
+            "engine": "sqlite",
+            "worker": 0,
+            "timings_ms": {
+              "insert_users": 0.23060000967234373,
+              "insert_orders": 0.6294999038800597,
+              "agg_user": 0.02390002676596244,
+              "groupby": 0.03660000705470642,
+              "inner_join": 0.18430000636726618,
+              "left_join": 0.34333334770053625
+            },
+            "error": null
+          },
+          {
+            "engine": "sqlite",
+            "worker": 1,
+            "timings_ms": {
+              "insert_users": 0.19479996990412474,
+              "insert_orders": 0.6358000682666898,
+              "agg_user": 0.021633304034670193,
+              "groupby": 0.03536666433016459,
+              "inner_join": 0.18096668645739555,
+              "left_join": 0.3345333194981019
+            },
+            "error": null
+          },
+          {
+            "engine": "sqlite",
+            "worker": 2,
+            "timings_ms": {
+              "insert_users": 0.17549993935972452,
+              "insert_orders": 0.6281000096350908,
+              "agg_user": 0.02096667109678189,
+              "groupby": 0.05419998584936062,
+              "inner_join": 0.2012333134189248,
+              "left_join": 0.3361333316812913
+            },
+            "error": null
+          },
+          {
+            "engine": "sqlite",
+            "worker": 3,
+            "timings_ms": {
+              "insert_users": 0.16719999257475138,
+              "insert_orders": 0.6293000187724829,
+              "agg_user": 0.019399992500742275,
+              "groupby": 0.03326668714483579,
+              "inner_join": 0.1759666483849287,
+              "left_join": 0.32926665153354406
+            },
+            "error": null
+          }
+        ]
+      ]
+    },
+    "cfg": {
+      "port": 3307,
+      "users": 200,
+      "orders": 800,
+      "batch": 50,
+      "repeats": 3,
+      "seed": 20261112,
+      "workers": 4,
+      "reuse_server": false
+    }
+  },
+  "results": {
+    "single": {
+      "summary": [
+        {
+          "engine": "sqltiny",
+          "workers": 1,
+          "ok": 1,
+          "wall_ms": 73.39,
+          "insert_users_avg_ms": 2.274,
+          "insert_users_max_ms": 2.274,
+          "insert_orders_avg_ms": 6.286,
+          "insert_orders_max_ms": 6.286,
+          "agg_user_avg_ms": 0.821,
+          "agg_user_max_ms": 0.821,
+          "groupby_avg_ms": 0.573,
+          "groupby_max_ms": 0.573,
+          "inner_join_avg_ms": 3.909,
+          "inner_join_max_ms": 3.909,
+          "left_join_avg_ms": 4.769,
+          "left_join_max_ms": 4.769,
+          "rows": 1000,
+          "rows_per_s": 13625.2,
+          "errors": []
+        },
+        {
+          "engine": "sqlite",
+          "workers": 1,
+          "ok": 1,
+          "wall_ms": 3.71,
+          "insert_users_avg_ms": 0.181,
+          "insert_users_max_ms": 0.181,
+          "insert_orders_avg_ms": 0.605,
+          "insert_orders_max_ms": 0.605,
+          "agg_user_avg_ms": 0.021,
+          "agg_user_max_ms": 0.021,
+          "groupby_avg_ms": 0.039,
+          "groupby_max_ms": 0.039,
+          "inner_join_avg_ms": 0.175,
+          "inner_join_max_ms": 0.175,
+          "left_join_avg_ms": 0.337,
+          "left_join_max_ms": 0.337,
+          "rows": 1000,
+          "rows_per_s": 269738.1,
+          "errors": []
+        }
+      ],
+      "runs": [
+        {
+          "engine": "sqltiny",
+          "worker": 0,
+          "timings_ms": {
+            "insert_users": 2.273899968713522,
+            "insert_orders": 6.285700015723705,
+            "agg_user": 0.8208000023538867,
+            "groupby": 0.5729666833455364,
+            "inner_join": 3.909166669473052,
+            "left_join": 4.768666656066974
+          },
+          "error": null
+        },
+        {
+          "engine": "sqlite",
+          "worker": 0,
+          "timings_ms": {
+            "insert_users": 0.18089998047798872,
+            "insert_orders": 0.6046000635251403,
+            "agg_user": 0.02096667109678189,
+            "groupby": 0.03940002837528785,
+            "inner_join": 0.17513330870618424,
+            "left_join": 0.3374666751672824
+          },
+          "error": null
+        }
+      ]
+    },
+    "multi": {
+      "summary": [
+        {
+          "engine": "sqltiny",
+          "workers": 4,
+          "ok": 4,
+          "wall_ms": 323.14,
+          "insert_users_avg_ms": 2.434,
+          "insert_users_max_ms": 2.961,
+          "insert_orders_avg_ms": 7.142,
+          "insert_orders_max_ms": 8.34,
+          "agg_user_avg_ms": 0.978,
+          "agg_user_max_ms": 1.27,
+          "groupby_avg_ms": 0.766,
+          "groupby_max_ms": 1.086,
+          "inner_join_avg_ms": 4.152,
+          "inner_join_max_ms": 4.763,
+          "left_join_avg_ms": 5.286,
+          "left_join_max_ms": 6.081,
+          "rows": 4000,
+          "rows_per_s": 12378.7,
+          "errors": []
+        },
+        {
+          "engine": "sqlite",
+          "workers": 4,
+          "ok": 4,
+          "wall_ms": 220.17,
+          "insert_users_avg_ms": 0.192,
+          "insert_users_max_ms": 0.231,
+          "insert_orders_avg_ms": 0.631,
+          "insert_orders_max_ms": 0.636,
+          "agg_user_avg_ms": 0.021,
+          "agg_user_max_ms": 0.024,
+          "groupby_avg_ms": 0.04,
+          "groupby_max_ms": 0.054,
+          "inner_join_avg_ms": 0.186,
+          "inner_join_max_ms": 0.201,
+          "left_join_avg_ms": 0.336,
+          "left_join_max_ms": 0.343,
+          "rows": 4000,
+          "rows_per_s": 18167.5,
+          "errors": []
+        }
+      ],
+      "runs": [
+        {
+          "engine": "sqltiny",
+          "worker": 0,
+          "timings_ms": {
+            "insert_users": 2.8201999375596642,
+            "insert_orders": 7.2191000217571855,
+            "agg_user": 0.8563666682069501,
+            "groupby": 0.6342666456475854,
+            "inner_join": 4.763400026907523,
+            "left_join": 6.081000009241204
+          },
+          "error": null
+        },
+        {
+          "engine": "sqltiny",
+          "worker": 1,
+          "timings_ms": {
+            "insert_users": 2.9605000745505095,
+            "insert_orders": 8.340499945916235,
+            "agg_user": 0.8715666675319275,
+            "groupby": 1.086166671787699,
+            "inner_join": 3.9592666629080973,
+            "left_join": 4.7553000040352345
+          },
+          "error": null
+        },
+        {
+          "engine": "sqltiny",
+          "worker": 2,
+          "timings_ms": {
+            "insert_users": 1.9959999481216073,
+            "insert_orders": 6.616399972699583,
+            "agg_user": 0.9146667240808407,
+            "groupby": 0.6726666664083799,
+            "inner_join": 3.8730999998127422,
+            "left_join": 5.140233319252729
+          },
+          "error": null
+        },
+        {
+          "engine": "sqltiny",
+          "worker": 3,
+          "timings_ms": {
+            "insert_users": 1.9610999152064323,
+            "insert_orders": 6.390700000338256,
+            "agg_user": 1.2697667116299272,
+            "groupby": 0.6721666626011332,
+            "inner_join": 4.012266678425173,
+            "left_join": 5.168899971370895
+          },
+          "error": null
+        },
+        {
+          "engine": "sqlite",
+          "worker": 0,
+          "timings_ms": {
+            "insert_users": 0.23060000967234373,
+            "insert_orders": 0.6294999038800597,
+            "agg_user": 0.02390002676596244,
+            "groupby": 0.03660000705470642,
+            "inner_join": 0.18430000636726618,
+            "left_join": 0.34333334770053625
+          },
+          "error": null
+        },
+        {
+          "engine": "sqlite",
+          "worker": 1,
+          "timings_ms": {
+            "insert_users": 0.19479996990412474,
+            "insert_orders": 0.6358000682666898,
+            "agg_user": 0.021633304034670193,
+            "groupby": 0.03536666433016459,
+            "inner_join": 0.18096668645739555,
+            "left_join": 0.3345333194981019
+          },
+          "error": null
+        },
+        {
+          "engine": "sqlite",
+          "worker": 2,
+          "timings_ms": {
+            "insert_users": 0.17549993935972452,
+            "insert_orders": 0.6281000096350908,
+            "agg_user": 0.02096667109678189,
+            "groupby": 0.05419998584936062,
+            "inner_join": 0.2012333134189248,
+            "left_join": 0.3361333316812913
+          },
+          "error": null
+        },
+        {
+          "engine": "sqlite",
+          "worker": 3,
+          "timings_ms": {
+            "insert_users": 0.16719999257475138,
+            "insert_orders": 0.6293000187724829,
+            "agg_user": 0.019399992500742275,
+            "groupby": 0.03326668714483579,
+            "inner_join": 0.1759666483849287,
+            "left_join": 0.32926665153354406
+          },
+          "error": null
+        }
+      ]
+    }
+  }
+}

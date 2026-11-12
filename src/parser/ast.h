@@ -106,6 +106,7 @@ enum class SelectSetOp { None, Union, UnionAll };
 struct SelectStmt {
     // SELECT 体
     bool distinct = false;
+    bool explain = false;        // EXPLAIN SELECT ... : 只输出执行计划,不执行查询
     std::vector<std::pair<ExprPtr, std::string>> columns;  // (expr, alias)
     std::vector<std::string> from_tables;                  // FROM t1, t2
     std::vector<std::pair<std::string, std::string>> from_aliases;  // (table, alias) — 简单形式,后面可能再拆

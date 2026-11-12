@@ -28,7 +28,7 @@ int main(int argc, char** argv) {
         else { fmt::print("unknown arg: {}\n", a); print_usage(argv[0]); return 1; }
     }
 
-    fmt::print("SQLTiny v1.1.2 — MySQL wire protocol server\n");
+    fmt::print("SQLTiny v1.2.0 — MySQL wire protocol server\n");
     fmt::print("  port:     {}\n", cfg.port);
     fmt::print("  user:     {}\n", cfg.user);
     fmt::print("  password: {}\n", cfg.password.empty() ? "<any>" : "<set>");

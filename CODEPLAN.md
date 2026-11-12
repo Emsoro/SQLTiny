@@ -22,7 +22,8 @@
 | **M6 P1 事务部分** | ✅ | 四隔离级别、autocommit、SAVEPOINT、WAL 事务缓冲、协议状态位 |
 | M6 P1 边缘项 | ⬜ | `FOR UPDATE` / `LOCK IN SHARE MODE`、死锁检测 / 等待队列 |
 | **M6 P3 客户端兼容(v1.1.0)** | ✅ | **服务端预编译语句(`COM_STMT_*` binary protocol)、information_schema 虚拟表、SHOW 扩展、CASE 表达式、EOF 帧兼容、`--query-log`** |
-| M6 P2 / P4 | ⬜ | JOIN 优化、复制与更大测试覆盖;认证(caching_sha2_password / SSL)仍未做 |
+| **M6 P2 JOIN 优化** | ✅ | Hash Join + 预建列索引 + 成本估算 + `EXPLAIN`;INNER/LEFT JOIN 约 77x / 62x 提速 |
+| M6 P4 | ⬜ | 复制与更大测试覆盖;认证(caching_sha2_password / SSL)仍未做 |
 
 ### 本轮交付(v1.1.0 客户端兼容性)
 
@@ -43,7 +44,7 @@
 |---|---|
 | `ctest -C Debug` | 10/10(含 `smoke_m6_isolation`、`smoke_m6_hsqldb_matrix`、`smoke_m6_session_db` 与 v1.1.0 新增的 `dbx_probe`);`smoke_m25_e2e` 需先启动 server 连 3306,未启动时为 9/10 |
 | `smoke_m6_isolation` | 451/451 PASS — 四级别、脏读、快照、冲突、autocommit、SAVEPOINT、DML 回滚 |
-| `smoke_m6_hsqldb_matrix` | 62 PASS / 0 FAIL / 0 GAP — HSQLDB 可移植 SQL 语义矩阵(§8.4 #1–#4 已修复) |
+| `smoke_m6_hsqldb_matrix` | 73 PASS / 0 FAIL / 0 GAP — HSQLDB 语义矩阵 + JOIN 优化/EXPLAIN 回归(§8.4 #1–#4 已修复) |
 | `smoke_m6_session_db` | PASS — 多库会话级隔离(每个连接的 `USE`/握手 db 互不干扰,验证 §8.4 #6/#7 修复) |
 | `dbx_probe` | 58/58 PASS — 进程内 `Session::execute` 跑 DBX/dbExpress 连接/元数据/事务阶段的典型 SQL(含 SHOW/information_schema) |
 | `test_stmt_prepare.py` | 7/7 PASS — 预编译语句 binary protocol 全流程(PREPARE/EXECUTE/CLOSE、NULL 参数、转义、语法错误) |
@@ -54,17 +55,17 @@
 | `test_sqlalchemy.py` | 33 PASS / 0 FAIL / 0 GAP(原 #5–#8 与 DESCRIBE/SHOW FULL TABLES 反射限制均已修复) |
 | **实测客户端** | DBX/dbExpress(Delphi)连接 + 打开表 + 浏览索引/列正常;类 Navicat 图形工具浏览表/索引/列正常;PyMySQL / mysql CLI 正常 |
 
-### 版本标识(v1.1.2)
+### 版本标识(v1.2.0)
 
 | 位置 | 内容 |
 |---|---|
-| `CMakeLists.txt` | `project(SQLTiny VERSION 1.1.2 LANGUAGES CXX)` |
-| `vcpkg.json` | `"version-string": "1.1.2"` |
-| `src/main.cpp` | 启动横幅 `SQLTiny v1.1.2 — MySQL wire protocol server` |
+| `CMakeLists.txt` | `project(SQLTiny VERSION 1.2.0 LANGUAGES CXX)` |
+| `vcpkg.json` | `"version-string": "1.2.0"` |
+| `src/main.cpp` | 启动横幅 `SQLTiny v1.2.0 — MySQL wire protocol server` |
 | `README.md` / `CODEPLAN.md` | 本版本变更清单与验证基线 |
 | 协议层 `@@version` / `VERSION()` | 仍为 `5.7.0-SQLTiny` —— MySQL 客户端兼容用伪装版本,**不是**产品版本,不随产品版本改动 |
 
-> v1.1.0 统一了此前分散的版本号(启动横幅 `v1.0`、manifest `0.1.0`、CMake 未声明),交付 Prepared Statement、information_schema、SHOW 扩展与 EOF 帧兼容。**v1.1.2** 在此基础上交付 DBeaver / Database Client 实测兼容修复(DDL 选项跳过、SHOW TABLES WHERE/LIKE 过滤、`REFERENTIAL_CONSTRAINTS` 虚拟表、系统变量补齐、双引号与裸关键字别名、`INSTR/LOCATE/POSITION` 函数),详见 README「v1.1.2 更新内容」。
+> v1.1.0 统一了此前分散的版本号(启动横幅 `v1.0`、manifest `0.1.0`、CMake 未声明),交付 Prepared Statement、information_schema、SHOW 扩展与 EOF 帧兼容。**v1.1.2** 在此基础上交付 DBeaver / Database Client 实测兼容修复(DDL 选项跳过、SHOW TABLES WHERE/LIKE 过滤、`REFERENTIAL_CONSTRAINTS` 虚拟表、系统变量补齐、双引号与裸关键字别名、`INSTR/LOCATE/POSITION` 函数)。**v1.2.0** 交付 JOIN 性能优化(Hash Join + 预建列索引 + 成本估算 + `EXPLAIN`),INNER/LEFT JOIN 约 77x / 62x 提速,详见 README「v1.2.0 更新内容」。
 
 ---
 
@@ -641,13 +642,29 @@ SQLTiny 第一版可以简化:
 
 ---
 
-#### P2 · JOIN 性能优化(当前 O(N×M) 无索引)
-> 当前 join 是纯嵌套循环(500 users × 2000 orders = 100w 行 explode),200/800 数据量 INNER JOIN+GROUP BY 要 12s。
+#### P2 · JOIN 性能优化 ✅ (2026-11-12)
+> **【已完成】** 旧实现是纯嵌套循环 O(N×M) 且每个行组合都重建 `col_index` map,
+> 200 users × 800 orders 的 INNER JOIN / LEFT JOIN 各约 298ms / 297ms(单次查询)。
+> 落地 Hash Join + 预建列索引后,**inner_join 3.9ms(约 77x)、left_join 4.8ms(约 62x)**,
+> 单进程整体 wall 1822ms → 73ms;500×2000 大表 INNER JOIN 仅 9ms(线性扩展,不再 explode)。
 
-- [ ] **Index Nested Loop Join**:当 ON 条件是右表主键/索引列时,主表每行 O(log n) 查右表
-- [ ] **Hash Join**:INNER JOIN 等值条件 + 右表无合适索引时,建 hash table 再 probe
-- [ ] JOIN 顺序选择:多表 JOIN 时基于表大小粗略估算排列顺序
-- [ ] `EXPLAIN`(最小版):输出 join type / 使用的索引 / 扫描行数
+- [x] **Hash Join**:从 ON 表达式递归提取「左表列 = 右表列」等值项(支持 `AND` 复合条件),
+      右表按 key 分桶、左表 O(1) probe,O(N×M) → O(N+M)。数值 key 统一提升 double,
+      NULL 不参与等值;纯等值只做 O(1) `sql_equals` 复核,复合 ON 仍完整 `eval` 兜底保证语义
+- [x] **Index Nested Loop / PK 等值**:右表 join 列是单列主键时,`EXPLAIN` 标注
+      `eq_ref` + `key=PRIMARY`。执行层统一走 Hash Join:内存表上 O(N+M) 优于 AVL 的 O(N log M),
+      故不再单独实现索引探测分支(结果语义一致)
+- [x] **预建列索引**:`base_col_index` 只构建一次,消除 O(N×M) 循环里重复拼接字符串 + map 插入;
+      同时记录歧义裸列名,遇到歧义自动退化嵌套循环由 `eval` 决定语义
+- [x] **JOIN 成本估算**:按表 `row_count()` 估算 nested loop = left×right / hash = left+right,
+      多表 JOIN 逐轮传递估算基数,结果写入 `EXPLAIN` 的 `rows` / `Extra`
+- [x] **`EXPLAIN`(最小版)**:`EXPLAIN SELECT ...` 只生成计划不扫描数据;8 列 MySQL 风格
+      (`id/select_type/table/type/possible_keys/key/rows/Extra`),输出 join type
+      (`eq_ref` / `ref` / `ALL`)、使用的 key、`rows` 与成本对比;支持无表 SELECT
+
+**回归**:`smoke_m6_hsqldb_matrix` 的 C 组新增 11 项断言,覆盖等值/反向等值/复合 ON/
+非等值退化/CROSS/LEFT 补 NULL/NULL key/多表连续 Hash Join/EXPLAIN type 与 cost,
+共 **73 PASS / 0 FAIL / 0 GAP**;CTest Debug + Release 均 10/10,Python 端到端全绿。
 
 #### P3 · Prepared Statement + 边缘兼容
 - [x] `COM_STMT_PREPARE` / `COM_STMT_EXECUTE` / `COM_STMT_CLOSE` / `COM_STMT_RESET` / `COM_STMT_SEND_LONG_DATA` — 二进制协议(**✅ v1.1.0**:参数全类型解码拼回 SQL 重放;SELECT/SHOW 用 NULL 占位探测列元数据;binary resultset 返回)
@@ -695,7 +712,7 @@ SQLTiny 第一版可以简化:
 | HSQLDB 某些边界行为难以复刻 | 中 | 已对齐四隔离级别的提升规则与 MVCC 可见性;测试以 MySQL 兼容性为主,HSQLDB 行为作为回归基准 |
 | MySQL 协议版本碎片化 | 低 | 当前模拟 5.7 协议(`5.7.0-SQLTiny`)+ `mysql_native_password`;`caching_sha2_password` / SSL 列在 M6 P3 |
 | 并发 MVCC 冲突 | 中 | M6 P0/P1 已落地行锁 + 事务边界 + 40001;**剩余**:无等待队列,高冲突场景需客户端重试;`versions_` 未做压缩,长事务下内存增长 |
-| JOIN 纯嵌套循环 O(N×M) | 高 | 已知瓶颈(200/800 数据量的 INNER JOIN+GROUP BY 约 12s);M6 P2 计划 Index Nested Loop / Hash Join |
+| JOIN 非等值条件仍 O(N×M) | 低 | M6 P2 已用 Hash Join 覆盖等值 JOIN(77x);非等值 / CROSS / RIGHT 仍走嵌套循环,但列索引已预建,常数开销大幅下降。多表 JOIN 顺序仍按书写顺序,不做物理重排 |
 | SQLAlchemy inspector 兼容 | 低 | `DESCRIBE` / `SHOW FULL TABLES` / `SHOW COLUMNS` 已在 9e752ba 落地(§8.4 #5–#8 一并修复),`get_table_names` / `get_columns` 正常使用 |
 | AVL 大表性能不如 B+Tree | 低 | 当前继续用 AVL,替换计划列在 M6 P3,对外 `Index` 接口不变 |
 | 磁盘持久化二进制兼容未来升级 | 中 | 文件头 magic + version 字段,启动时检查;不承诺跨大版本兼容 |
@@ -718,7 +735,7 @@ SQLTiny 第一版可以简化:
 **下一步优先级(2026-11-12,v1.1.0 之后)**
 
 1. **协议层收尾**:`DESCRIBE` / `SHOW FULL TABLES` 反射(9e752ba)、Prepared Statement(`COM_STMT_*`)、`INFORMATION_SCHEMA`、SHOW / CASE / EOF 帧兼容(v1.1.0)均已落地;**剩余**:`FOR UPDATE` / `LOCK IN SHARE MODE`、等待队列与死锁检测。
-2. **M6 P2**:JOIN 从 O(N×M) 升级为 Index Nested Loop / Hash Join,补 `EXPLAIN`。
+2. **M6 P2 已完成**(2026-11-12):Hash Join + 预建列索引 + 成本估算 + `EXPLAIN`,等值 JOIN 提速约 77x;**剩余**非等值/CROSS JOIN 物理优化与多表 JOIN 顺序重排。
 3. **版本回收**:`merge_expired_transactions()` 目前只清理冲突检测队列,`versions_` 不做压缩,长事务/长生命周期进程内存会增长,需补表压缩。
 4. **HSQLDB 语义扩展**:§8.4 的 8 项 GAP 已全部修复(2026-11-12);后续按 §8.3 待补清单扩展 `TestSelfNot.txt` 完整三值真值表(8 类型 × AND/OR/NOT/BETWEEN/IN/ALL/ANY)、解析器负向用例与 GROUP BY 合法性组合。
 5. **M6 P3 剩余 / P4**:`caching_sha2_password` / SSL、B+Tree、复制与更大的 HSQLDB TestSelf* 覆盖。
@@ -765,7 +782,7 @@ SQLTiny 第一版可以简化:
 | C02 | DDL / 多库 Catalog | `smoke_m4.cpp`、`test_full_flow.py` | CREATE/DROP DATABASE/TABLE、`USE`、SHOW 系列、两段式 `db.table`、未知库 1049 | ✅ |
 | C03 | DML / 表达式 / NULL / 全链路 | `smoke_m2.cpp`、`test_full_flow.py`、`test_vs_sqlite.py` | CRUD、WHERE/ORDER/LIMIT、聚合、内置函数、NULL 列、LIKE、错误码;`test_full_flow.py` 另跨 C02/C06/C08 覆盖 DDL、事务、四隔离级别、多库 | ✅ 48 PASS / 0 GAP、全场景一致 |
 | C04 | 聚合 / 子查询 / JOIN | `smoke_m3.cpp` | GROUP BY / HAVING / 子查询 IN / `INSERT…SELECT` / 各类 JOIN | ✅ |
-| C05 | HSQLDB 可移植 SQL 语义矩阵 | `smoke_m6_hsqldb_matrix.cpp` | A NULL 三值、B 空集聚合、C JOIN 基数、D 主键与语句原子性、E 多库隔离、F 事务内可见性 | ✅ 62 PASS / 0 GAP |
+| C05 | HSQLDB 可移植 SQL 语义矩阵 | `smoke_m6_hsqldb_matrix.cpp` | A NULL 三值、B 空集聚合、C JOIN 基数(含 Hash Join / EXPLAIN 回归)、D 主键与语句原子性、E 多库隔离、F 事务内可见性 | ✅ 73 PASS / 0 GAP |
 | C06 | 事务 / 四隔离级别 / MVCC | `smoke_m6_isolation.cpp`、`test_txn_vs_sqlite.py` | 四级别提升、无脏读、不可重复读、40001 冲突、autocommit、SAVEPOINT、DML 回滚、WAL 重启 | ✅ 451/451、70/70 对比 |
 | C07 | WAL / 快照 / 恢复 | `smoke_m5_wal.cpp`、`test_wal_recovery.py` | Replay、CRC 截断、Checkpoint、重启后数据与 UPDATE/DELETE 状态 | ✅ |
 | C08 | MySQL 协议 / 客户端兼容 | `smoke_m25_e2e.cpp`、`test_sqlalchemy.py` | 握手与 packet、COM_QUERY、OK/EOF/ERR;SQLAlchemy 15 组:Engine、Core DDL/CRUD、聚合、ORM、2.0 风格 select/insert/update/delete、`text():param`、Session rollback、relationship 级联、`engine.begin()` 事务块、类型映射(DateTime/Boolean/Float)、Inspector(`DESCRIBE`/`SHOW FULL TABLES` 已支持) | ✅ 33 PASS / 0 FAIL / 0 GAP |

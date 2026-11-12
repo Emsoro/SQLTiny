@@ -1,0 +1,172 @@
+{
+  "meta": {
+    "timestamp": "2026-11-12T23:31:03",
+    "python": "3.11.9",
+    "platform": "Windows-10-10.0.26300-SP0",
+    "server_exe": "D:\\Cplusplus\\SQLTiny\\build\\Release\\sqltiny_server.exe",
+    "server_config": "Release / memory-only",
+    "port": 3307,
+    "modes": {
+      "single": [
+        [
+          {
+            "engine": "sqltiny",
+            "workers": 1,
+            "ok": 1,
+            "wall_ms": 75.65,
+            "insert_users_avg_ms": 3.075,
+            "insert_users_max_ms": 3.075,
+            "insert_orders_avg_ms": 6.534,
+            "insert_orders_max_ms": 6.534,
+            "agg_user_avg_ms": 0.768,
+            "agg_user_max_ms": 0.768,
+            "groupby_avg_ms": 0.654,
+            "groupby_max_ms": 0.654,
+            "inner_join_avg_ms": 3.88,
+            "inner_join_max_ms": 3.88,
+            "left_join_avg_ms": 4.729,
+            "left_join_max_ms": 4.729,
+            "rows": 1000,
+            "rows_per_s": 13218.8,
+            "errors": []
+          },
+          {
+            "engine": "sqlite",
+            "workers": 1,
+            "ok": 1,
+            "wall_ms": 3.72,
+            "insert_users_avg_ms": 0.18,
+            "insert_users_max_ms": 0.18,
+            "insert_orders_avg_ms": 0.612,
+            "insert_orders_max_ms": 0.612,
+            "agg_user_avg_ms": 0.021,
+            "agg_user_max_ms": 0.021,
+            "groupby_avg_ms": 0.034,
+            "groupby_max_ms": 0.034,
+            "inner_join_avg_ms": 0.174,
+            "inner_join_max_ms": 0.174,
+            "left_join_avg_ms": 0.327,
+            "left_join_max_ms": 0.327,
+            "rows": 1000,
+            "rows_per_s": 268795.5,
+            "errors": []
+          }
+        ],
+        [
+          {
+            "engine": "sqltiny",
+            "worker": 0,
+            "timings_ms": {
+              "insert_users": 3.0751999001950026,
+              "insert_orders": 6.534400046803057,
+              "agg_user": 0.7684333249926567,
+              "groupby": 0.6541333083684245,
+              "inner_join": 3.8799333463733396,
+              "left_join": 4.729099998561044
+            },
+            "error": null
+          },
+          {
+            "engine": "sqlite",
+            "worker": 0,
+            "timings_ms": {
+              "insert_users": 0.18009997438639402,
+              "insert_orders": 0.6119000026956201,
+              "agg_user": 0.020766747184097767,
+              "groupby": 0.0343666955207785,
+              "inner_join": 0.1740666339173913,
+              "left_join": 0.3269666728253166
+            },
+            "error": null
+          }
+        ]
+      ]
+    },
+    "cfg": {
+      "port": 3307,
+      "users": 200,
+      "orders": 800,
+      "batch": 50,
+      "repeats": 3,
+      "seed": 20261112,
+      "workers": 4,
+      "reuse_server": false
+    }
+  },
+  "results": {
+    "single": {
+      "summary": [
+        {
+          "engine": "sqltiny",
+          "workers": 1,
+          "ok": 1,
+          "wall_ms": 75.65,
+          "insert_users_avg_ms": 3.075,
+          "insert_users_max_ms": 3.075,
+          "insert_orders_avg_ms": 6.534,
+          "insert_orders_max_ms": 6.534,
+          "agg_user_avg_ms": 0.768,
+          "agg_user_max_ms": 0.768,
+          "groupby_avg_ms": 0.654,
+          "groupby_max_ms": 0.654,
+          "inner_join_avg_ms": 3.88,
+          "inner_join_max_ms": 3.88,
+          "left_join_avg_ms": 4.729,
+          "left_join_max_ms": 4.729,
+          "rows": 1000,
+          "rows_per_s": 13218.8,
+          "errors": []
+        },
+        {
+          "engine": "sqlite",
+          "workers": 1,
+          "ok": 1,
+          "wall_ms": 3.72,
+          "insert_users_avg_ms": 0.18,
+          "insert_users_max_ms": 0.18,
+          "insert_orders_avg_ms": 0.612,
+          "insert_orders_max_ms": 0.612,
+          "agg_user_avg_ms": 0.021,
+          "agg_user_max_ms": 0.021,
+          "groupby_avg_ms": 0.034,
+          "groupby_max_ms": 0.034,
+          "inner_join_avg_ms": 0.174,
+          "inner_join_max_ms": 0.174,
+          "left_join_avg_ms": 0.327,
+          "left_join_max_ms": 0.327,
+          "rows": 1000,
+          "rows_per_s": 268795.5,
+          "errors": []
+        }
+      ],
+      "runs": [
+        {
+          "engine": "sqltiny",
+          "worker": 0,
+          "timings_ms": {
+            "insert_users": 3.0751999001950026,
+            "insert_orders": 6.534400046803057,
+            "agg_user": 0.7684333249926567,
+            "groupby": 0.6541333083684245,
+            "inner_join": 3.8799333463733396,
+            "left_join": 4.729099998561044
+          },
+          "error": null
+        },
+        {
+          "engine": "sqlite",
+          "worker": 0,
+          "timings_ms": {
+            "insert_users": 0.18009997438639402,
+            "insert_orders": 0.6119000026956201,
+            "agg_user": 0.020766747184097767,
+            "groupby": 0.0343666955207785,
+            "inner_join": 0.1740666339173913,
+            "left_join": 0.3269666728253166
+          },
+          "error": null
+        }
+      ]
+    }
+  }
+}
