@@ -92,9 +92,7 @@ int main() {
         for (uint64_t i = 0; i < col_count; ++i) recv_pkt(s, seq);
 
         std::vector<std::vector<std::string>> rows;
-        while (true) {
-            auto rpkt = recv_pkt(s, seq);
-            if (rpkt.empty() || rpkt[0] == 0xff || rpkt[0] == 0x00 || rpkt[0] == 0xfe) break;
+        auto decode_row = [&](const std::vector<uint8_t>& rpkt) {
             const uint8_t* rp = rpkt.data(); const uint8_t* rq = rpkt.data() + rpkt.size();
             std::vector<std::string> row;
             for (uint64_t i = 0; i < col_count; ++i) {
@@ -103,6 +101,19 @@ int main() {
                 else { uint64_t n = parse_lenenc(rp, rq); row.push_back(std::string(rp, rp + n)); rp += n; }
             }
             rows.push_back(std::move(row));
+        };
+
+        // v1.1.0: 服务端不再广播 CLIENT_DEPRECATE_EOF, 列定义之后会多一个经典 EOF 帧
+        // (0xfe + warnings + status, 包长 < 9); 必须跳过它再读行数据。
+        auto after_cols = recv_pkt(s, seq);
+        if (after_cols.empty() || after_cols[0] == 0xff || after_cols[0] == 0x00) return rows;
+        bool classic_eof = after_cols[0] == 0xfe && after_cols.size() < 9;
+        if (!classic_eof) decode_row(after_cols);   // 无 EOF 帧时该包就是第一行
+
+        while (true) {
+            auto rpkt = recv_pkt(s, seq);
+            if (rpkt.empty() || rpkt[0] == 0xff || rpkt[0] == 0x00 || rpkt[0] == 0xfe) break;
+            decode_row(rpkt);
         }
         return rows;
     };

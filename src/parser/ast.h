@@ -42,6 +42,7 @@ enum class ExprKind {
     Star,           // * 或 t.*
     Subquery,       // 标量子查询: SELECT expr FROM t WHERE ...  作为一个表达式
     Placeholder,    // ?
+    Case,           // CASE [base] WHEN c THEN r ... [ELSE e] END
 };
 
 /// 二元运算符
@@ -74,6 +75,11 @@ struct Expression {
     bool func_star_arg = false;  // COUNT(*)
     // --- Subquery ---
     StmtPtr subquery_stmt;       // Subquery 用:持有完整 SELECT Statement
+
+    // --- Case ---
+    ExprPtr case_base;                                     // 简单 CASE 的比较对象,可空(搜索 CASE)
+    std::vector<std::pair<ExprPtr, ExprPtr>> case_whens;    // (搜索条件/比较值, 结果)
+    ExprPtr case_else;
 
     // 便捷构造
     static ExprPtr make_literal(types::Value v);
@@ -167,11 +173,20 @@ struct ShowStmt {
         CreateDatabase,    // SHOW CREATE DATABASE db
         Status,            // SHOW [GLOBAL|SESSION] STATUS
         Variables,         // SHOW [GLOBAL|SESSION] VARIABLES
+        Engines,           // SHOW ENGINES
+        Plugins,           // SHOW PLUGINS
+        Charset,           // SHOW CHARSET / SHOW CHARACTER SET
+        Collation,         // SHOW COLLATION
+        Index,             // SHOW INDEX FROM [db.]tbl / SHOW KEYS FROM tbl
+        TableStatus,       // SHOW TABLE STATUS [FROM db] [LIKE 'pat']
+        Triggers,          // SHOW TRIGGERS [FROM db] [WHERE ...] —— 返回空结果集
+        ProcessList,       // SHOW PROCESSLIST
+        Warnings,          // SHOW WARNINGS / SHOW ERRORS
     };
     Kind kind;
     bool full = false;              // SHOW FULL TABLES —— 多返回一列 table_type
-    std::string table_or_pattern;   // Tables:db / Columns:table / CreateTable:tbl / CreateDatabase:db
-    std::string db_name;            // Columns / CreateTable 里可选限定
+    std::string table_or_pattern;   // Tables:db / Columns:table / CreateTable:tbl / CreateDatabase:db / Index:tbl / TableStatus:LIKE 模式
+    std::string db_name;            // Columns / CreateTable / Index / TableStatus 里可选限定
 };
 
 // ---------- CREATE DATABASE ----------

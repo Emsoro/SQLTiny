@@ -54,6 +54,9 @@ types::Value Executor::eval(const ast::Expression& e, const ExecContext& ctx) co
                     {"@@version","5.7.0-SQLTiny"},{"@@version_comment","SQLTiny"},
                     {"@@max_connections","151"},{"@@wait_timeout","28800"},
                     {"@@interactive_timeout","28800"},
+                    {"@@max_allowed_packet","4194304"},{"@@net_write_timeout","60"},
+                    {"@@net_read_timeout","30"},{"@@sql_mode",""},
+                    {"@@lower_case_table_names","1"},{"@@sql_auto_is_null","0"},
                 };
                 auto it = vars.find(e.column_name);
                 if (it != vars.end()) return types::Value::make_string(it->second);
@@ -186,6 +189,24 @@ types::Value Executor::eval(const ast::Expression& e, const ExecContext& ctx) co
             return result.rows[0][0];   // 标量子查询:取第一行第一列
         }
 
+        case ast::ExprKind::Case: {
+            if (e.case_base) {
+                // 简单 CASE:CASE <base> WHEN <v> THEN <r>
+                auto bv = eval(*e.case_base, ctx);
+                for (auto& [w, r] : e.case_whens) {
+                    auto wv = eval(*w, ctx);
+                    if (!bv.is_null() && !wv.is_null() && bv.compare(wv) == 0)
+                        return eval(*r, ctx);
+                }
+            } else {
+                // 搜索 CASE:CASE WHEN <cond> THEN <r>
+                for (auto& [c, r] : e.case_whens) {
+                    if (to_bool(eval(*c, ctx))) return eval(*r, ctx);
+                }
+            }
+            return e.case_else ? eval(*e.case_else, ctx) : types::Value::make_null();
+        }
+
         case ast::ExprKind::Placeholder:
             return types::Value::make_null();
     }
@@ -231,7 +252,17 @@ types::Value Executor::eval_function(
         if (star) {
             // COUNT(*):当前表行数
             if (ctx.primary_table.empty()) return types::Value::make_int(0);
-            auto* tbl = ctx.catalog.get_table(ctx.primary_table, default_db());
+            storage::Table* tbl = nullptr;
+            std::unique_ptr<storage::Table> vtbl;
+            if (ctx.exec && Executor::is_information_schema_name(ctx.primary_table)) {
+                // information_schema 虚拟表
+                auto dot = ctx.primary_table.find('.');
+                vtbl = ctx.exec->build_information_schema_table(
+                    ctx.primary_table.substr(0, dot), ctx.primary_table.substr(dot + 1));
+                tbl = vtbl.get();
+            } else {
+                tbl = ctx.catalog.get_table(ctx.primary_table, default_db());
+            }
             if (!tbl) return types::Value::make_int(0);
             return types::Value::make_int(static_cast<int64_t>(tbl->row_count()));
         }

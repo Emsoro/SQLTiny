@@ -465,6 +465,29 @@ ast::ExprPtr Parser::parse_primary() {
         return e;
     }
 
+    // CASE [base] WHEN c THEN r ... [ELSE e] END
+    if (match_consume(TokenKind::KwCase)) {
+        auto e = std::make_unique<ast::Expression>();
+        e->kind = ast::ExprKind::Case;
+        if (!match(TokenKind::KwWhen)) {
+            // 简单 CASE:CASE <base> WHEN <value> THEN ...
+            e->case_base = parse_expr();
+        }
+        while (match_consume(TokenKind::KwWhen)) {
+            auto cond = parse_expr();
+            expect(TokenKind::KwThen, "THEN");
+            auto result = parse_expr();
+            e->case_whens.emplace_back(std::move(cond), std::move(result));
+        }
+        if (e->case_whens.empty())
+            throw ParseError(t.line, t.col, "CASE requires at least one WHEN");
+        if (match_consume(TokenKind::KwElse)) {
+            e->case_else = parse_expr();
+        }
+        expect(TokenKind::KwEnd, "END");
+        return e;
+    }
+
     // 标识符 / 关键字(函数名 或 列名)
     // M6 P1 GAP #5: 关键字与列名冲突时按标识符处理(如 WHERE status = 'paid')。
     // 只拒绝会终结/结构化表达式的保留字,其余关键字(STATUS/SQL 类型名等)都可作为列名。
@@ -484,7 +507,7 @@ ast::ExprPtr Parser::parse_primary() {
             "insert", "into", "values", "set", "update", "delete", "create",
             "drop", "table", "tables", "databases", "schemas", "use", "show",
             "describe", "explain", "primary", "foreign", "references",
-            "constraint", "unique", "index", "check", "auto_increment",
+            "constraint", "unique", "index", "check",
             "if", "exists", "begin", "commit", "rollback", "savepoint",
             "release", "start", "transaction", "work", "to", "alter",
             "add", "column", "truncate", "temporary",
@@ -580,8 +603,12 @@ ast::StmtPtr Parser::parse_select() {
     }
 
     if (match_consume(TokenKind::KwFrom)) {
-        parse_from(*stmt);
-        parse_joins(*stmt);
+        if (match_consume(TokenKind::KwDual)) {
+            // FROM DUAL —— MySQL/Oracle 兼容,等价于无表 SELECT
+        } else {
+            parse_from(*stmt);
+            parse_joins(*stmt);
+        }
     }
 
     if (match_consume(TokenKind::KwWhere)) {
@@ -1066,7 +1093,14 @@ ast::StmtPtr Parser::parse_show() {
     } else if (match_consume(TokenKind::KwColumns) || match_consume(TokenKind::KwFields)) {
         stmt->kind = ast::ShowStmt::Kind::Columns;
         expect(TokenKind::KwFrom, "FROM");
-        stmt->table_or_pattern = kw_or_ident();
+        // 支持限定名 db.tbl(含反引号)与 tbl FROM db 两种形式
+        std::string first = kw_or_ident();
+        if (match_consume(TokenKind::Dot)) {
+            stmt->db_name = first;
+            stmt->table_or_pattern = kw_or_ident();
+        } else {
+            stmt->table_or_pattern = first;
+        }
         if (match_consume(TokenKind::KwFrom)) {
             stmt->db_name = kw_or_ident();
         }
@@ -1098,6 +1132,59 @@ ast::StmtPtr Parser::parse_show() {
             if (t.kind == TokenKind::String) stmt->table_or_pattern = t.text;
             else if (t.kind == TokenKind::Ident) stmt->table_or_pattern = t.text;
         }
+    } else if (match_consume(TokenKind::KwTable)) {
+        // SHOW TABLE STATUS [FROM db] [LIKE 'pat'] —— MySQL 元数据客户端常用
+        expect(TokenKind::KwStatus, "STATUS");
+        stmt->kind = ast::ShowStmt::Kind::TableStatus;
+        if (match_consume(TokenKind::KwFrom) || match_consume(TokenKind::KwIn)) {
+            stmt->db_name = kw_or_ident();
+        }
+        if (match_consume(TokenKind::KwLike)) {
+            auto lt = consume();
+            if (lt.kind == TokenKind::String || lt.kind == TokenKind::Ident)
+                stmt->table_or_pattern = lt.text;
+        }
+    } else if (match_consume(TokenKind::KwIndex) || match_consume(TokenKind::KwKeys)) {
+        // SHOW INDEX FROM tbl [FROM db] / SHOW KEYS FROM tbl
+        // 支持限定名 db.tbl(含反引号)
+        stmt->kind = ast::ShowStmt::Kind::Index;
+        expect(TokenKind::KwFrom, "FROM");
+        std::string first = kw_or_ident();
+        if (match_consume(TokenKind::Dot)) {
+            stmt->db_name = first;
+            stmt->table_or_pattern = kw_or_ident();
+        } else {
+            stmt->table_or_pattern = first;
+        }
+        if (match_consume(TokenKind::KwFrom)) {
+            stmt->db_name = kw_or_ident();
+        }
+    } else if (match_consume(TokenKind::KwEngines)) {
+        stmt->kind = ast::ShowStmt::Kind::Engines;
+    } else if (match_consume(TokenKind::KwPlugins)) {
+        stmt->kind = ast::ShowStmt::Kind::Plugins;
+    } else if (match_consume(TokenKind::KwCharset)) {
+        stmt->kind = ast::ShowStmt::Kind::Charset;
+    } else if (match_consume(TokenKind::KwCharacter)) {
+        // SHOW CHARACTER SET —— 与 SHOW CHARSET 等价
+        expect(TokenKind::KwSet, "SET");
+        stmt->kind = ast::ShowStmt::Kind::Charset;
+    } else if (match_consume(TokenKind::KwCollation)) {
+        stmt->kind = ast::ShowStmt::Kind::Collation;
+    } else if (match_consume(TokenKind::KwProcesslist)) {
+        stmt->kind = ast::ShowStmt::Kind::ProcessList;
+    } else if (match_consume(TokenKind::KwTriggers)) {
+        // SHOW TRIGGERS [FROM db] [WHERE expr] —— SQLTiny 无触发器,返回空结果集
+        stmt->kind = ast::ShowStmt::Kind::Triggers;
+        if (match_consume(TokenKind::KwFrom) || match_consume(TokenKind::KwIn)) {
+            stmt->db_name = kw_or_ident();
+        }
+        if (match_consume(TokenKind::KwWhere)) {
+            // WHERE 过滤对空结果集无意义,解析后丢弃
+            (void)parse_expr();
+        }
+    } else if (match_consume(TokenKind::KwWarnings) || match_consume(TokenKind::KwErrors)) {
+        stmt->kind = ast::ShowStmt::Kind::Warnings;
     } else {
         throw ParseError(t.line, t.col, fmt::format("unsupported SHOW '{}'", t.text));
     }

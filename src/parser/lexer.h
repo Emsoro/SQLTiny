@@ -77,11 +77,14 @@ enum class TokenKind : uint16_t {
 
     // Show / Misc
     KwShow, KwTables, KwDatabases, KwColumns, KwUse, KwDescribe, KwExplain, KwCase, KwWhen, KwThen,
+    KwTriggers,
     KwElse, KwEnd, KwCast, KwConvert, KwIntoKw, KwOut, KwEscape,
     KwCurrentTimestamp, KwNow, KwCurrentDate, KwCurrentTime,
     KwUser, KwDatabaseKw, KwCount, KwSum, KwAvg, KwMin, KwMax,
     KwConcat, KwCoalesce, KwIfnull, KwRound, KwAbs, KwLength,
     KwSchemas, KwFields, KwStatus, KwVariables, KwGlobal, KwSession,
+    KwEngines, KwPlugins, KwCharset, KwCharacter, KwCollation, KwKeys,
+    KwDual, KwProcesslist, KwWarnings, KwErrors,
 
     Kw_END,  // 哨兵
 

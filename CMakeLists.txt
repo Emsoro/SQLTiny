@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(SQLTiny LANGUAGES CXX)
+project(SQLTiny VERSION 1.1.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -60,6 +60,7 @@ add_smoke_test(smoke_m5_wal   tests/smoke_m5_wal.cpp)
 add_smoke_test(smoke_m6_isolation tests/smoke_m6_isolation.cpp)
 add_smoke_test(smoke_m6_hsqldb_matrix tests/smoke_m6_hsqldb_matrix.cpp)
 add_smoke_test(smoke_m6_session_db tests/smoke_m6_session_db.cpp)
+add_smoke_test(dbx_probe     tests/dbx_probe.cpp)
 
 if(GTest_FOUND)
   function(add_sqltiny_test name source)

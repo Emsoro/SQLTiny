@@ -1,8 +1,8 @@
 # SQLTiny — 轻量级嵌入式数据库 · MySQL 协议兼容
 
+> **当前版本 `v1.1.0`(2026-11-12)** · 版本号统一维护在 `CMakeLists.txt`(`project(SQLTiny VERSION 1.1.0)`)、`vcpkg.json`(`version-string`)与 `src/main.cpp` 启动横幅。协议层对外仍伪装为 `5.7.0-SQLTiny` 以兼容 MySQL 客户端,与产品版本无关。
 
-
-**SQLTiny** 是用现代 C++20 从零重写的轻量级关系型数据库,核心设计灵感来自 [HSQLDB](http://hsqldb.org/),额外暴露 **MySQL Wire Protocol**——标准 MySQL 客户端(`mysql` CLI、Navicat、DBeaver、Connector/J、PyMySQL)直接连接。
+**SQLTiny** 是用现代 C++20 从零重写的轻量级关系型数据库,核心设计灵感来自 [HSQLDB](http://hsqldb.org/),额外暴露 **MySQL Wire Protocol**——标准 MySQL 客户端(`mysql` CLI、Navicat、DBeaver、Connector/J、PyMySQL、DBX/dbExpress)直接连接。
 
 > 完整项目规划见 [`CODEPLAN.md`](./CODEPLAN.md),架构映射、技术选型、里程碑验收都在里面。
 
@@ -14,7 +14,9 @@
 |---|---|
 | 🧠 **纯 C++20** | 无 Java / SQLite / RocksDB 依赖 |
 | 🗄️ **嵌入式优先** | 进程内 C++ 调用 或 TCP 客户端连接,两种模式 |
-| 🎯 **MySQL 协议兼容** | PyMySQL / mysql CLI / Navicat 直连,握手 + 类型推断 + NULL 编解码完整 |
+| 🎯 **MySQL 协议兼容** | PyMySQL / mysql CLI / Navicat / SQLAlchemy / **dbExpress(DBX) 驱动** 直连,握手 + 类型推断 + NULL 编解码完整 |
+| 🔧 **服务端预编译语句** | `COM_STMT_PREPARE / EXECUTE / CLOSE / RESET / SEND_LONG_DATA` 完整 binary protocol |
+| 🗂️ **information_schema** | SCHEMATA / TABLES / COLUMNS 等虚拟表,第三方工具元数据浏览直接可用 |
 | 🗃️ **多库 Catalog** | CREATE/DROP/USE DATABASE,库级独立表注册 |
 | ⚡ **AVL 内存索引** | 自带平衡 BST,主键查询 O(log n) |
 | 🪶 **轻量** | 单库文件,启动毫秒级,依赖仅 fmtlib |
@@ -30,6 +32,24 @@
 > 🔒 **锁分层**: Catalog.mu_(DDL) → Table.mu_ shared_lock(SELECT 多读者并行) / unique_lock(DML 独占) → RowLockMap(行级冲突检测) → TransactionManager.writeLock_(提交边界) → WalManager.mu_(WAL 文件读写)
 >
 > 🧊 **MVCC**: SELECT 完全不加锁,`for_each_visible(querySCN, readerTxn)` 按 `createSCN/deleteSCN` 与 `pendingTxn` 过滤;未提交行只对所属事务可见,commit 才 `finalize_commit` 对外发布
+
+---
+
+## 🆕 v1.1.0 更新内容
+
+本版本聚焦**第三方客户端兼容性**(以 Delphi dbExpress/DBX 驱动和类 Navicat 工具实测驱动):
+
+| 类别 | 内容 |
+|---|---|
+| **服务端预编译语句** | 完整实现 `COM_STMT_PREPARE`(0x16) / `COM_STMT_EXECUTE`(0x17) / `COM_STMT_CLOSE` / `COM_STMT_RESET` / `COM_STMT_SEND_LONG_DATA`。参数按 binary protocol 解码(全类型 + NULL 位图)拼回 SQL 重放执行;SELECT/SHOW 在 prepare 阶段用 NULL 替换占位符探测列元数据(只读、安全);SELECT 结果以 binary resultset 返回 |
+| **EOF 帧兼容** | 服务端不再广播 `CLIENT_DEPRECATE_EOF`,永远使用经典 EOF 帧帧定结果集——修复 DBX 等老客户端回显能力位后挂起 5 秒的问题 |
+| **information_schema 虚拟表** | `SCHEMATA` / `TABLES` / `COLUMNS`(含 LEFT JOIN KEY_COLUMN_USAGE 这类工具元数据查询) / `TABLE_CONSTRAINTS` / `STATISTICS` / `TRIGGERS` / `ROUTINES` / `VIEWS` / `EVENTS`——每次查询物化,工具浏览元数据直接可用 |
+| **SHOW 扩展** | `SHOW ENGINES` / `PLUGINS` / `CHARSET` / `CHARACTER SET` / `COLLATION` / `TABLE STATUS [LIKE]` / `INDEX|KEYS FROM db.tbl` / `FULL COLUMNS FROM db.tbl` / `PROCESSLIST` / `WARNINGS` / `TRIGGERS [WHERE]`;反引号 `db`.`tbl` 限定名解析 |
+| **表达式** | `CASE [base] WHEN .. THEN .. [ELSE ..] END`(简单/搜索两种形式);`AUTO_INCREMENT` 等关键字可用作列名 |
+| **协议命令** | `COM_FIELD_LIST`(db 限定 + `\0` 截断) / `COM_STATISTICS` / `COM_PROCESS_INFO` / `COM_CHANGE_USER`;SSL 请求返回明确 ERR |
+| **系统变量** | `@@max_allowed_packet` / `@@net_write_timeout` / `@@net_read_timeout` / `@@sql_mode` / `@@lower_case_table_names` / `@@sql_auto_is_null` |
+| **调试工具** | 新增 `--query-log FILE` 参数(逐条记录命令 + 握手 + 执行结果);`tests/dbx_probe.cpp`(58 断言,进程内逐条跑 DBX 典型 SQL) 与 `tests/test_stmt_prepare.py`(7 断言,裸 socket 预编译协议) 回归 |
+| **回归适配** | `tests/smoke_m25_e2e.cpp` 改为兼容经典 EOF 帧(列定义后的 `0xfe` 包),CTest 恢复 10/10 |
 
 ---
 
@@ -57,8 +77,10 @@ SQL 语法:`SET SESSION TRANSACTION ISOLATION LEVEL <级别>`(会话默认)、`S
 | M2.5 MySQL 协议 | ✅ | Wire Protocol 握手 + 编解码 + TCP server |
 | M3 子查询 + JOIN 补全 | ✅ | GROUP BY · HAVING · 子查询 IN · INSERT SELECT · INNER/LEFT JOIN |
 | M4 协议层补全 | ✅ | Catalog 多库化 · SHOW 系列(含 LIKE) · SQLAlchemy 系统变量兼容 |
-| **M5 持久化 + MVCC + SQLAlchemy** | ✅ | WAL+Replay+Checkpoint · MVCC SCN 可见性 · AUTO_INCREMENT · 全局 mutex 并发安全 · **SQLAlchemy 全场景 33/0/0 PASS · 4+ 集成测试** |
-| **M6 行锁 + 事务 + JOIN 优化** | 📋 | 行级锁替换全局 mutex → 真正事务 → JOIN 索引优化 → 存储过程 |
+| **M5 持久化 + MVCC + SQLAlchemy** | ✅ | WAL+Replay+Checkpoint · MVCC SCN 可见性 · AUTO_INCREMENT · 并发安全(M5 为全局 mutex,M6 起改为行锁 + MVCC 快照) · **SQLAlchemy 全场景 33/0/0 PASS · 4+ 集成测试** |
+| **M6 事务 + 四隔离级别 (HSQLDB 2.7.4)** | ✅ | 行级锁 · 四隔离级别与提升规则 · SAVEPOINT · 事务级 WAL 缓冲 · 提交期冲突检测 40001 |
+| **M6 客户端兼容性 (v1.1.0)** | ✅ | 服务端预编译语句 · information_schema 虚拟表 · SHOW 扩展 · CASE 表达式 · EOF 帧兼容 · **DBX/dbExpress + 类 Navicat 工具实测通过 · dbx_probe 58/58 · test_stmt_prepare 7/7** |
+| **后续** | 📋 | JOIN 索引优化 → 等待队列/死锁检测 → 存储过程 · caching_sha2_password / SSL |
 
 ---
 
@@ -89,18 +111,26 @@ cmake --build build --config Debug
 | `build/Debug/smoke_m25_e2e.exe` | E2E 测试 | Winsock 直连 server — **13/13 PASS** |
 | `build/Debug/smoke_m6_isolation.exe` | 隔离级别测试 | 四级别 + 事务/保存点/冲突 — **451/451 PASS** |
 | `build/Debug/smoke_m6_hsqldb_matrix.exe` | HSQLDB 语义矩阵 | NULL 三值 / 空集聚合 / JOIN 基数 / 语句原子性 / 多库隔离 — **56 PASS / 4 GAP**(GAP 见 CODEPLAN §8.4) |
+| `build/Debug/smoke_m6_session_db.exe` | 多库会话隔离 | 每连接 `USE` / 握手 database 互不干扰 — **PASS** |
+| `build/Debug/dbx_probe.exe` | 客户端兼容性探针 | 进程内逐条跑 DBX/dbExpress 连接/元数据/事务阶段的典型 SQL — **58/58 PASS** |
 | `tests/test_txn_vs_sqlite.py` | 事务行为对比 | SQLTiny vs SQLite 四级别 + WAL 重启 — **70/70 一致** |
 | `tests/test_full_flow.py` | PyMySQL 全链路(双连接) | DDL/INSERT→SELECT*含NULL→WHERE/ORDER/聚合/HAVING→JOIN→UPDATE/DELETE→约束与错误码→事务/SAVEPOINT/autocommit→四隔离级别/40001→多库→清理 — **47 PASS / 1 GAP**(GAP 见 CODEPLAN §8.4) |
 | `tests/test_sqlalchemy.py` | SQLAlchemy 2.x | Engine/Core/ORM/2.0 风格表达式/`text():param`/rollback/relationship/`engine.begin()`/类型映射/Inspector — **33 PASS / 0 FAIL / 0 GAP**(`DESCRIBE`/`SHOW FULL TABLES` 已支持) |
 | `tests/test_vs_sqlite.py` | 行为对比 | 同一逻辑 SQLTiny vs SQLite 全场景 assert — **全绿** |
 | `tests/test_perf_vs_sqlite.py` | 性能对比 | 200 users + 800 orders INSERT + JOIN 性能 — **跑通无 crash** |
 | `tests/test_concurrency.py` | 并发安全 | 5 线程(2W+2R+1D)15s 并发读写 — **通过** |
+| `tests/test_stmt_prepare.py` | 预编译语句协议 | 裸 socket 走 COM_STMT_PREPARE/EXECUTE/CLOSE 全流程(含 NULL/转义/语法错误) — **7/7 PASS** |
 
 ### 一键跑全量测试
 ```powershell
 cmake --build build --config Debug
 
-# C++ 单元级(无需 server,纯进程内)
+# 另开一个终端启动 server(smoke_m25_e2e 与部分 Python 脚本需要)
+.\build\Debug\sqltiny_server.exe --port 3306 --user root
+# 然后一键跑完 10 个 CTest 目标(未启动 server 时为 9/10)
+ctest --test-dir build -C Debug --output-on-failure
+
+# 也可逐个运行(以下无需 server,纯进程内)
 .\build\Debug\smoke_m1.exe
 .\build\Debug\smoke_m2.exe
 .\build\Debug\smoke_m3.exe
@@ -108,9 +138,10 @@ cmake --build build --config Debug
 .\build\Debug\smoke_m5_wal.exe
 .\build\Debug\smoke_m6_isolation.exe
 .\build\Debug\smoke_m6_hsqldb_matrix.exe
+.\build\Debug\smoke_m6_session_db.exe
+.\build\Debug\dbx_probe.exe
 
-# MySQL 协议端到端(C++ Winsock client)
-.\build\Debug\sqltiny_server.exe --port 3306 --user root
+# MySQL 协议端到端(复用上面已启动的 server)
 .\build\Debug\smoke_m25_e2e.exe
 
 # Python 全场景(PyMySQL client,单一 connection)
@@ -120,10 +151,14 @@ python tests\test_sqlalchemy.py
 python tests\test_vs_sqlite.py
 python tests\test_perf_vs_sqlite.py
 python tests\test_concurrency.py
+python tests\test_wal_recovery.py    # server 重启恢复(需 server)
 python tests\test_txn_vs_sqlite.py   # 自动起停 server,不占用 3306
+python tests\test_stmt_prepare.py    # COM_STMT_* 预编译协议(需 server)
 ```
 
-### 测试总览 (CTest 9/9 · Python 8 scripts)
+### 测试总览 (CTest 10/10 · Python 8 scripts)
+
+> `smoke_m25_e2e` 通过 TCP 连接 3306,需先启动 server;未启动 server 时 CTest 为 9/10。
 ```
 smoke_m1              3/3   PASS  Value / AVL / Lexer
 smoke_m2              5/5   PASS  CRUD / 聚合 / 表达式 / DDL edge / IS NULL
@@ -141,6 +176,8 @@ test_vs_sqlite       全绿             同逻辑 SQLTiny vs SQLite 行为一致
 test_wal_recovery    全通过            server 重启 / UPDATE / DELETE 状态恢复
 test_perf_vs_sqlite  跑通              200 users / 800 orders INSERT + JOIN 性能对比
 test_concurrency     通过              5 线程 15s 并发读写
+dbx_probe           58/58 PASS         DBX/dbExpress SQL 探针(进程内:连接/元数据/事务)
+test_stmt_prepare    7/7   PASS        预编译语句 binary protocol 全流程
 ```
 
 ---
@@ -178,9 +215,10 @@ python -c "import pymysql; c=pymysql.connect(host='127.0.0.1',port=3306,user='ro
 ### CLI 参数
 
 ```
-sqltiny_server [--port <n>] [--user <name>] [--password <pwd>] [--data-dir <DIR>]
+sqltiny_server [--port <n>] [--user <name>] [--password <pwd>] [--data-dir <DIR>] [--query-log <FILE>]
                默认 --port 3306 --user root
-               --data-dir  缺省 = 内存模式(无持久化,重启丢数据)
+               --data-dir   缺省 = 内存模式(无持久化,重启丢数据)
+               --query-log  逐条记录收到的命令/SQL 及执行结果(调试客户端兼容性用)
 ```
 
 > **开发期简化**: `mysql_native_password` 不校验密码,只要 user=root 就放行。
@@ -221,10 +259,12 @@ SQLTiny 通过 `--data-dir` 指定持久化目录,目录下生成两个文件:
 | **表 DDL** | `CREATE TABLE t(...) [IF NOT EXISTS]` / `DROP TABLE [IF EXISTS]` | PRIMARY KEY / AUTO_INCREMENT / DEFAULT / NOT NULL |
 | **DML** | `INSERT INTO t VALUES(…, …)` / 多行 / 指定列 / `UPDATE t SET x=… WHERE …` / `DELETE FROM t WHERE …` | 显式 NULL 不被补 DEFAULT |
 | **查询** | `SELECT cols FROM t WHERE … ORDER BY … LIMIT n` | IS NULL / IS NOT NULL / LIKE / IN / 比较运算 / AND / OR / NOT |
+| **表达式** | `CASE [base] WHEN .. THEN .. [ELSE ..] END` / 标量子查询 / `?` 占位符 | 简单 CASE 与搜索 CASE |
 | **聚合** | `COUNT(*)` / `COUNT(col)` / `SUM` / `AVG` / `MIN` / `MAX` | GROUP BY + HAVING 完整 |
 | **表连接** | INNER JOIN / LEFT JOIN / CROSS JOIN / 多 JOIN 链 | 别名限定列 + LEFT JOIN 保留 NULL 行 |
 | **子查询** | `WHERE col IN (SELECT …)` | 标量子查询 |
-| **SHOW** | `SHOW DATABASES` / `SHOW TABLES` / `SHOW COLUMNS FROM t` / `SHOW CREATE TABLE t` / `SHOW STATUS` / `SHOW VARIABLES [LIKE pattern]` | LIKE 支持 `%xxx%` / `xxx%` / `%xxx` / 精确匹配 |
+| **SHOW** | `SHOW DATABASES` / `SHOW TABLES` / `SHOW [FULL] COLUMNS FROM [db.]t` / `SHOW CREATE TABLE t` / `SHOW STATUS` / `SHOW VARIABLES [LIKE pattern]` / `SHOW INDEX|KEYS FROM [db.]t` / `SHOW TABLE STATUS [LIKE]` / `SHOW ENGINES` / `SHOW PLUGINS` / `SHOW CHARSET` / `SHOW COLLATION` / `SHOW PROCESSLIST` / `SHOW WARNINGS` / `SHOW TRIGGERS [WHERE]` | LIKE 支持 `%xxx%` / `xxx%` / `%xxx` / 精确匹配;支持 `` `db`.`tbl` `` 反引号限定名 |
+| **元数据** | `information_schema.SCHEMATA` / `TABLES` / `COLUMNS` / `TABLE_CONSTRAINTS` / `KEY_COLUMN_USAGE` / `STATISTICS` / `TRIGGERS` / `ROUTINES` / `VIEWS` / `EVENTS` | 每次查询物化的虚拟表,第三方工具元数据浏览可用 |
 | **系统** | `SET NAMES utf8mb4` / `SET AUTOCOMMIT = 0/1` / `SET [SESSION] TRANSACTION ISOLATION LEVEL …` | 真实生效;`@@tx_isolation` / `@@autocommit` 返回会话真实值 |
 | **事务** | `BEGIN` / `START TRANSACTION` / `COMMIT` / `ROLLBACK` / `SAVEPOINT` / `ROLLBACK TO` / `RELEASE` | 四隔离级别 + 行锁 + 事务级 WAL 缓冲,commit 才可见 |
 | **并发安全** | `TransactionManager.writeLock_` + 行锁 + `Table.shared_mutex` | SELECT 不加锁(MVCC 快照),写-写冲突立即 40001 |
@@ -289,7 +329,7 @@ SQLTiny/
 │   ├── catalog/               Catalog 多库化 (databases_[db].tables_)
 │   ├── core/                  Database / Session 入口
 │   ├── executor/              Executor + infer_type() 静态类型推断 + 内置函数
-│   └── net/                   MySQL Wire Protocol 编解码(field_type 动态推断) + TCP server
+│   └── net/                   MySQL Wire Protocol 编解码(field_type 动态推断) + TCP server + 预编译语句
 └── tests/
     ├── smoke_m1.cpp           Value / AVL / Lexer 冒烟
     ├── smoke_m2.cpp           CRUD / 聚合 / 表达式 / DDL / NULL
@@ -299,11 +339,15 @@ SQLTiny/
     ├── smoke_m25_e2e.cpp      Winsock 直连 server E2E
     ├── smoke_m6_isolation.cpp 四隔离级别 + 事务/保存点/冲突
     ├── smoke_m6_hsqldb_matrix.cpp  HSQLDB 可移植 SQL 语义矩阵
+    ├── smoke_m6_session_db.cpp 多库会话级隔离(每连接 USE / 握手 db)
+    ├── dbx_probe.cpp          DBX/dbExpress 客户端兼容性探针(58 断言)
+    ├── test_stmt_prepare.py   预编译语句 binary protocol 测试(7 断言)
     ├── test_full_flow.py      PyMySQL 全链路(双连接,含事务/隔离级别)
     ├── test_sqlalchemy.py     SQLAlchemy 2.x 15 组:Engine/Core/ORM/2.0 表达式/事务/类型映射/Inspector
     ├── test_vs_sqlite.py      SQLTiny vs SQLite 行为对比
     ├── test_perf_vs_sqlite.py 大数据量 INSERT + JOIN 性能对比
     ├── test_concurrency.py    多线程并发读写
+    ├── test_wal_recovery.py   server 重启 / UPDATE / DELETE 状态恢复
     └── test_txn_vs_sqlite.py  四隔离级别 + 事务结果与 SQLite 对比、WAL 重启验证
 ```
 

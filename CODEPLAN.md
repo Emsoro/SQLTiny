@@ -7,7 +7,7 @@
 
 ---
 
-## 0. 当前状态(2026-11-11)
+## 0. 当前状态(2026-11-12,v1.1.0)
 
 > 下文 M1–M5 为原始规划、M6 各节含设计稿伪代码,均保留供追溯。**落地状态以本节与各节 ✅ 标记为准;实际目录与运行方式见 `README.md`,架构图见 `architecture.svg`。**
 
@@ -16,35 +16,54 @@
 | 里程碑 | 状态 | 说明 |
 |---|---|---|
 | M1 / M2 / M2.5 / M3 | ✅ | 类型/AVL/Lexer、DDL/DML、MySQL 协议接入、子查询与 JOIN |
-| M4 | ✅ | SHOW 系列、多库 Catalog、协议字段类型推断(`DESCRIBE` / `SHOW FULL TABLES` 仍缺) |
+| M4 | ✅ | SHOW 系列、多库 Catalog、协议字段类型推断(`DESCRIBE` / `SHOW FULL TABLES` 已补) |
 | M5 | ✅ | WAL + Snapshot + Replay、AUTO_INCREMENT、并发安全 |
 | **M6 P0** | ✅ | 行锁 + `TransactionManager` + `Table.shared_mutex`,SELECT 走 MVCC 快照不加行锁 |
 | **M6 P1 事务部分** | ✅ | 四隔离级别、autocommit、SAVEPOINT、WAL 事务缓冲、协议状态位 |
-| M6 P1 边缘项 | ⬜ | `DESCRIBE` / `SHOW FULL TABLES`、`FOR UPDATE` / `LOCK IN SHARE MODE`、死锁检测 |
-| M6 P2 / P3 / P4 | ⬜ | JOIN 优化、Prepared Statement / 认证、复制与更大测试覆盖 |
+| M6 P1 边缘项 | ⬜ | `FOR UPDATE` / `LOCK IN SHARE MODE`、死锁检测 / 等待队列 |
+| **M6 P3 客户端兼容(v1.1.0)** | ✅ | **服务端预编译语句(`COM_STMT_*` binary protocol)、information_schema 虚拟表、SHOW 扩展、CASE 表达式、EOF 帧兼容、`--query-log`** |
+| M6 P2 / P4 | ⬜ | JOIN 优化、复制与更大测试覆盖;认证(caching_sha2_password / SSL)仍未做 |
 
-### 本轮交付(M6 事务 + 四隔离级别,参考 HSQLDB 2.7.4)
+### 本轮交付(v1.1.0 客户端兼容性)
 
-- **隔离级别**:`ast::IsolationLevel` 1/2/4/8;`SET [SESSION] TRANSACTION ISOLATION LEVEL`、`START TRANSACTION ... LEVEL`、`SET tx_isolation=` 真实生效;`@@tx_isolation` / `SHOW VARIABLES` 返回会话真实值。
-- **HSQLDB 提升规则**:`READ UNCOMMITTED → READ COMMITTED`(下一事务级附加只读 25006)、`REPEATABLE READ → SERIALIZABLE`;四个级别都不允许脏读。
-- **MVCC**:`VersionInfo` 增加 `pendingTxn / pendingInsert / pendingDelete`,未提交行只对所属事务可见;**commit 才 `finalize_commit` 发布版本**。RC 用语句级 SCN,RR/SER 用事务级 SCN;RR/SER 陈旧写与并发写冲突返回 40001(MySQL errno 1213)。
-- **事务边界**:autocommit 语句级隐式 begin+commit、`SET AUTOCOMMIT=0/1`、`BEGIN` / `COMMIT` / `ROLLBACK`、`SAVEPOINT` / `ROLLBACK TO` / `RELEASE`、事务结束恢复会话默认隔离级别。
-- **持久化修复**:未提交行 DML 进入会话级 `wal_buffer_`,commit 整体 flush、rollback 整体丢弃;checkpoint 只写已提交且未删除的行;修复回滚后重启复活数据。
-- **配套修复**:UPDATE 两条 `RowAction` 的 rowId 错配、回滚主键索引恢复、`committed_queue_` 的 commitSCN 失效、OK/EOF 包 `SERVER_STATUS_AUTOCOMMIT` / `SERVER_STATUS_IN_TRANS` 硬编码。
-- **架构图**:`architecture.svg` 改为靛蓝/青绿/琥珀/灰蓝四色语义化主题色,并同步到当前事务数据流。
+以 Delphi dbExpress(DBX)驱动与类 Navicat 图形工具实测为驱动,逐条用 `--query-log` 抓取失败语句修复:
+
+- **服务端预编译语句**:`COM_STMT_PREPARE`(0x16)/ `COM_STMT_EXECUTE`(0x17)/ `COM_STMT_CLOSE` / `COM_STMT_RESET` / `COM_STMT_SEND_LONG_DATA`。参数按 binary protocol 全类型解码(int/float/字符串/日期时间/NULL 位图)拼回 SQL 重放执行;SELECT/SHOW 在 prepare 阶段用 NULL 替换占位符探测列元数据(只读、安全);SELECT 结果以 binary resultset 返回。
+- **EOF 帧兼容**:服务端不再广播 `CLIENT_DEPRECATE_EOF`,永远用经典 EOF 帧——修复 DBX 等老客户端回显能力位后挂起 5 秒的问题。
+- **information_schema 虚拟表**:`SCHEMATA` / `TABLES` / `COLUMNS` / `TABLE_CONSTRAINTS` / `KEY_COLUMN_USAGE` / `STATISTICS` / `TRIGGERS` / `ROUTINES` / `VIEWS` / `EVENTS`。每次查询物化,createSCN=0 恒可见;支持 `information_schema.COLUMNS c LEFT JOIN information_schema.KEY_COLUMN_USAGE pk ON ...` 这类工具元数据查询(含 `CASE WHEN ... END` 投影)。
+- **SHOW 扩展**:`ENGINES` / `PLUGINS` / `CHARSET` / `CHARACTER SET` / `COLLATION` / `TABLE STATUS [LIKE]` / `INDEX|KEYS FROM [db.]t` / `[FULL] COLUMNS FROM [db.]t` / `PROCESSLIST` / `WARNINGS` / `TRIGGERS [WHERE]`;`` `db`.`tbl` `` 反引号限定名解析。
+- **表达式与词法**:`CASE [base] WHEN .. THEN .. [ELSE ..] END`(简单/搜索,解析 + 求值 + 类型推断);`AUTO_INCREMENT` 等关键字放开可用作列名。
+- **协议命令**:`COM_FIELD_LIST`(db 限定 + `\0` 截断)、`COM_STATISTICS`、`COM_PROCESS_INFO`、`COM_CHANGE_USER`;SSL 请求返回明确 ERR;`@@max_allowed_packet` / `@@net_write_timeout` / `@@net_read_timeout` / `@@sql_mode` / `@@lower_case_table_names` / `@@sql_auto_is_null`。
+- **调试设施**:`--query-log FILE`(逐条记录命令 0x?? + SQL + 执行结果);`tests/dbx_probe.cpp`(58 断言,进程内用 `Session::execute` 逐条跑 DBX 连接/元数据/事务阶段的典型 SQL)、`tests/test_stmt_prepare.py`(7 断言,裸 socket 走 `COM_STMT_*` 全流程)。
+- **回归适配**:`tests/smoke_m25_e2e.cpp` 改为兼容经典 EOF 帧(列定义后的 `0xfe` 包,包长 < 9),否则老用例会把 EOF 误判为结果集结束;`ctest` 在启动 server 后恢复 10/10。
 
 ### 验证基线
 
 | 测试 | 结果 |
 |---|---|
-| `ctest -C Debug` | 9/9(含 `smoke_m6_isolation`、`smoke_m6_hsqldb_matrix`、`smoke_m6_session_db`) |
+| `ctest -C Debug` | 10/10(含 `smoke_m6_isolation`、`smoke_m6_hsqldb_matrix`、`smoke_m6_session_db` 与 v1.1.0 新增的 `dbx_probe`);`smoke_m25_e2e` 需先启动 server 连 3306,未启动时为 9/10 |
 | `smoke_m6_isolation` | 451/451 PASS — 四级别、脏读、快照、冲突、autocommit、SAVEPOINT、DML 回滚 |
 | `smoke_m6_hsqldb_matrix` | 56 PASS / 4 GAP — HSQLDB 可移植 SQL 语义矩阵;GAP 见 §8.4 |
 | `smoke_m6_session_db` | PASS — 多库会话级隔离(每个连接的 `USE`/握手 db 互不干扰,验证 §8.4 #6/#7 修复) |
+| `dbx_probe` | 58/58 PASS — 进程内 `Session::execute` 跑 DBX/dbExpress 连接/元数据/事务阶段的典型 SQL(含 SHOW/information_schema) |
+| `test_stmt_prepare.py` | 7/7 PASS — 预编译语句 binary protocol 全流程(PREPARE/EXECUTE/CLOSE、NULL 参数、转义、语法错误) |
 | `test_txn_vs_sqlite.py` | 70/70 与 SQLite 一致 + 2 项预期差异(RC 事务内语义、RU 提升 vs SQLite 脏读) |
 | `test_full_flow.py` / `test_vs_sqlite.py` | 47 PASS / 0 FAIL / 1 GAP(GAP 见 §8.4)/ 全场景一致 |
 | `test_wal_recovery.py` / `test_concurrency.py` | 重启恢复全通过 / 5 线程 15s 无 crash |
 | `test_sqlalchemy.py` | 33 PASS / 0 FAIL / 0 GAP(原 #5–#8 与 DESCRIBE/SHOW FULL TABLES 反射限制均已修复) |
+| **实测客户端** | DBX/dbExpress(Delphi)连接 + 打开表 + 浏览索引/列正常;类 Navicat 图形工具浏览表/索引/列正常;PyMySQL / mysql CLI 正常 |
+
+### 版本标识(v1.1.0)
+
+| 位置 | 内容 |
+|---|---|
+| `CMakeLists.txt` | `project(SQLTiny VERSION 1.1.0 LANGUAGES CXX)` |
+| `vcpkg.json` | `"version-string": "1.1.0"` |
+| `src/main.cpp` | 启动横幅 `SQLTiny v1.1.0 — MySQL wire protocol server` |
+| `README.md` / `CODEPLAN.md` | 本版本变更清单与验证基线 |
+| 协议层 `@@version` / `VERSION()` | 仍为 `5.7.0-SQLTiny` —— MySQL 客户端兼容用伪装版本,**不是**产品版本,不随产品版本改动 |
+
+> 上一版(M1–M5 + M6 事务/四隔离级别基线)版本号分散:启动横幅 `SQLTiny v1.0`、manifest `0.1.0`、CMake 未声明版本。v1.1.0 统一上述三处,并交付本轮第三方客户端兼容性改动。
 
 ---
 
@@ -274,10 +293,10 @@ LIMIT 10;
 - [x] Catalog 多库化:库级独立表注册 `databases_[db].tables_`
 - [x] SQLAlchemy 2.x 兼容:系统变量、`VERSION()` / `SCHEMA()` 函数、`COMMIT` / `ROLLBACK` / `BEGIN` 占位(M4 时均为占位;M6 P1 后 `@@tx_isolation` / `@@autocommit` 返回会话真实值,事务语句换成真实语义)
 - [x] MySQL wire protocol 字段类型动态推断(DECIMAL/VARCHAR/INT/DOUBLE 正确 field_type)
-- [ ] `COM_STMT_PREPARE` / `COM_STMT_EXECUTE` — 二进制协议(→ M6 P3)
-- [ ] `INFORMATION_SCHEMA` 视图(→ M6)
-- [ ] `caching_sha2_password` 认证(→ M6)
-- [ ] `CLIENT_SSL` 握手(→ M6)
+- [x] `COM_STMT_PREPARE` / `COM_STMT_EXECUTE` / `COM_STMT_CLOSE` / `COM_STMT_RESET` — 二进制协议(**✅ v1.1.0 已落地,见 §0 本轮交付**)
+- [x] `INFORMATION_SCHEMA` 虚拟表(**✅ v1.1.0 已落地**:SCHEMATA/TABLES/COLUMNS 等 10 张,每次查询物化)
+- [ ] `caching_sha2_password` 认证(→ M6 P3 剩余)
+- [ ] `CLIENT_SSL` 握手(→ M6 P3 剩余)
 
 **验收**:Navicat 打开连接不弹警告,能列出数据库/表/列;SQLAlchemy 全场景 PASS(现 `test_sqlalchemy.py` 33 PASS / 0 FAIL / 0 GAP,见 M6 P1 1.2 与 §8.4 #5–#8 修复记录)。
 
@@ -297,7 +316,7 @@ LIMIT 10;
   - `test_sqlalchemy.py` — SQLAlchemy 全场景(8/10 PASS,2 非核心 FAIL)
   - `test_vs_sqlite.py` — SQLTiny vs SQLite 全场景行为一致
   - `test_perf_vs_sqlite.py` — 大数据量 INSERT + JOIN 性能对比(无 crash)
-  - `test_concurrency.py` — 5 线程 15s 并发读写(全局 mutex 生效无 crash)
+  - `test_concurrency.py` — 5 线程 15s 并发读写(M5 时为全局 mutex,M6 起由行锁 + MVCC 快照保护,无 crash)
 
 **验收**:server 重启后 `SELECT COUNT(*)` 与 shutdown 前一致;并发测试 15s 无 crash;SQLAlchemy ORM `s.get(User, 1)` 可用。
 
@@ -305,7 +324,7 @@ LIMIT 10;
 
 ### M6 · 行锁 + 事务 + JOIN 优化 + 存储过程(按优先级)
 
-> **进度(2026-11-11)**:P0 ✅ 已完成 · P1 事务语义 ✅ 已完成,边缘项 ⬜ 待办 · P2 / P3 / P4 ⬜ 未启动。详见 §0 当前状态。
+> **进度(2026-11-12,v1.1.0)**:P0 ✅ 已完成 · P1 事务语义 ✅ 已完成,边缘项 ⬜ 待办 · **P3 客户端兼容 ✅ 完成(v1.1.0:Prepared Statement + INFORMATION_SCHEMA + SHOW/CASE 表达式 + EOF 帧兼容 + `--query-log`)**,剩余认证(SSL / caching_sha2_password)· P2 / P4 ⬜ 未启动。详见 §0 当前状态。
 
 ---
 
@@ -328,7 +347,7 @@ LIMIT 10;
 | SELECT 完全不加锁 | 不加行锁 / writeLock,但仍由 `Table.mu_` shared_lock 保护容器遍历 |
 | 行锁冲突即 abort | 冲突立即 40001(1213)中止;RR/SER 额外做提交时的陈旧写冲突检测 |
 
-**验证**:`smoke_m6_isolation` 451/451 PASS、`test_txn_vs_sqlite.py` 70/70 与 SQLite 一致,`ctest` 7/7。
+**验证**:`smoke_m6_isolation` 451/451 PASS、`test_txn_vs_sqlite.py` 70/70 与 SQLite 一致,`ctest` 10/10(v1.1.0 基线)。
 
 **参考源码**(本地已有):
 - HSQLDB:`hsqldb/src/org/hsqldb/TransactionManagerMVCC.java`、`RowAction.java`、`TransactionManagerCommon.java`
@@ -614,10 +633,10 @@ SQLTiny 第一版可以简化:
 | ⬜ | **P1-06** 死锁检测(两行循环锁) | 当前无等待队列,冲突立即 40001 中止,不存在循环等待 | — |
 | ✅ | **P1-07** 并发 UPDATE 同一行(40001) | 两会话同一行:一个 OK、一个 errno 1213 | `smoke_m6_isolation` t5/t6、`test_txn_vs_sqlite` ww_c2 |
 | ✅ | **P1-08** 并发读写压测 | 5 线程(2W+2R+1D)15s 无 crash,最终状态完整可查询 | `test_concurrency.py` |
-| ⬜ | **P1-09** DESCRIBE / SHOW FULL TABLES | 测试侧已改 GAP 标记绕行(见 1.2),server 端仍未实现 | `test_sqlalchemy.py` |
+| ✅ | **P1-09** DESCRIBE / SHOW FULL TABLES | 9e752ba 已补齐 server 端反射(§8.4 #5–#8 一并修复),`test_sqlalchemy.py` 33 PASS / 0 FAIL / 0 GAP | `test_sqlalchemy.py` |
 | ✅ | **P1-10** 重启不复活未提交数据 | 回滚/提交后重启,SQLTiny 与 SQLite 状态一致;WAL 事务缓冲 + 快照只写已提交可见行 | `test_txn_vs_sqlite.py` WAL 段、`smoke_m5_wal` |
 
-> 本轮新增 `tests/smoke_m6_isolation.cpp`(451 项进程内断言)与 `tests/test_txn_vs_sqlite.py`(70 项 SQLTiny/SQLite 对比 + WAL 重启),覆盖上表绝大多数 ✅ 项;前者已注册 `CTest`。
+> 新增 `tests/smoke_m6_isolation.cpp`(451 项进程内断言)与 `tests/test_txn_vs_sqlite.py`(70 项 SQLTiny/SQLite 对比 + WAL 重启),覆盖上表绝大多数 ✅ 项;前者已注册 `CTest`。v1.1.0 另新增 `tests/dbx_probe.cpp`(58 断言)、`tests/test_stmt_prepare.py`(7 断言),见 §0 验证基线与 §8.2 C10。
 
 ---
 
@@ -630,10 +649,10 @@ SQLTiny 第一版可以简化:
 - [ ] `EXPLAIN`(最小版):输出 join type / 使用的索引 / 扫描行数
 
 #### P3 · Prepared Statement + 边缘兼容
-- [ ] `COM_STMT_PREPARE` / `COM_STMT_EXECUTE` / `COM_STMT_CLOSE` / `COM_STMT_RESET` — 二进制协议
+- [x] `COM_STMT_PREPARE` / `COM_STMT_EXECUTE` / `COM_STMT_CLOSE` / `COM_STMT_RESET` / `COM_STMT_SEND_LONG_DATA` — 二进制协议(**✅ v1.1.0**:参数全类型解码拼回 SQL 重放;SELECT/SHOW 用 NULL 占位探测列元数据;binary resultset 返回)
+- [x] `INFORMATION_SCHEMA.TABLES` / `COLUMNS` 等虚拟表(**✅ v1.1.0**:SCHEMATA / TABLES / COLUMNS / TABLE_CONSTRAINTS / KEY_COLUMN_USAGE / STATISTICS / TRIGGERS / ROUTINES / VIEWS / EVENTS,每查询物化)
 - [ ] `caching_sha2_password` 认证(MySQL 8.0 默认插件)
 - [ ] `CLIENT_SSL` 握手阶段
-- [ ] `INFORMATION_SCHEMA.TABLES` / `INFORMATION_SCHEMA.COLUMNS` 视图
 - [ ] 存储过程(PSM 子集):`CREATE PROCEDURE` / `CALL` / 变量 / IF / WHILE
 - [ ] B+Tree 替代 AVL(大表范围扫描更快)
 
@@ -651,7 +670,7 @@ SQLTiny 第一版可以简化:
 |---|---|---|
 | 语言标准 | C++20 | concepts、ranges、std::variant、std::jthread,让接口更干净 |
 | 构建 | CMake 3.20+ + vcpkg | 跨平台,Windows/VS2022 友好 |
-| 测试 | 自写 smoke(C++) + CTest + PyMySQL / SQLAlchemy / sqlite3 对比脚本 | 实际未引入 GoogleTest / GMock;7 个 CTest 目标 + 8 个 Python 端到端脚本 |
+| 测试 | 自写 smoke(C++) + CTest + PyMySQL / SQLAlchemy / sqlite3 对比脚本 | 实际未引入 GoogleTest / GMock;10 个 CTest 目标 + 8 个 Python 端到端脚本(v1.1.0 新增 `dbx_probe` / `test_stmt_prepare.py`) |
 | 日志 | `fmt::print` 输出到 stdout | 实际未引入 spdlog,保持单一外部依赖 |
 | 格式化 | fmtlib | 不依赖 iostream(vcpkg.json 中唯一的依赖) |
 | JSON | 未引入 | `nlohmann/json` 仍是可选,当前 SHOW CREATE TABLE 直接拼字符串 |
@@ -685,23 +704,23 @@ SQLTiny 第一版可以简化:
 ## 7. 里程碑交付节奏总览(实际)
 
 ```
-  M1 ──► M2 ──► M2.5 ──► M3 ──► M4 ──► M5 ──► M6 P0 ──► M6 P1(事务)
- 类型/   DDL/    协议    子查询   SHOW/    WAL     行锁 +    四隔离级别
- AVL/    DML/    接入    JOIN     多库     快照    事务管理  autocommit
- Lexer   Catalog                                  savepoint  WAL 缓冲
-  ✅      ✅       ✅      ✅       ✅      ✅       ✅         ✅
- ─────────────────────────────────────────────────────────────────────►
-  已完成:M1–M5 全部交付,M6 P0 与 P1 事务语义完成并纳入 CTest / Python 回归
-  待办:  M6 P1 边缘项 → P2 JOIN 优化 → P3 协议/认证 → P4 远期
+  M1 ──► M2 ──► M2.5 ──► M3 ──► M4 ──► M5 ──► M6 P0 ──► M6 P1(事务) ──► M6 P3(v1.1.0)
+ 类型/   DDL/    协议    子查询   SHOW/    WAL     行锁 +    四隔离级别    预编译语句 /
+ AVL/    DML/    接入    JOIN     多库     快照    事务管理  autocommit    information_schema
+ Lexer   Catalog                                  savepoint  WAL 缓冲      SHOW/CASE/EOF
+  ✅      ✅       ✅      ✅       ✅      ✅       ✅         ✅              ✅
+ ─────────────────────────────────────────────────────────────────────────────────────►
+  已完成:M1–M5、M6 P0 / P1 事务语义,以及 M6 P3 客户端兼容性(v1.1.0),均纳入 CTest / Python 回归
+  待办:  M6 P1 边缘项 → P2 JOIN 优化 → 认证(SSL / caching_sha2_password)→ P4 远期
 ```
 
-**下一步优先级(2026-11-11)**
+**下一步优先级(2026-11-12,v1.1.0 之后)**
 
-1. **协议层收尾**:`DESCRIBE` / `SHOW FULL TABLES` / `SHOW COLUMNS` 反射(§8.4 #6/#7 关联项)已在 9e752ba 落地;`FOR UPDATE` / `LOCK IN SHARE MODE`、等待队列与死锁检测、Prepared Statement(`COM_STMT_PREPARE`)、`INFORMATION_SCHEMA` 仍为后续项。
+1. **协议层收尾**:`DESCRIBE` / `SHOW FULL TABLES` 反射(9e752ba)、Prepared Statement(`COM_STMT_*`)、`INFORMATION_SCHEMA`、SHOW / CASE / EOF 帧兼容(v1.1.0)均已落地;**剩余**:`FOR UPDATE` / `LOCK IN SHARE MODE`、等待队列与死锁检测。
 2. **M6 P2**:JOIN 从 O(N×M) 升级为 Index Nested Loop / Hash Join,补 `EXPLAIN`。
 3. **版本回收**:`merge_expired_transactions()` 目前只清理冲突检测队列,`versions_` 不做压缩,长事务/长生命周期进程内存会增长,需补表压缩。
 4. **HSQLDB 语义 GAP**:补齐 §8.4 的三值逻辑、空集聚合、`COALESCE(SUM(...))` 与「SELECT 列表无聚合时的 GROUP BY/HAVING」,并按 §8.3 待补清单扩展 `TestSelfNot.txt` 真值表与解析器负向用例。
-5. **M6 P3 / P4**:Prepared Statement、`caching_sha2_password` / SSL、`INFORMATION_SCHEMA`、B+Tree、复制与更大的 HSQLDB TestSelf* 覆盖。
+5. **M6 P3 剩余 / P4**:`caching_sha2_password` / SSL、B+Tree、复制与更大的 HSQLDB TestSelf* 覆盖。
 
 ---
 
@@ -750,8 +769,9 @@ SQLTiny 第一版可以简化:
 | C07 | WAL / 快照 / 恢复 | `smoke_m5_wal.cpp`、`test_wal_recovery.py` | Replay、CRC 截断、Checkpoint、重启后数据与 UPDATE/DELETE 状态 | ✅ |
 | C08 | MySQL 协议 / 客户端兼容 | `smoke_m25_e2e.cpp`、`test_sqlalchemy.py` | 握手与 packet、COM_QUERY、OK/EOF/ERR;SQLAlchemy 15 组:Engine、Core DDL/CRUD、聚合、ORM、2.0 风格 select/insert/update/delete、`text():param`、Session rollback、relationship 级联、`engine.begin()` 事务块、类型映射(DateTime/Boolean/Float)、Inspector(`DESCRIBE`/`SHOW FULL TABLES` 已支持) | ✅ 33 PASS / 0 FAIL / 0 GAP |
 | C09 | 并发 / 性能 | `test_concurrency.py`、`test_perf_vs_sqlite.py` | 5 线程 15s 读写一致性、大数据量 INSERT + JOIN 对比 | ✅ 无 crash |
+| C10 | 第三方客户端兼容(v1.1.0) | `dbx_probe.cpp`、`test_stmt_prepare.py`、`smoke_m6_session_db.cpp` | 进程内跑 DBX/dbExpress 连接/元数据/事务典型 SQL(58 断言)、裸 socket 走 `COM_STMT_PREPARE/EXECUTE/CLOSE` binary protocol 全流程(7 断言)、多库会话级隔离、`smoke_m25_e2e` 适配经典 EOF 帧 | ✅ 58/58、7/7、PASS |
 
-**分层**:C01–C07 为进程内 C++ smoke(无需 server,纳入 `CTest`);C08–C09 需要 server(端口 3306 或由脚本自动起停的随机端口);`test_txn_vs_sqlite.py` 自带 server 生命周期管理。当前 `ctest` **8/8**。
+**分层**:C01–C07 为进程内 C++ smoke(无需 server,纳入 `CTest`);C08–C10 需要 server(端口 3306 或由脚本自动起停的随机端口);`test_txn_vs_sqlite.py` 自带 server 生命周期管理。当前 `ctest` **10/10**(10 个 CTest 目标,含 v1.1.0 新增的 `dbx_probe`;需先启动 3306 端口的 server 供 `smoke_m25_e2e` 连接)。
 
 ### 8.3 参考 HSQLDB 补充的测试点
 

@@ -53,3 +53,6 @@ Testing/
 
 # 个人笔记 / 推文草稿(不进版本控制)
 docs/
+
+# runtime data dir (--data-dir ./sqltiny_data)
+sqltiny_data/

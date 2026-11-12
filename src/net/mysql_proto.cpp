@@ -165,8 +165,10 @@ std::vector<uint8_t> encode_handshake_v10(uint32_t thread_id,
     for (int i = 0; i < 8 && i < static_cast<int>(auth_data.size()); ++i) w.write_u8(auth_data[i]);
     w.write_u8(0);  // filler
     // capability flags
+    // 注意:不广播 CLIENT_DEPRECATE_EOF —— 老客户端(如 dbExpress/DBX)只是原样回显
+    // 服务器广播的能力位,实际并不支持"无 EOF 包"的 8.0 协议,会卡在等 EOF 超时。
     uint32_t caps = CLIENT_PROTOCOL_41 | CLIENT_SECURE_CONNECTION | CLIENT_PLUGIN_AUTH |
-                    CLIENT_CONNECT_WITH_DB | CLIENT_DEPRECATE_EOF;
+                    CLIENT_CONNECT_WITH_DB;
     w.write_u16(caps & 0xffff);
     w.write_u8(33);  // character set (utf8mb4 = 45, 先用 latin1 = 8, 33=utf8)
     w.write_u16(SERVER_STATUS_AUTOCOMMIT);
@@ -205,6 +207,138 @@ static std::vector<uint8_t> encode_column_def(
     w.write_u16(flags);
     w.write_u8(0);                                // decimals
     w.write_u16(0);                               // reserved
+    return w.buf;
+}
+
+// ======== 预编译语句 (binary protocol) ========
+
+std::vector<uint8_t> encode_stmt_prepare_ok(uint32_t stmt_id, uint16_t num_columns,
+                                            uint16_t num_params, uint16_t warnings) {
+    PacketWriter w;
+    w.write_u8(MYSQL_PACKET_OK);   // 0x00
+    w.write_u32(stmt_id);
+    w.write_u16(num_columns);
+    w.write_u16(num_params);
+    w.write_u8(0);                 // reserved
+    w.write_u16(warnings);
+    return w.buf;
+}
+
+std::vector<uint8_t> encode_stmt_column_def(const std::string& name,
+                                            sqltiny::types::SqlType type) {
+    return encode_column_def("", name, type, true, false, false);
+}
+
+namespace {
+// SqlType → binary protocol 值编码类别
+enum class BinKind { Int1, Int2, Int4, Int8, Float4, Float8, DateTime, Str };
+
+BinKind binary_kind_of(sqltiny::types::SqlType t) {
+    using sqltiny::types::SqlType;
+    switch (t) {
+        case SqlType::TinyInt:  return BinKind::Int1;
+        case SqlType::SmallInt: return BinKind::Int2;
+        case SqlType::Int:      return BinKind::Int4;
+        case SqlType::BigInt:   return BinKind::Int8;
+        case SqlType::Float:    return BinKind::Float4;
+        case SqlType::Double:   return BinKind::Float8;
+        case SqlType::Date:
+        case SqlType::Time:
+        case SqlType::DateTime:
+        case SqlType::Timestamp:return BinKind::DateTime;
+        default:                return BinKind::Str;   // Varchar/Decimal/Json/Blob/Boolean → lenenc 字符串
+    }
+}
+
+void write_datetime(PacketWriter& w, const sqltiny::types::Value& v) {
+    // DATE/DATETIME/TIMESTAMP 的 binary 编码:长度字节 + 字段
+    int32_t year = 0; uint8_t month = 0, day = 0, hour = 0, minute = 0, second = 0; uint16_t millis = 0;
+    if (v.kind == sqltiny::types::Value::Kind::Date) {
+        year = v.v_date.year; month = v.v_date.month; day = v.v_date.day;
+    } else if (v.kind == sqltiny::types::Value::Kind::Time) {
+        hour = v.v_time.hour; minute = v.v_time.minute; second = v.v_time.second; millis = v.v_time.millis;
+    } else {
+        year = v.v_dt.year; month = v.v_dt.month; day = v.v_dt.day;
+        hour = v.v_dt.hour; minute = v.v_dt.minute; second = v.v_dt.second; millis = v.v_dt.millis;
+    }
+    uint16_t us = static_cast<uint16_t>(millis) * 1000;
+    if (hour == 0 && minute == 0 && second == 0 && us == 0) {
+        w.write_u8(4);   // date only
+        w.write_u16(static_cast<uint16_t>(year));
+        w.write_u8(month); w.write_u8(day);
+    } else if (us == 0) {
+        w.write_u8(7);
+        w.write_u16(static_cast<uint16_t>(year));
+        w.write_u8(month); w.write_u8(day);
+        w.write_u8(hour); w.write_u8(minute); w.write_u8(second);
+    } else {
+        w.write_u8(11);
+        w.write_u16(static_cast<uint16_t>(year));
+        w.write_u8(month); w.write_u8(day);
+        w.write_u8(hour); w.write_u8(minute); w.write_u8(second);
+        w.write_u32(us);
+    }
+}
+} // anonymous
+
+std::vector<uint8_t> encode_binary_row(const storage::Row& row,
+                                       const std::vector<sqltiny::types::SqlType>& col_types,
+                                       uint16_t status_flags) {
+    PacketWriter w;
+    w.write_u8(0x00);   // binary row header
+    size_t n = row.size();
+    size_t null_bytes = (n + 9) / 8;
+    size_t bm_pos = w.buf.size();
+    for (size_t i = 0; i < null_bytes; ++i) w.write_u8(0);
+    for (size_t i = 0; i < n; ++i) {
+        auto& v = row[i];
+        if (v.is_null()) {
+            size_t bit = i + 2;
+            w.buf[bm_pos + bit / 8] |= static_cast<uint8_t>(1u << (bit % 8));
+            continue;
+        }
+        BinKind bk = binary_kind_of(i < col_types.size() ? col_types[i] : sqltiny::types::SqlType::Varchar);
+        switch (bk) {
+            case BinKind::Int1: {
+                int64_t x = 0; v.try_to_int(x);
+                w.write_u8(static_cast<uint8_t>(x));
+                break;
+            }
+            case BinKind::Int2: {
+                int64_t x = 0; v.try_to_int(x);
+                w.write_u16(static_cast<uint16_t>(x));
+                break;
+            }
+            case BinKind::Int4: {
+                int64_t x = 0; v.try_to_int(x);
+                w.write_u32(static_cast<uint32_t>(x));
+                break;
+            }
+            case BinKind::Int8:
+                w.write_i64(v.v_int);
+                break;
+            case BinKind::Float4: {
+                double d = 0; v.try_to_double(d);
+                float f = static_cast<float>(d);
+                w.write_u32(0);   // placeholder to reserve
+                std::memcpy(&w.buf[w.buf.size() - 4], &f, 4);
+                break;
+            }
+            case BinKind::Float8: {
+                double d = 0; v.try_to_double(d);
+                w.write_u64(0);
+                std::memcpy(&w.buf[w.buf.size() - 8], &d, 8);
+                break;
+            }
+            case BinKind::DateTime:
+                write_datetime(w, v);
+                break;
+            case BinKind::Str:
+                w.write_lenenc_string(value_to_text(v));
+                break;
+        }
+    }
+    (void)status_flags;
     return w.buf;
 }
 

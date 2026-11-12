@@ -83,6 +83,13 @@ public:
     void bind_session(core::Session* s) { session_ = s; }
     core::Session* bound_session() const { return session_; }
 
+    /// information_schema 虚拟表解析:TABLES / COLUMNS。
+    /// 不是虚拟表返回 nullptr。每次调用都重新物化(数据很小)。
+    std::unique_ptr<storage::Table> build_information_schema_table(
+        const std::string& db_name, const std::string& table_name) const;
+    /// 是否 information_schema 限定名 (大小写不敏感)
+    static bool is_information_schema_name(const std::string& qualified);
+
 private:
     catalog::Catalog& catalog_;
     core::Session* session_ = nullptr;
@@ -100,6 +107,15 @@ private:
     ResultSet exec_show_create_database(const std::string& db_name);
     ResultSet exec_show_status();
     ResultSet exec_show_variables(const std::string& pattern = "");
+    ResultSet exec_show_engines();
+    ResultSet exec_show_plugins();
+    ResultSet exec_show_charset();
+    ResultSet exec_show_collation();
+    ResultSet exec_show_index(const std::string& db_name, const std::string& table_name);
+    ResultSet exec_show_table_status(const std::string& db_name, const std::string& pattern);
+    ResultSet exec_show_triggers();
+    ResultSet exec_show_processlist();
+    ResultSet exec_show_warnings();
 
     ResultSet exec_create_database(const ast::CreateDatabaseStmt& s);
     ResultSet exec_drop_database(const ast::DropDatabaseStmt& s);

@@ -11,11 +11,21 @@ namespace sqltiny::net {
 // ---------- 协议常量 ----------
 
 // capability flags
-constexpr uint32_t CLIENT_PROTOCOL_41       = 0x00000200;
+constexpr uint32_t CLIENT_LONG_PASSWORD      = 0x00000001;
+constexpr uint32_t CLIENT_LONG_FLAG          = 0x00000004;
+constexpr uint32_t CLIENT_CONNECT_WITH_DB    = 0x00000008;
+constexpr uint32_t CLIENT_NO_SCHEMA          = 0x00000010;
+constexpr uint32_t CLIENT_COMPRESS           = 0x00000020;
+constexpr uint32_t CLIENT_SSL                = 0x00000800;
+constexpr uint32_t CLIENT_PROTOCOL_41        = 0x00000200;
+constexpr uint32_t CLIENT_TRANSACTIONS       = 0x00002000;
 constexpr uint32_t CLIENT_SECURE_CONNECTION  = 0x00008000;
-constexpr uint32_t CLIENT_PLUGIN_AUTH       = 0x00080000;
-constexpr uint32_t CLIENT_CONNECT_WITH_DB   = 0x00000008;
-constexpr uint32_t CLIENT_DEPRECATE_EOF     = 0x01000000;
+constexpr uint32_t CLIENT_MULTI_STATEMENTS   = 0x00010000;
+constexpr uint32_t CLIENT_MULTI_RESULTS      = 0x00020000;
+constexpr uint32_t CLIENT_PLUGIN_AUTH        = 0x00080000;
+constexpr uint32_t CLIENT_PLUGIN_AUTH_LENENC = 0x00200000;
+constexpr uint32_t CLIENT_DEPRECATE_EOF      = 0x01000000;
+constexpr uint32_t CLIENT_SESSION_TRACK      = 0x02000000;
 
 // command ids
 constexpr uint8_t COM_SLEEP                 = 0x00;
@@ -23,9 +33,41 @@ constexpr uint8_t COM_QUIT                  = 0x01;
 constexpr uint8_t COM_INIT_DB               = 0x02;
 constexpr uint8_t COM_QUERY                 = 0x03;
 constexpr uint8_t COM_FIELD_LIST            = 0x04;
+constexpr uint8_t COM_STATISTICS            = 0x09;   // mysql_stat(): 响应是字符串包
+constexpr uint8_t COM_PROCESS_INFO          = 0x0a;   // SHOW PROCESSLIST
+constexpr uint8_t COM_PROCESS_KILL          = 0x0c;
+constexpr uint8_t COM_DEBUG                 = 0x0d;
 constexpr uint8_t COM_PING                  = 0x0e;
+constexpr uint8_t COM_CHANGE_USER           = 0x11;
 constexpr uint8_t COM_STMT_PREPARE          = 0x16;
 constexpr uint8_t COM_STMT_EXECUTE          = 0x17;
+constexpr uint8_t COM_STMT_SEND_LONG_DATA   = 0x18;
+constexpr uint8_t COM_STMT_CLOSE            = 0x19;
+constexpr uint8_t COM_STMT_RESET            = 0x1a;
+
+// MySQL 列类型 (binary protocol / column def)
+constexpr uint8_t MYSQL_TYPE_DECIMAL        = 0x00;
+constexpr uint8_t MYSQL_TYPE_TINY           = 0x01;
+constexpr uint8_t MYSQL_TYPE_SHORT          = 0x02;
+constexpr uint8_t MYSQL_TYPE_LONG           = 0x03;
+constexpr uint8_t MYSQL_TYPE_FLOAT          = 0x04;
+constexpr uint8_t MYSQL_TYPE_DOUBLE         = 0x05;
+constexpr uint8_t MYSQL_TYPE_NULL_TYPE      = 0x06;
+constexpr uint8_t MYSQL_TYPE_TIMESTAMP      = 0x07;
+constexpr uint8_t MYSQL_TYPE_LONGLONG       = 0x08;
+constexpr uint8_t MYSQL_TYPE_INT24          = 0x09;
+constexpr uint8_t MYSQL_TYPE_DATE           = 0x0a;
+constexpr uint8_t MYSQL_TYPE_TIME           = 0x0b;
+constexpr uint8_t MYSQL_TYPE_DATETIME       = 0x0c;
+constexpr uint8_t MYSQL_TYPE_YEAR           = 0x0d;
+constexpr uint8_t MYSQL_TYPE_VARCHAR        = 0x0f;
+constexpr uint8_t MYSQL_TYPE_BIT            = 0x10;
+constexpr uint8_t MYSQL_TYPE_JSON           = 0xf5;
+constexpr uint8_t MYSQL_TYPE_NEWDECIMAL     = 0xf6;
+constexpr uint8_t MYSQL_TYPE_BLOB           = 0xfc;
+constexpr uint8_t MYSQL_TYPE_VAR_STRING     = 0xfd;
+constexpr uint8_t MYSQL_TYPE_STRING         = 0xfe;
+constexpr uint16_t MYSQL_PARAM_UNSIGNED     = 0x8000;  // param type 第二字节的 unsigned 标志位
 
 // packet types sent by server
 constexpr uint8_t MYSQL_PACKET_OK           = 0x00;
@@ -164,6 +206,19 @@ std::vector<uint8_t> encode_eof_packet(uint16_t warnings, uint16_t status_flags)
 std::vector<std::vector<uint8_t>> encode_result_set(
     const executor::ResultSet& rs, bool deprecate_eof,
     uint16_t status_flags = SERVER_STATUS_AUTOCOMMIT);
+
+// ---------- 预编译语句 (binary protocol) ----------
+
+/// COM_STMT_PREPARE 的响应首包: 0x00 stmt_id num_cols num_params 0x00 warnings
+std::vector<uint8_t> encode_stmt_prepare_ok(uint32_t stmt_id, uint16_t num_columns,
+                                            uint16_t num_params, uint16_t warnings);
+/// 列/参数定义包
+std::vector<uint8_t> encode_stmt_column_def(const std::string& name,
+                                            sqltiny::types::SqlType type);
+/// binary result set 的一行 (header 0x00 + null bitmap offset 2 + 值)
+std::vector<uint8_t> encode_binary_row(const storage::Row& row,
+                                       const std::vector<sqltiny::types::SqlType>& col_types,
+                                       uint16_t status_flags);
 
 // 辅助
 std::string value_to_text(const sqltiny::types::Value& v);

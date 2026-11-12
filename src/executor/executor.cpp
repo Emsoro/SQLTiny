@@ -3,6 +3,8 @@
 #include <fmt/format.h>
 #include <algorithm>
 #include <functional>
+#include <cctype>
+#include <cstring>
 #include <cstdio>
 #include <set>
 #include <map>
@@ -62,6 +64,15 @@ ResultSet Executor::execute(const ast::Statement& stmt) {
                 case ast::ShowStmt::Kind::CreateDatabase: return exec_show_create_database(sh.table_or_pattern);
                 case ast::ShowStmt::Kind::Status:      return exec_show_status();
                 case ast::ShowStmt::Kind::Variables:   return exec_show_variables(sh.table_or_pattern);
+                case ast::ShowStmt::Kind::Engines:     return exec_show_engines();
+                case ast::ShowStmt::Kind::Plugins:     return exec_show_plugins();
+                case ast::ShowStmt::Kind::Charset:     return exec_show_charset();
+                case ast::ShowStmt::Kind::Collation:   return exec_show_collation();
+                case ast::ShowStmt::Kind::Index:       return exec_show_index(sh.db_name, sh.table_or_pattern);
+                case ast::ShowStmt::Kind::TableStatus: return exec_show_table_status(sh.db_name, sh.table_or_pattern);
+                case ast::ShowStmt::Kind::Triggers:    return exec_show_triggers();
+                case ast::ShowStmt::Kind::ProcessList: return exec_show_processlist();
+                case ast::ShowStmt::Kind::Warnings:    return exec_show_warnings();
             }
             break;
         }
@@ -448,6 +459,12 @@ ResultSet Executor::exec_select(const ast::SelectStmt& s) {
                 }
             }
         }
+        if (e.kind == ast::ExprKind::Case) {
+            // CASE 的结果类型取第一个 THEN 分支
+            if (!e.case_whens.empty() && e.case_whens[0].second)
+                return infer_type(*e.case_whens[0].second, slots);
+            return SqlType::Varchar;
+        }
         if (e.kind == ast::ExprKind::Literal) {
             switch (e.literal.kind) {
                 case Value::Kind::Int64:  return SqlType::BigInt;
@@ -493,9 +510,19 @@ ResultSet Executor::exec_select(const ast::SelectStmt& s) {
         return r;
     }
 
-    // FROM 首表
+    // FROM 首表 —— information_schema.TABLES / COLUMNS 走虚拟表 (元数据客户端常用)
     std::string primary_table = s.from_tables[0];
-    auto* tbl = catalog_.get_table(primary_table, default_db());
+    std::vector<std::unique_ptr<storage::Table>> virtual_tables;   // 保活虚拟表
+    auto resolve_table = [&](const std::string& name) -> storage::Table* {
+        if (is_information_schema_name(name)) {
+            auto dot = name.find('.');
+            virtual_tables.push_back(build_information_schema_table(
+                name.substr(0, dot), name.substr(dot + 1)));
+            return virtual_tables.back().get();
+        }
+        return catalog_.get_table(name, default_db());
+    };
+    auto* tbl = resolve_table(primary_table);
     if (!tbl) {
         r.ok = false; r.mysql_errno = 1146; r.sql_state = "42S02";
         r.error_message = fmt::format("Table '{}' doesn't exist", primary_table);
@@ -523,7 +550,7 @@ ResultSet Executor::exec_select(const ast::SelectStmt& s) {
 
     // JOIN 表
     for (auto& jc : s.joins) {
-        auto* jtbl = catalog_.get_table(jc.table_name, default_db());
+        auto* jtbl = resolve_table(jc.table_name);
         if (!jtbl) {
             r.ok = false; r.mysql_errno = 1146; r.sql_state = "42S02";
             r.error_message = fmt::format("Table '{}' doesn't exist", jc.table_name);
@@ -566,7 +593,7 @@ ResultSet Executor::exec_select(const ast::SelectStmt& s) {
     tbl->for_each_visible(sqscn, [&](int64_t, const storage::Row& row) { left_rows.push_back(row); return true; }, rtxn);
 
     for (auto& jc : s.joins) {
-        auto* jtbl = catalog_.get_table(jc.table_name, default_db());
+        auto* jtbl = resolve_table(jc.table_name);
         std::vector<storage::Row> right_rows;
         jtbl->for_each_visible(sqscn, [&](int64_t, const storage::Row& row) { right_rows.push_back(row); return true; }, rtxn);
 
@@ -1182,6 +1209,669 @@ ResultSet Executor::exec_show_variables(const std::string& pattern) {
         if (match(k.c_str()))
             r.rows.push_back({ types::Value::make_string(k), types::Value::make_string(v) });
     return r;
+}
+
+// ---------- SHOW ENGINES / PLUGINS / CHARSET / COLLATION ----------
+ResultSet Executor::exec_show_engines() {
+    ResultSet r;
+    r.column_names = { "Engine", "Support", "Comment", "Transactions", "XA", "Savepoints" };
+    r.column_types = { types::SqlType::Varchar, types::SqlType::Varchar, types::SqlType::Varchar,
+                       types::SqlType::Varchar, types::SqlType::Varchar, types::SqlType::Varchar };
+    r.rows.push_back({ types::Value::make_string("InnoDB"), types::Value::make_string("DEFAULT"),
+        types::Value::make_string("Supports transactions, row-level locking, and foreign keys"),
+        types::Value::make_string("YES"), types::Value::make_string("YES"), types::Value::make_string("YES") });
+    r.rows.push_back({ types::Value::make_string("MEMORY"), types::Value::make_string("YES"),
+        types::Value::make_string("Hash based, stored in memory, useful for temporary tables"),
+        types::Value::make_string("NO"), types::Value::make_string("NO"), types::Value::make_string("NO") });
+    r.rows.push_back({ types::Value::make_string("CSV"), types::Value::make_string("YES"),
+        types::Value::make_string("CSV storage engine"),
+        types::Value::make_string("NO"), types::Value::make_string("NO"), types::Value::make_string("NO") });
+    return r;
+}
+
+ResultSet Executor::exec_show_plugins() {
+    ResultSet r;
+    r.column_names = { "Name", "Status", "Type", "Library", "License" };
+    r.column_types = { types::SqlType::Varchar, types::SqlType::Varchar, types::SqlType::Varchar,
+                       types::SqlType::Varchar, types::SqlType::Varchar };
+    struct Row3 { const char* name; const char* status; const char* type; };
+    static const Row3 rows[] = {
+        {"binlog", "ACTIVE", "SERVER"}, {"InnoDB", "ACTIVE", "STORAGE ENGINE"},
+        {"CSV", "ACTIVE", "STORAGE ENGINE"}, {"MEMORY", "ACTIVE", "STORAGE ENGINE"},
+        {"mysql_native_password", "ACTIVE", "AUTHENTICATION"},
+        {"sha256_password", "ACTIVE", "AUTHENTICATION"},
+    };
+    for (auto& row : rows)
+        r.rows.push_back({ types::Value::make_string(row.name), types::Value::make_string(row.status),
+                           types::Value::make_string(row.type), types::Value::make_null(),
+                           types::Value::make_string("GPL") });
+    return r;
+}
+
+ResultSet Executor::exec_show_charset() {
+    ResultSet r;
+    r.column_names = { "Charset", "Description", "Default collation", "Maxlen" };
+    r.column_types = { types::SqlType::Varchar, types::SqlType::Varchar,
+                       types::SqlType::Varchar, types::SqlType::Int };
+    struct Cs { const char* name; const char* desc; const char* coll; int maxlen; };
+    static const Cs rows[] = {
+        {"utf8mb4", "UTF-8 Unicode", "utf8mb4_general_ci", 4},
+        {"utf8",    "UTF-8 Unicode", "utf8_general_ci", 3},
+        {"latin1",  "cp1252 West European", "latin1_swedish_ci", 1},
+    };
+    for (auto& row : rows)
+        r.rows.push_back({ types::Value::make_string(row.name), types::Value::make_string(row.desc),
+                           types::Value::make_string(row.coll), types::Value::make_int(row.maxlen) });
+    return r;
+}
+
+ResultSet Executor::exec_show_collation() {
+    ResultSet r;
+    r.column_names = { "Collation", "Charset", "Id", "Default", "Compiled", "Sortlen" };
+    r.column_types = { types::SqlType::Varchar, types::SqlType::Varchar, types::SqlType::Int,
+                       types::SqlType::Varchar, types::SqlType::Varchar, types::SqlType::Int };
+    struct Cl { const char* coll; const char* cs; int id; bool dflt; };
+    static const Cl rows[] = {
+        {"utf8mb4_general_ci", "utf8mb4", 45, true},
+        {"utf8mb4_bin",        "utf8mb4", 46, false},
+        {"utf8_general_ci",    "utf8",    33, true},
+        {"utf8_bin",           "utf8",    83, false},
+        {"latin1_swedish_ci",  "latin1",   8, true},
+    };
+    for (auto& row : rows)
+        r.rows.push_back({ types::Value::make_string(row.coll), types::Value::make_string(row.cs),
+                           types::Value::make_int(row.id),
+                           types::Value::make_string(row.dflt ? "Yes" : ""),
+                           types::Value::make_string("Yes"), types::Value::make_int(1) });
+    return r;
+}
+
+// ---------- SHOW INDEX / KEYS FROM tbl ----------
+ResultSet Executor::exec_show_index(const std::string& db_name, const std::string& table_name) {
+    ResultSet r;
+    r.column_names = { "Table", "Non_unique", "Key_name", "Seq_in_index", "Column_name",
+                       "Collation", "Cardinality", "Sub_part", "Packed", "Null",
+                       "Index_type", "Comment", "Index_comment" };
+    r.column_types = { types::SqlType::Varchar, types::SqlType::Int, types::SqlType::Varchar,
+                       types::SqlType::Int, types::SqlType::Varchar, types::SqlType::Varchar,
+                       types::SqlType::Int, types::SqlType::Int, types::SqlType::Varchar,
+                       types::SqlType::Varchar, types::SqlType::Varchar, types::SqlType::Varchar,
+                       types::SqlType::Varchar };
+    std::string qualified = db_name.empty() ? table_name : db_name + "." + table_name;
+    auto* tbl = catalog_.get_table(qualified, default_db());
+    if (!tbl) {
+        r.ok = false; r.mysql_errno = 1146; r.sql_state = "42S02";
+        r.error_message = fmt::format("Table '{}' doesn't exist", qualified);
+        return r;
+    }
+    auto& def = tbl->def();
+    // 主键 → PRIMARY 索引行
+    if (!def.primary_key_cols.empty()) {
+        int seq = 1;
+        for (auto& col : def.primary_key_cols[0]) {
+            r.rows.push_back({
+                types::Value::make_string(def.name),
+                types::Value::make_int(0),                    // Non_unique: PK 是 0
+                types::Value::make_string("PRIMARY"),
+                types::Value::make_int(seq++),
+                types::Value::make_string(col),
+                types::Value::make_string("A"),               // Collation: 升序
+                types::Value::make_int(static_cast<int64_t>(tbl->row_count())),
+                types::Value::make_null(), types::Value::make_null(),
+                types::Value::make_string(""),                // Null: PK 列非空
+                types::Value::make_string("BTREE"),
+                types::Value::make_string(""), types::Value::make_string(""),
+            });
+        }
+    }
+    // 次级索引
+    for (auto& [idx_name, idx] : def.indexes) {
+        int seq = 1;
+        for (auto& col : idx.columns) {
+            int ci = def.column_index(col);
+            bool nullable = (ci >= 0) && def.columns[static_cast<size_t>(ci)].nullable;
+            r.rows.push_back({
+                types::Value::make_string(def.name),
+                types::Value::make_int(idx.unique ? 0 : 1),
+                types::Value::make_string(idx_name),
+                types::Value::make_int(seq++),
+                types::Value::make_string(col),
+                types::Value::make_string("A"),
+                types::Value::make_int(static_cast<int64_t>(tbl->row_count())),
+                types::Value::make_null(), types::Value::make_null(),
+                types::Value::make_string(nullable ? "YES" : ""),
+                types::Value::make_string("BTREE"),
+                types::Value::make_string(""), types::Value::make_string(""),
+            });
+        }
+    }
+    return r;
+}
+
+// ---------- SHOW TABLE STATUS [FROM db] [LIKE 'pat'] ----------
+ResultSet Executor::exec_show_table_status(const std::string& db_name, const std::string& pattern) {
+    ResultSet r;
+    r.column_names = { "Name", "Engine", "Version", "Row_format", "Rows", "Avg_row_length",
+                       "Data_length", "Max_data_length", "Index_length", "Data_free",
+                       "Auto_increment", "Create_time", "Update_time", "Check_time",
+                       "Collation", "Checksum", "Create_options", "Comment" };
+    r.column_types.assign(18, types::SqlType::Varchar);
+    r.column_types[2] = types::SqlType::Int;
+    r.column_types[4] = types::SqlType::Int;
+    r.column_types[5] = types::SqlType::Int;
+    r.column_types[6] = types::SqlType::Int;
+    r.column_types[7] = types::SqlType::Int;
+    r.column_types[8] = types::SqlType::Int;
+    r.column_types[9] = types::SqlType::Int;
+    r.column_types[10] = types::SqlType::Int;
+
+    std::string db = db_name.empty() ? default_db() : db_name;
+    std::string p = pattern;
+    if (p.size() >= 2 && p.front() == '\'' && p.back() == '\'') p = p.substr(1, p.size() - 2);
+    auto match_pattern = [&](const std::string& name) -> bool {
+        if (p.empty() || p == "%" || p == "%%") return true;
+        if (p.size() >= 2 && p.front() == '%' && p.back() == '%')
+            return name.find(p.substr(1, p.size() - 2)) != std::string::npos;
+        if (p.back() == '%') return name.starts_with(p.substr(0, p.size() - 1));
+        if (p.front() == '%') return name.ends_with(p.substr(1));
+        return name == p;
+    };
+    for (auto& n : catalog_.table_names(db)) {
+        if (!match_pattern(n)) continue;
+        auto* tbl = catalog_.get_table(n, db);
+        int64_t rows = tbl ? static_cast<int64_t>(tbl->row_count()) : 0;
+        int64_t auto_inc = 0;
+        if (tbl) {
+            int64_t cur = tbl->auto_inc_cursor();
+            auto_inc = cur > 0 ? cur + 1 : 1;
+        }
+        r.rows.push_back({
+            types::Value::make_string(n),
+            types::Value::make_string("InnoDB"),
+            types::Value::make_int(10),
+            types::Value::make_string("Dynamic"),
+            types::Value::make_int(rows),
+            types::Value::make_int(0),
+            types::Value::make_int(16384),
+            types::Value::make_null(),
+            types::Value::make_int(0),
+            types::Value::make_int(0),
+            auto_inc > 0 ? types::Value::make_int(auto_inc) : types::Value::make_null(),
+            types::Value::make_null(), types::Value::make_null(), types::Value::make_null(),
+            types::Value::make_string("utf8mb4_general_ci"),
+            types::Value::make_null(),
+            types::Value::make_string(""),
+            types::Value::make_string(""),
+        });
+    }
+    return r;
+}
+
+// ---------- SHOW PROCESSLIST / WARNINGS ----------
+ResultSet Executor::exec_show_triggers() {
+    ResultSet r;
+    r.column_names = { "Trigger", "Event", "Table", "Statement", "Timing", "Created",
+                       "sql_mode", "Definer", "character_set_client",
+                       "collation_connection", "Database Collation" };
+    r.column_types.assign(r.column_names.size(), types::SqlType::Varchar);
+    // SQLTiny 不支持触发器 —— 返回结构正确的空结果集
+    return r;
+}
+
+ResultSet Executor::exec_show_processlist() {
+    ResultSet r;
+    r.column_names = { "Id", "User", "Host", "db", "Command", "Time", "State", "Info" };
+    r.column_types = { types::SqlType::BigInt, types::SqlType::Varchar, types::SqlType::Varchar,
+                       types::SqlType::Varchar, types::SqlType::Varchar, types::SqlType::Int,
+                       types::SqlType::Varchar, types::SqlType::Varchar };
+    r.rows.push_back({
+        types::Value::make_int(1), types::Value::make_string("root"),
+        types::Value::make_string("localhost:0"),
+        session_ ? types::Value::make_string(session_->current_database) : types::Value::make_null(),
+        types::Value::make_string("Query"), types::Value::make_int(0),
+        types::Value::make_string("starting"), types::Value::make_null(),
+    });
+    return r;
+}
+
+ResultSet Executor::exec_show_warnings() {
+    ResultSet r;
+    r.column_names = { "Level", "Code", "Message" };
+    r.column_types = { types::SqlType::Varchar, types::SqlType::Int, types::SqlType::Varchar };
+    // 无 warning 队列实现 —— 返回空结果集(0 行)
+    return r;
+}
+
+// ---------- information_schema 虚拟表 (TABLES / COLUMNS) ----------
+bool Executor::is_information_schema_name(const std::string& qualified) {
+    auto dot = qualified.find('.');
+    if (dot == std::string::npos) return false;
+    std::string db = qualified.substr(0, dot);
+    std::string tbl = qualified.substr(dot + 1);
+    auto ci_eq = [](const std::string& a, const char* b) {
+        if (a.size() != std::strlen(b)) return false;
+        for (size_t i = 0; i < a.size(); ++i)
+            if (std::tolower(static_cast<unsigned char>(a[i])) !=
+                std::tolower(static_cast<unsigned char>(b[i]))) return false;
+        return true;
+    };
+    if (!ci_eq(db, "information_schema")) return false;
+    return ci_eq(tbl, "TABLES") || ci_eq(tbl, "COLUMNS") || ci_eq(tbl, "SCHEMATA") ||
+           ci_eq(tbl, "TRIGGERS") || ci_eq(tbl, "ROUTINES") || ci_eq(tbl, "EVENTS") ||
+           ci_eq(tbl, "VIEWS") || ci_eq(tbl, "TABLE_CONSTRAINTS") ||
+           ci_eq(tbl, "KEY_COLUMN_USAGE") || ci_eq(tbl, "STATISTICS");
+}
+
+namespace {
+// 列类型 → MySQL 风格类型字符串 (DATA_TYPE / COLUMN_TYPE 共用)
+std::string is_data_type(const ast::ColumnDef& col) {
+    switch (col.type.type) {
+        case types::SqlType::BigInt:   return "bigint";
+        case types::SqlType::Int:      return "int";
+        case types::SqlType::SmallInt: return "smallint";
+        case types::SqlType::TinyInt:  return "tinyint";
+        case types::SqlType::Double:   return "double";
+        case types::SqlType::Float:    return "float";
+        case types::SqlType::Decimal:  return "decimal";
+        case types::SqlType::Varchar:  return "varchar";
+        case types::SqlType::Char:     return "char";
+        case types::SqlType::Text:     return "text";
+        case types::SqlType::Blob:     return "blob";
+        case types::SqlType::Date:     return "date";
+        case types::SqlType::Time:     return "time";
+        case types::SqlType::DateTime: return "datetime";
+        case types::SqlType::Timestamp:return "timestamp";
+        case types::SqlType::Boolean:  return "tinyint";
+        case types::SqlType::Json:     return "json";
+        default: return "unknown";
+    }
+}
+std::string is_column_type(const ast::ColumnDef& col) {
+    std::string base = is_data_type(col);
+    switch (col.type.type) {
+        case types::SqlType::Int:      return "int(11)";
+        case types::SqlType::BigInt:   return col.type.unsigned_ ? "bigint(20) unsigned" : "bigint(20)";
+        case types::SqlType::TinyInt:  return col.type.type == types::SqlType::Boolean ? "tinyint(1)" : "tinyint(4)";
+        case types::SqlType::SmallInt: return "smallint(6)";
+        case types::SqlType::Decimal:  return fmt::format("decimal({},{})", col.type.length ? col.type.length : 10, col.type.scale);
+        case types::SqlType::Varchar:  return fmt::format("varchar({})", col.type.length ? col.type.length : 255);
+        case types::SqlType::Char:     return fmt::format("char({})", col.type.length ? col.type.length : 1);
+        default: return base;
+    }
+}
+ast::ColumnDef is_col(const char* name, types::SqlType t) {
+    ast::ColumnDef c;
+    c.name = name;
+    types::TypeInfo ti;
+    ti.type = t;
+    ti.nullable = true;
+    c.type = ti;
+    return c;
+}
+} // anonymous
+
+std::unique_ptr<storage::Table> Executor::build_information_schema_table(
+        const std::string& db_name, const std::string& table_name) const {
+    auto ci_eq = [](const std::string& a, const char* b) {
+        if (a.size() != std::strlen(b)) return false;
+        for (size_t i = 0; i < a.size(); ++i)
+            if (std::tolower(static_cast<unsigned char>(a[i])) !=
+                std::tolower(static_cast<unsigned char>(b[i]))) return false;
+        return true;
+    };
+
+    if (ci_eq(table_name, "TABLES")) {
+        storage::TableDef def;
+        def.name = "TABLES";
+        def.columns = {
+            is_col("TABLE_CATALOG",   types::SqlType::Varchar),
+            is_col("TABLE_SCHEMA",    types::SqlType::Varchar),
+            is_col("TABLE_NAME",      types::SqlType::Varchar),
+            is_col("TABLE_TYPE",      types::SqlType::Varchar),
+            is_col("ENGINE",          types::SqlType::Varchar),
+            is_col("VERSION",         types::SqlType::Int),
+            is_col("ROW_FORMAT",      types::SqlType::Varchar),
+            is_col("TABLE_ROWS",      types::SqlType::BigInt),
+            is_col("AVG_ROW_LENGTH",  types::SqlType::BigInt),
+            is_col("DATA_LENGTH",     types::SqlType::BigInt),
+            is_col("MAX_DATA_LENGTH", types::SqlType::BigInt),
+            is_col("INDEX_LENGTH",    types::SqlType::BigInt),
+            is_col("DATA_FREE",       types::SqlType::BigInt),
+            is_col("AUTO_INCREMENT",  types::SqlType::BigInt),
+            is_col("CREATE_TIME",     types::SqlType::DateTime),
+            is_col("UPDATE_TIME",     types::SqlType::DateTime),
+            is_col("CHECK_TIME",      types::SqlType::DateTime),
+            is_col("TABLE_COLLATION", types::SqlType::Varchar),
+            is_col("CHECKSUM",        types::SqlType::BigInt),
+            is_col("CREATE_OPTIONS",  types::SqlType::Varchar),
+            is_col("TABLE_COMMENT",   types::SqlType::Varchar),
+        };
+        auto tbl = std::make_unique<storage::Table>(std::move(def));
+        for (auto& db : catalog_.list_databases()) {
+            for (auto& n : catalog_.table_names(db)) {
+                auto* t = catalog_.get_table(n, db);
+                int64_t rows = t ? static_cast<int64_t>(t->row_count()) : 0;
+                int64_t auto_inc = 0;
+                if (t) {
+                    int64_t cur = t->auto_inc_cursor();
+                    auto_inc = cur > 0 ? cur + 1 : 1;
+                }
+                tbl->insert({
+                    types::Value::make_string("def"),
+                    types::Value::make_string(db),
+                    types::Value::make_string(n),
+                    types::Value::make_string("BASE TABLE"),
+                    types::Value::make_string("InnoDB"),
+                    types::Value::make_int(10),
+                    types::Value::make_string("Dynamic"),
+                    types::Value::make_int(rows),
+                    types::Value::make_int(0),
+                    types::Value::make_int(16384),
+                    types::Value::make_null(),
+                    types::Value::make_int(0),
+                    types::Value::make_int(0),
+                    auto_inc > 0 ? types::Value::make_int(auto_inc) : types::Value::make_null(),
+                    types::Value::make_null(), types::Value::make_null(), types::Value::make_null(),
+                    types::Value::make_string("utf8mb4_general_ci"),
+                    types::Value::make_null(),
+                    types::Value::make_string(""),
+                    types::Value::make_string(""),
+                });
+            }
+        }
+        return tbl;
+    }
+
+    if (ci_eq(table_name, "SCHEMATA")) {
+        storage::TableDef def;
+        def.name = "SCHEMATA";
+        def.columns = {
+            is_col("CATALOG_NAME",              types::SqlType::Varchar),
+            is_col("SCHEMA_NAME",               types::SqlType::Varchar),
+            is_col("DEFAULT_CHARACTER_SET_NAME",types::SqlType::Varchar),
+            is_col("DEFAULT_COLLATION_NAME",    types::SqlType::Varchar),
+            is_col("SQL_PATH",                  types::SqlType::Varchar),
+        };
+        auto tbl = std::make_unique<storage::Table>(std::move(def));
+        for (auto& db : catalog_.list_databases()) {
+            tbl->insert({
+                types::Value::make_string("def"),
+                types::Value::make_string(db),
+                types::Value::make_string("utf8mb4"),
+                types::Value::make_string("utf8mb4_general_ci"),
+                types::Value::make_null(),
+            });
+        }
+        return tbl;
+    }
+
+    // ---- 无对象的元数据表:SQLTiny 不支持触发器/存储过程/事件/视图/外键约束,
+    //      返回结构正确但 0 行的结果,客户端(Navicat 类工具)即可正常加载 ----
+    auto make_empty = [](const char* name, std::vector<ast::ColumnDef> cols) {
+        storage::TableDef def;
+        def.name = name;
+        def.columns = std::move(cols);
+        return std::make_unique<storage::Table>(std::move(def));
+    };
+
+    if (ci_eq(table_name, "TRIGGERS")) {
+        std::vector<ast::ColumnDef> cols = {
+            is_col("TRIGGER_CATALOG", types::SqlType::Varchar),
+            is_col("TRIGGER_SCHEMA", types::SqlType::Varchar),
+            is_col("TRIGGER_NAME", types::SqlType::Varchar),
+            is_col("EVENT_MANIPULATION", types::SqlType::Varchar),
+            is_col("EVENT_OBJECT_CATALOG", types::SqlType::Varchar),
+            is_col("EVENT_OBJECT_SCHEMA", types::SqlType::Varchar),
+            is_col("EVENT_OBJECT_TABLE", types::SqlType::Varchar),
+            is_col("ACTION_ORDER", types::SqlType::BigInt),
+            is_col("ACTION_CONDITION", types::SqlType::Text),
+            is_col("ACTION_STATEMENT", types::SqlType::Text),
+            is_col("ACTION_ORIENTATION", types::SqlType::Varchar),
+            is_col("ACTION_TIMING", types::SqlType::Varchar),
+            is_col("ACTION_REFERENCE_OLD_TABLE", types::SqlType::Varchar),
+            is_col("ACTION_REFERENCE_NEW_TABLE", types::SqlType::Varchar),
+            is_col("ACTION_REFERENCE_OLD_ROW", types::SqlType::Varchar),
+            is_col("ACTION_REFERENCE_NEW_ROW", types::SqlType::Varchar),
+            is_col("CREATED", types::SqlType::DateTime),
+            is_col("SQL_MODE", types::SqlType::Varchar),
+            is_col("DEFINER", types::SqlType::Varchar),
+            is_col("CHARACTER_SET_CLIENT", types::SqlType::Varchar),
+            is_col("COLLATION_CONNECTION", types::SqlType::Varchar),
+            is_col("DATABASE_COLLATION", types::SqlType::Varchar),
+        };
+        return make_empty("TRIGGERS", std::move(cols));
+    }
+
+    if (ci_eq(table_name, "ROUTINES")) {
+        std::vector<ast::ColumnDef> cols = {
+            is_col("SPECIFIC_CATALOG", types::SqlType::Varchar),
+            is_col("SPECIFIC_SCHEMA", types::SqlType::Varchar),
+            is_col("SPECIFIC_NAME", types::SqlType::Varchar),
+            is_col("ROUTINE_CATALOG", types::SqlType::Varchar),
+            is_col("ROUTINE_SCHEMA", types::SqlType::Varchar),
+            is_col("ROUTINE_NAME", types::SqlType::Varchar),
+            is_col("ROUTINE_TYPE", types::SqlType::Varchar),
+            is_col("DATA_TYPE", types::SqlType::Varchar),
+            is_col("CHARACTER_MAXIMUM_LENGTH", types::SqlType::BigInt),
+            is_col("CHARACTER_OCTET_LENGTH", types::SqlType::BigInt),
+            is_col("NUMERIC_PRECISION", types::SqlType::BigInt),
+            is_col("NUMERIC_SCALE", types::SqlType::BigInt),
+            is_col("DATETIME_PRECISION", types::SqlType::BigInt),
+            is_col("CHARACTER_SET_NAME", types::SqlType::Varchar),
+            is_col("COLLATION_NAME", types::SqlType::Varchar),
+            is_col("DTD_IDENTIFIER", types::SqlType::Text),
+            is_col("ROUTINE_BODY", types::SqlType::Varchar),
+            is_col("ROUTINE_DEFINITION", types::SqlType::Text),
+            is_col("EXTERNAL_NAME", types::SqlType::Text),
+            is_col("EXTERNAL_LANGUAGE", types::SqlType::Varchar),
+            is_col("PARAMETER_STYLE", types::SqlType::Varchar),
+            is_col("IS_DETERMINISTIC", types::SqlType::Varchar),
+            is_col("SQL_DATA_ACCESS", types::SqlType::Varchar),
+            is_col("SQL_PATH", types::SqlType::Varchar),
+            is_col("SECURITY_TYPE", types::SqlType::Varchar),
+            is_col("CREATED", types::SqlType::DateTime),
+            is_col("LAST_ALTERED", types::SqlType::DateTime),
+            is_col("SQL_MODE", types::SqlType::Varchar),
+            is_col("ROUTINE_COMMENT", types::SqlType::Text),
+            is_col("DEFINER", types::SqlType::Varchar),
+            is_col("CHARACTER_SET_CLIENT", types::SqlType::Varchar),
+            is_col("COLLATION_CONNECTION", types::SqlType::Varchar),
+            is_col("DATABASE_COLLATION", types::SqlType::Varchar),
+        };
+        return make_empty("ROUTINES", std::move(cols));
+    }
+
+    if (ci_eq(table_name, "EVENTS")) {
+        std::vector<ast::ColumnDef> cols = {
+            is_col("EVENT_CATALOG", types::SqlType::Varchar),
+            is_col("EVENT_SCHEMA", types::SqlType::Varchar),
+            is_col("EVENT_NAME", types::SqlType::Varchar),
+            is_col("DEFINER", types::SqlType::Varchar),
+            is_col("TIME_ZONE", types::SqlType::Varchar),
+            is_col("EVENT_BODY", types::SqlType::Varchar),
+            is_col("EVENT_DEFINITION", types::SqlType::Text),
+            is_col("EVENT_TYPE", types::SqlType::Varchar),
+            is_col("EXECUTE_AT", types::SqlType::DateTime),
+            is_col("INTERVAL_VALUE", types::SqlType::Varchar),
+            is_col("INTERVAL_FIELD", types::SqlType::Varchar),
+            is_col("SQL_MODE", types::SqlType::Varchar),
+            is_col("STARTS", types::SqlType::DateTime),
+            is_col("ENDS", types::SqlType::DateTime),
+            is_col("STATUS", types::SqlType::Varchar),
+            is_col("ON_COMPLETION", types::SqlType::Varchar),
+            is_col("CREATED", types::SqlType::DateTime),
+            is_col("LAST_ALTERED", types::SqlType::DateTime),
+            is_col("LAST_EXECUTED", types::SqlType::DateTime),
+            is_col("EVENT_COMMENT", types::SqlType::Varchar),
+            is_col("ORIGINATOR", types::SqlType::BigInt),
+            is_col("CHARACTER_SET_CLIENT", types::SqlType::Varchar),
+            is_col("COLLATION_CONNECTION", types::SqlType::Varchar),
+            is_col("DATABASE_COLLATION", types::SqlType::Varchar),
+        };
+        return make_empty("EVENTS", std::move(cols));
+    }
+
+    if (ci_eq(table_name, "VIEWS")) {
+        std::vector<ast::ColumnDef> cols = {
+            is_col("TABLE_CATALOG", types::SqlType::Varchar),
+            is_col("TABLE_SCHEMA", types::SqlType::Varchar),
+            is_col("TABLE_NAME", types::SqlType::Varchar),
+            is_col("VIEW_DEFINITION", types::SqlType::Text),
+            is_col("CHECK_OPTION", types::SqlType::Varchar),
+            is_col("IS_UPDATABLE", types::SqlType::Varchar),
+            is_col("DEFINER", types::SqlType::Varchar),
+            is_col("SECURITY_TYPE", types::SqlType::Varchar),
+            is_col("CHARACTER_SET_CLIENT", types::SqlType::Varchar),
+            is_col("COLLATION_CONNECTION", types::SqlType::Varchar),
+        };
+        return make_empty("VIEWS", std::move(cols));
+    }
+
+    if (ci_eq(table_name, "TABLE_CONSTRAINTS")) {
+        std::vector<ast::ColumnDef> cols = {
+            is_col("CONSTRAINT_CATALOG", types::SqlType::Varchar),
+            is_col("CONSTRAINT_SCHEMA", types::SqlType::Varchar),
+            is_col("CONSTRAINT_NAME", types::SqlType::Varchar),
+            is_col("TABLE_SCHEMA", types::SqlType::Varchar),
+            is_col("TABLE_NAME", types::SqlType::Varchar),
+            is_col("CONSTRAINT_TYPE", types::SqlType::Varchar),
+            is_col("ENFORCED", types::SqlType::Varchar),
+        };
+        return make_empty("TABLE_CONSTRAINTS", std::move(cols));
+    }
+
+    if (ci_eq(table_name, "KEY_COLUMN_USAGE")) {
+        std::vector<ast::ColumnDef> cols = {
+            is_col("CONSTRAINT_CATALOG", types::SqlType::Varchar),
+            is_col("CONSTRAINT_SCHEMA", types::SqlType::Varchar),
+            is_col("CONSTRAINT_NAME", types::SqlType::Varchar),
+            is_col("TABLE_CATALOG", types::SqlType::Varchar),
+            is_col("TABLE_SCHEMA", types::SqlType::Varchar),
+            is_col("TABLE_NAME", types::SqlType::Varchar),
+            is_col("COLUMN_NAME", types::SqlType::Varchar),
+            is_col("ORDINAL_POSITION", types::SqlType::BigInt),
+            is_col("POSITION_IN_UNIQUE_CONSTRAINT", types::SqlType::BigInt),
+            is_col("REFERENCED_TABLE_SCHEMA", types::SqlType::Varchar),
+            is_col("REFERENCED_TABLE_NAME", types::SqlType::Varchar),
+            is_col("REFERENCED_COLUMN_NAME", types::SqlType::Varchar),
+        };
+        return make_empty("KEY_COLUMN_USAGE", std::move(cols));
+    }
+
+    if (ci_eq(table_name, "STATISTICS")) {
+        std::vector<ast::ColumnDef> cols = {
+            is_col("TABLE_CATALOG", types::SqlType::Varchar),
+            is_col("TABLE_SCHEMA", types::SqlType::Varchar),
+            is_col("TABLE_NAME", types::SqlType::Varchar),
+            is_col("NON_UNIQUE", types::SqlType::BigInt),
+            is_col("INDEX_SCHEMA", types::SqlType::Varchar),
+            is_col("INDEX_NAME", types::SqlType::Varchar),
+            is_col("SEQ_IN_INDEX", types::SqlType::BigInt),
+            is_col("COLUMN_NAME", types::SqlType::Varchar),
+            is_col("COLLATION", types::SqlType::Varchar),
+            is_col("CARDINALITY", types::SqlType::BigInt),
+            is_col("SUB_PART", types::SqlType::BigInt),
+            is_col("PACKED", types::SqlType::Varchar),
+            is_col("NULLABLE", types::SqlType::Varchar),
+            is_col("INDEX_TYPE", types::SqlType::Varchar),
+            is_col("COMMENT", types::SqlType::Varchar),
+            is_col("INDEX_COMMENT", types::SqlType::Varchar),
+        };
+        return make_empty("STATISTICS", std::move(cols));
+    }
+
+    if (ci_eq(table_name, "COLUMNS")) {
+        storage::TableDef def;
+        def.name = "COLUMNS";
+        def.columns = {
+            is_col("TABLE_CATALOG",          types::SqlType::Varchar),
+            is_col("TABLE_SCHEMA",           types::SqlType::Varchar),
+            is_col("TABLE_NAME",             types::SqlType::Varchar),
+            is_col("COLUMN_NAME",            types::SqlType::Varchar),
+            is_col("ORDINAL_POSITION",       types::SqlType::BigInt),
+            is_col("COLUMN_DEFAULT",         types::SqlType::Varchar),
+            is_col("IS_NULLABLE",            types::SqlType::Varchar),
+            is_col("DATA_TYPE",              types::SqlType::Varchar),
+            is_col("CHARACTER_MAXIMUM_LENGTH", types::SqlType::BigInt),
+            is_col("CHARACTER_OCTET_LENGTH", types::SqlType::BigInt),
+            is_col("NUMERIC_PRECISION",      types::SqlType::BigInt),
+            is_col("NUMERIC_SCALE",          types::SqlType::BigInt),
+            is_col("DATETIME_PRECISION",     types::SqlType::BigInt),
+            is_col("CHARACTER_SET_NAME",     types::SqlType::Varchar),
+            is_col("COLLATION_NAME",         types::SqlType::Varchar),
+            is_col("COLUMN_TYPE",            types::SqlType::Varchar),
+            is_col("COLUMN_KEY",             types::SqlType::Varchar),
+            is_col("EXTRA",                  types::SqlType::Varchar),
+            is_col("PRIVILEGES",             types::SqlType::Varchar),
+            is_col("COLUMN_COMMENT",         types::SqlType::Varchar),
+            is_col("GENERATION_EXPRESSION",  types::SqlType::Varchar),
+        };
+        auto tbl = std::make_unique<storage::Table>(std::move(def));
+        for (auto& db : catalog_.list_databases()) {
+            for (auto& n : catalog_.table_names(db)) {
+                auto* t = catalog_.get_table(n, db);
+                if (!t) continue;
+                auto& tdef = t->def();
+                int pos = 1;
+                for (auto& col : tdef.columns) {
+                    bool is_str = col.type.type == types::SqlType::Varchar ||
+                                  col.type.type == types::SqlType::Char ||
+                                  col.type.type == types::SqlType::Text;
+                    auto num_prec = [&]() -> types::Value {
+                        switch (col.type.type) {
+                            case types::SqlType::TinyInt:  return types::Value::make_int(3);
+                            case types::SqlType::SmallInt: return types::Value::make_int(5);
+                            case types::SqlType::Int:      return types::Value::make_int(10);
+                            case types::SqlType::BigInt:   return types::Value::make_int(19);
+                            case types::SqlType::Float:    return types::Value::make_int(12);
+                            case types::SqlType::Double:   return types::Value::make_int(22);
+                            case types::SqlType::Decimal:  return types::Value::make_int(col.type.length ? col.type.length : 10);
+                            default: return types::Value::make_null();
+                        }
+                    };
+                    auto num_scale = [&]() -> types::Value {
+                        switch (col.type.type) {
+                            case types::SqlType::Decimal: return types::Value::make_int(col.type.scale);
+                            case types::SqlType::Float:
+                            case types::SqlType::Double:  return types::Value::make_null();
+                            default: return types::Value::make_int(0);
+                        }
+                    };
+                    std::string key;
+                    if (col.is_primary_key) key = "PRI";
+                    tbl->insert({
+                        types::Value::make_string("def"),
+                        types::Value::make_string(db),
+                        types::Value::make_string(n),
+                        types::Value::make_string(col.name),
+                        types::Value::make_int(pos++),
+                        col.default_value ? types::Value::make_string(col.default_value->literal.to_string())
+                                          : types::Value::make_null(),
+                        types::Value::make_string(col.nullable ? "YES" : "NO"),
+                        types::Value::make_string(is_data_type(col)),
+                        is_str ? types::Value::make_int(col.type.length ? col.type.length : 255)
+                               : types::Value::make_null(),
+                        is_str ? types::Value::make_int((col.type.length ? col.type.length : 255) * 4)
+                               : types::Value::make_null(),
+                        num_prec(),
+                        num_scale(),
+                        (col.type.type == types::SqlType::DateTime || col.type.type == types::SqlType::Timestamp)
+                            ? types::Value::make_int(0) : types::Value::make_null(),
+                        is_str ? types::Value::make_string("utf8mb4") : types::Value::make_null(),
+                        is_str ? types::Value::make_string("utf8mb4_general_ci") : types::Value::make_null(),
+                        types::Value::make_string(is_column_type(col)),
+                        types::Value::make_string(key),
+                        types::Value::make_string(col.is_auto_increment ? "auto_increment" : ""),
+                        types::Value::make_string("select,insert,update,references"),
+                        types::Value::make_string(col.comment.empty() ? "" : col.comment),
+                        types::Value::make_string(""),
+                    });
+                }
+            }
+        }
+        return tbl;
+    }
+    return nullptr;
 }
 
 // ---------- CREATE DATABASE ----------
