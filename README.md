@@ -1,6 +1,6 @@
 # SQLTiny — 轻量级嵌入式数据库 · MySQL 协议兼容
 
-> **当前版本 `v1.2.0`(2026-11-12)** · 版本号统一维护在 `CMakeLists.txt`(`project(SQLTiny VERSION 1.2.0)`)、`vcpkg.json`(`version-string`)与 `src/main.cpp` 启动横幅。协议层对外仍伪装为 `5.7.0-SQLTiny` 以兼容 MySQL 客户端,与产品版本无关。
+> **当前版本 `v1.2.2`(2026-11-13)** · 版本号统一维护在 `CMakeLists.txt`(`project(SQLTiny VERSION 1.2.2)`)、`vcpkg.json`(`version-string`)与 `src/main.cpp` 启动横幅。协议层对外仍伪装为 `5.7.0-SQLTiny` 以兼容 MySQL 客户端,与产品版本无关。
 
 **SQLTiny** 是用现代 C++20 从零重写的轻量级关系型数据库,核心设计灵感来自 [HSQLDB](http://hsqldb.org/),额外暴露 **MySQL Wire Protocol**——标准 MySQL 客户端(`mysql` CLI、Navicat、DBeaver、Connector/J、PyMySQL、DBX/dbExpress)直接连接。
 
@@ -32,6 +32,23 @@
 > 🔒 **锁分层**: Catalog.mu_(DDL) → Table.mu_ shared_lock(SELECT 多读者并行) / unique_lock(DML 独占) → RowLockMap(行级冲突检测) → TransactionManager.writeLock_(提交边界) → WalManager.mu_(WAL 文件读写)
 >
 > 🧊 **MVCC**: SELECT 完全不加锁,`for_each_visible(querySCN, readerTxn)` 按 `createSCN/deleteSCN` 与 `pendingTxn` 过滤;未提交行只对所属事务可见,commit 才 `finalize_commit` 对外发布
+
+---
+
+## 🆕 v1.2.2 更新内容
+
+本版本聚焦 **Navicat 实测兼容修复** —— Navicat 连接时报 `2013 - Lost connection to server during query`,根因是握手包错位解析。
+
+### 修了什么
+
+- **握手包 reserved 字段少写 1 字节**(致命修复):MySQL 协议 Handshake v10 在 `auth-plugin-data-length` 之后要求**恰好 10 字节**保留区,旧实现只写了 9 字节,导致后面所有字段整体前移 1 字节 —— Navicat 按规范解析时 auth-plugin 名变成错乱字节,识别不出插件后回退发送 `dummy_fallback_auth`,并在认证 OK 后直接断开(表现即 2013)。现改为循环写满 10 字节
+- **`auth-plugin-data-length` 按规范修正为 21**(part1 8 字节 + part2 12 字节 salt + 1 字节 NUL),此前写的是 `min(21, len-8)=12`,与 MySQL 官方服务器广播值不一致
+- **新增 `information_schema.ENGINES` 虚拟表**:Navicat 建连后固定探测 `SELECT COUNT(*) FROM information_schema.ENGINES WHERE Engine='ndbcluster'`,旧版回 ERR 1146 导致连接打开失败。现以 InnoDB 兼容身份上报单行(事务/XA/保存点 = YES)
+- **`--query-log` 调试增强**:每次连接记录握手 + 认证 + 每条命令的**原始字节 hex dump**(含 seq),收发包失败点(EOF/reset)也会标记,客户端兼容性问题可一跑定位;`stdout/stderr` 改为无缓冲,重定向到文件时不再丢启动日志
+
+### 回归
+
+Navicat 建连实测通过(连接测试 + 打开连接 + 元数据加载);PyMySQL / SQLAlchemy 端到端全绿;握手包经脚本按协议逐字段解析校验(version / caps / charset / status / auth-data / plugin 全部对齐)。
 
 ---
 
@@ -183,7 +200,19 @@ FROM users u INNER JOIN orders o ON o.user_id = u.id;
 | 产物 | 类型 | 说明 |
 |---|---|---|
 | `build/Debug/sqltiny.lib` | 静态库 | 引擎核心,嵌入式进程内调用 |
-| `build/Debug/sqltiny_server.exe` | 可执行 | MySQL 协议 TCP 服务器 |
+| `build/Debug/sqltiny_server.exe` | 可执行 | MySQL 协议 TCP 服务器(v1.2.2) |
+| `build/Release/sqltiny_server.exe` | 可执行(发布版) | 同上,Release 版约 **0.9 MB** 单文件(静态 CRT + fmt 静态链接,无 dll 依赖,可直接拷贝部署);Debug 版约 4.8 MB |
+
+**`sqltiny_server.exe` 文件信息(v1.2.2)**:
+
+| 属性 | 值 |
+|---|---|
+| 用途 | MySQL Wire Protocol TCP 服务器,Navicat / DBeaver / mysql CLI / PyMySQL / SQLAlchemy 直接连接 |
+| 默认监听 | `0.0.0.0:3306`(可用 `--port` 改) |
+| 认证 | `mysql_native_password`,开发期 user=root、密码任意 |
+| 持久化 | `--data-dir` 指定目录后启用 WAL(`sql.wal`)+ Snapshot(`sql.data`) |
+| 调试 | `--query-log FILE` 记录握手/每条命令原始报文 hex(客户端兼容性定位用) |
+| 协议伪装 | 服务器版本字符串 `5.7.0-SQLTiny`(与产品版本号无关) |
 | `build/Debug/smoke_m1.exe` | 冒烟测试 | Value / AVL / Lexer — **3/3 PASS** |
 | `build/Debug/smoke_m2.exe` | 冒烟测试 | CRUD / 聚合 / 表达式 / DDL / NULL — **5/5 PASS** |
 | `build/Debug/smoke_m3.exe` | 冒烟测试 | GROUP BY / HAVING / 子查询 IN / INSERT SELECT — **4/4 PASS** |
@@ -302,7 +331,7 @@ python -c "import pymysql; c=pymysql.connect(host='127.0.0.1',port=3306,user='ro
 sqltiny_server [--port <n>] [--user <name>] [--password <pwd>] [--data-dir <DIR>] [--query-log <FILE>]
                默认 --port 3306 --user root
                --data-dir   缺省 = 内存模式(无持久化,重启丢数据)
-               --query-log  逐条记录收到的命令/SQL 及执行结果(调试客户端兼容性用)
+               --query-log  记录握手/认证/每条命令的原始报文 hex 及执行结果(调试客户端兼容性用)
 ```
 
 > **开发期简化**: `mysql_native_password` 不校验密码,只要 user=root 就放行。

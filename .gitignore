@@ -56,3 +56,6 @@ docs/
 
 # runtime data dir (--data-dir ./sqltiny_data)
 sqltiny_data/
+
+# Navicat 兼容性调试现场(data 目录 + 日志)
+_navicat_debug/

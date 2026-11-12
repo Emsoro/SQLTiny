@@ -173,8 +173,10 @@ std::vector<uint8_t> encode_handshake_v10(uint32_t thread_id,
     w.write_u8(33);  // character set (utf8mb4 = 45, 先用 latin1 = 8, 33=utf8)
     w.write_u16(SERVER_STATUS_AUTOCOMMIT);
     w.write_u16((caps >> 16) & 0xffff);
-    w.write_u8(std::min<uint8_t>(21, static_cast<uint8_t>(auth_data.size() > 8 ? auth_data.size() - 8 : 0)));  // auth-data-length
-    w.write_u8(0); w.write_u8(0); w.write_u8(0); w.write_u8(0); w.write_u8(0); w.write_u8(0); w.write_u8(0); w.write_u8(0); w.write_u8(0);
+    // auth-plugin-data-len = part1(8) + part2(12+NUL) = auth_data.size()+1,这里 21
+    w.write_u8(static_cast<uint8_t>(auth_data.size() + 1));  // auth-data-length
+    // reserved: 必须恰好 10 个 0 字节 —— 少 1 个会让客户端解析错位(Navicat 会认不出 plugin 名)
+    for (int i = 0; i < 10; ++i) w.write_u8(0);
     // auth-data-part-2 (auth_data[8:])
     for (size_t i = 8; i < auth_data.size(); ++i) w.write_u8(auth_data[i]);
     w.write_u8(0);  // NUL terminator

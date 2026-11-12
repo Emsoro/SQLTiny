@@ -10,6 +10,10 @@ void print_usage(const char* prog) {
 }
 
 int main(int argc, char** argv) {
+    // 重定向到文件时也立即刷新,方便调试观察 server 输出
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
+    std::setvbuf(stderr, nullptr, _IONBF, 0);
+
     sqltiny::net::ServerConfig cfg;
     std::string data_dir;
 
@@ -28,7 +32,7 @@ int main(int argc, char** argv) {
         else { fmt::print("unknown arg: {}\n", a); print_usage(argv[0]); return 1; }
     }
 
-    fmt::print("SQLTiny v1.2.0 — MySQL wire protocol server\n");
+    fmt::print("SQLTiny v1.2.2 — MySQL wire protocol server\n");
     fmt::print("  port:     {}\n", cfg.port);
     fmt::print("  user:     {}\n", cfg.user);
     fmt::print("  password: {}\n", cfg.password.empty() ? "<any>" : "<set>");

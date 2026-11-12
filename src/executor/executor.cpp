@@ -1774,6 +1774,7 @@ bool Executor::is_information_schema_name(const std::string& qualified) {
     };
     if (!ci_eq(db, "information_schema")) return false;
     return ci_eq(tbl, "TABLES") || ci_eq(tbl, "COLUMNS") || ci_eq(tbl, "SCHEMATA") ||
+           ci_eq(tbl, "ENGINES") ||
            ci_eq(tbl, "TRIGGERS") || ci_eq(tbl, "ROUTINES") || ci_eq(tbl, "EVENTS") ||
            ci_eq(tbl, "VIEWS") || ci_eq(tbl, "TABLE_CONSTRAINTS") ||
            ci_eq(tbl, "KEY_COLUMN_USAGE") || ci_eq(tbl, "STATISTICS") ||
@@ -1920,6 +1921,31 @@ std::unique_ptr<storage::Table> Executor::build_information_schema_table(
                 types::Value::make_null(),
             });
         }
+        return tbl;
+    }
+
+    // ---- ENGINES:Navicat 连接探测会查 information_schema.ENGINES 判断 NDB 支持 ----
+    if (ci_eq(table_name, "ENGINES")) {
+        storage::TableDef def;
+        def.name = "ENGINES";
+        def.columns = {
+            is_col("ENGINE",      types::SqlType::Varchar),
+            is_col("SUPPORT",     types::SqlType::Varchar),
+            is_col("COMMENT",     types::SqlType::Varchar),
+            is_col("TRANSACTIONS",types::SqlType::Varchar),
+            is_col("XA",          types::SqlType::Varchar),
+            is_col("SAVEPOINTS",  types::SqlType::Varchar),
+        };
+        auto tbl = std::make_unique<storage::Table>(std::move(def));
+        // SQLTiny 事务引擎,以 InnoDB 兼容身份上报
+        tbl->insert({
+            types::Value::make_string("InnoDB"),
+            types::Value::make_string("DEFAULT"),
+            types::Value::make_string("Supports transactions, row-level locking, and foreign keys"),
+            types::Value::make_string("YES"),
+            types::Value::make_string("YES"),
+            types::Value::make_string("YES"),
+        });
         return tbl;
     }
 

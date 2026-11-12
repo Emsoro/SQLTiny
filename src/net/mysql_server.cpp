@@ -221,6 +221,22 @@ void close_fd(int fd) {
     }
 
 // 处理一个新连接
+namespace {
+// 原始字节 hex(调试 Navicat 兼容性用,最多 160 字节)
+std::string hex_dump(const uint8_t* p, size_t n) {
+    std::string out = fmt::format("[{} bytes] ", n);
+    size_t k = std::min<size_t>(n, 160);
+    char tmp[8];
+    for (size_t i = 0; i < k; ++i) {
+        std::snprintf(tmp, sizeof(tmp), "%02x", p[i]);
+        out += tmp;
+        if (i % 32 == 31) out += ' ';
+    }
+    if (n > k) out += fmt::format("...(+{} more)", n - k);
+    return out;
+}
+}
+
 void handle_connection(int client_fd, const ServerConfig& cfg, uint32_t thread_id) {
     core::Session session;
     uint8_t seq = 0;
@@ -243,11 +259,14 @@ void handle_connection(int client_fd, const ServerConfig& cfg, uint32_t thread_i
 
     auto hb = encode_handshake_v10(thread_id, auth_salt);
     auto pkt = encode_mysql_packet(hb, seq++);
-    if (!send_all(client_fd, pkt.data(), pkt.size())) return;
+    dbg(fmt::format("[CONN] tid={} fd={}\n", thread_id, client_fd));
+    dbg(fmt::format("[SEND] handshake seq=0 {}\n", hex_dump(pkt.data(), pkt.size())));
+    if (!send_all(client_fd, pkt.data(), pkt.size())) { dbg("[FAIL] send handshake\n"); return; }
 
     // 2. 收 HandshakeResponse
     auto hs_payload = read_mysql_packet(client_fd, seq);
-    if (hs_payload.empty()) return;
+    if (hs_payload.empty()) { dbg("[FAIL] read HandshakeResponse (EOF/reset)\n"); return; }
+    dbg(fmt::format("[RECV] HandshakeResponse seq={}\n", seq) + hex_dump(hs_payload.data(), hs_payload.size()) + "\n");
     seq++;
 
     auto hr_opt = parse_handshake_response(hs_payload.data(), hs_payload.size());
@@ -298,7 +317,8 @@ void handle_connection(int client_fd, const ServerConfig& cfg, uint32_t thread_i
     // 4. 发 OK
     auto ok = encode_ok_packet(0, 0, SERVER_STATUS_AUTOCOMMIT, 0, "");
     auto okpkt = encode_mysql_packet(ok, seq++);
-    if (!send_all(client_fd, okpkt.data(), okpkt.size())) return;
+    dbg(fmt::format("[SEND] auth-ok seq={}\n", seq - 1) + hex_dump(okpkt.data(), okpkt.size()) + "\n");
+    if (!send_all(client_fd, okpkt.data(), okpkt.size())) { dbg("[FAIL] send auth-ok\n"); return; }
 
     session.user = hr.user;
     session.current_database = hr.database.empty() ? session.current_database : hr.database;
@@ -321,13 +341,17 @@ void handle_connection(int client_fd, const ServerConfig& cfg, uint32_t thread_i
     while (true) {
         seq = 0;
         auto cmd_payload = read_mysql_packet(client_fd, seq);
-        if (cmd_payload.empty()) break;
+        if (cmd_payload.empty()) {
+            dbg("[FAIL] command read (EOF/reset) -> close\n");
+            break;
+        }
         seq++;
         if (cmd_payload.empty()) continue;
 
         uint8_t cmd = cmd_payload[0];
         dbg(fmt::format("[CMD] 0x{:02x} payload_len={}\n", cmd,
                         cmd_payload.size() > 0 ? cmd_payload.size() - 1 : 0));
+        dbg(fmt::format("[RECV] seq={} {}\n", seq, hex_dump(cmd_payload.data(), cmd_payload.size())));
         // MySQL 协议不要求处理的命令就回 OK
         // 简单分发:只处理 QUERY,其他回 OK
 
