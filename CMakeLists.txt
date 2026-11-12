@@ -1,5 +1,19 @@
 cmake_minimum_required(VERSION 3.20)
+
+# fmt 静态编译: vcpkg manifest 默认使用 x64-windows-static (库 + CRT 均静态),
+# 产物不再依赖 fmt.dll。必须放在 project() 之前 —— vcpkg toolchain 在 project() 时读取该变量。
+# 需要动态链接时须成对覆盖 VCPKG_TARGET_TRIPLET 与 CMAKE_MSVC_RUNTIME_LIBRARY。
+if(WIN32 AND CMAKE_TOOLCHAIN_FILE AND NOT DEFINED VCPKG_TARGET_TRIPLET)
+  set(VCPKG_TARGET_TRIPLET "x64-windows-static" CACHE STRING "vcpkg target triplet")
+endif()
+
 project(SQLTiny VERSION 1.1.0 LANGUAGES CXX)
+
+# MSVC 静态 CRT: 与 x64-windows-static 的 VCPKG_CRT_LINKAGE=static 保持一致,
+# 避免 CMake 默认 /MD 与 toolchain 的 /MT 冲突 (LNK2038 / D9025)。
+if(MSVC AND NOT DEFINED CMAKE_MSVC_RUNTIME_LIBRARY)
+  set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>" CACHE STRING "MSVC runtime library")
+endif()
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

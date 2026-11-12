@@ -19,7 +19,7 @@
 | 🗂️ **information_schema** | SCHEMATA / TABLES / COLUMNS 等虚拟表,第三方工具元数据浏览直接可用 |
 | 🗃️ **多库 Catalog** | CREATE/DROP/USE DATABASE,库级独立表注册 |
 | ⚡ **AVL 内存索引** | 自带平衡 BST,主键查询 O(log n) |
-| 🪶 **轻量** | 单库文件,启动毫秒级,依赖仅 fmtlib |
+| 🪶 **轻量** | 单库文件,启动毫秒级,依赖仅 fmtlib;**静态编译**(`x64-windows-static`),产物不依赖 `fmt.dll` / VC 运行时 DLL |
 
 ---
 
@@ -89,7 +89,7 @@ SQL 语法:`SET SESSION TRANSACTION ISOLATION LEVEL <级别>`(会话默认)、`S
 ### 环境要求
 - **Windows**: Visual Studio 2022 MSVC 14.40+ (MSBuild)
 - **CMake**: 3.20+
-- **vcpkg**: 设 `VCPKG_ROOT` 环境变量;依赖仅 `fmt` (vcpkg manifest 自动拉取)
+- **vcpkg**: 设 `VCPKG_ROOT` 环境变量;依赖仅 `fmt` (vcpkg manifest 自动拉取)。默认 triplet `x64-windows-static`,fmt 与 MSVC CRT 都静态链接,产物自包含、无需随附 `fmt.dll`;需要动态链接时必须**成对**覆盖 `-DVCPKG_TARGET_TRIPLET=x64-windows` 与 `-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL...`(`/MD`)并重新配置,只改其中一个会造成 CRT 混用
 - **Python 3.10+** (跑 PyMySQL 全场景测试可选)
 
 ```powershell

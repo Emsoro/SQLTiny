@@ -669,7 +669,7 @@ SQLTiny 第一版可以简化:
 | 类别 | 选择 | 理由 |
 |---|---|---|
 | 语言标准 | C++20 | concepts、ranges、std::variant、std::jthread,让接口更干净 |
-| 构建 | CMake 3.20+ + vcpkg | 跨平台,Windows/VS2022 友好 |
+| 构建 | CMake 3.20+ + vcpkg(默认 `x64-windows-static`) | 跨平台,Windows/VS2022 友好;fmt 与 MSVC CRT 静态链接(`CMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded...`),产物不依赖 `fmt.dll`,可 `-DVCPKG_TARGET_TRIPLET=x64-windows` 覆盖 |
 | 测试 | 自写 smoke(C++) + CTest + PyMySQL / SQLAlchemy / sqlite3 对比脚本 | 实际未引入 GoogleTest / GMock;10 个 CTest 目标 + 8 个 Python 端到端脚本(v1.1.0 新增 `dbx_probe` / `test_stmt_prepare.py`) |
 | 日志 | `fmt::print` 输出到 stdout | 实际未引入 spdlog,保持单一外部依赖 |
 | 格式化 | fmtlib | 不依赖 iostream(vcpkg.json 中唯一的依赖) |
