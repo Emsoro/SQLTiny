@@ -166,6 +166,19 @@ void Table::for_each_visible(uint64_t querySCN, const RowCallback& cb,
     }
 }
 
+void Table::for_each_by_pk_prefix(const types::Value& first_pk_value, uint64_t querySCN,
+                                  const RowCallback& cb, uint64_t readerTxn) const {
+    if (!pk_index_ || first_pk_value.is_null()) return;
+    std::shared_lock<std::shared_mutex> lock(mu_);
+    pk_index_->prefix_scan(Key(first_pk_value), [&](const Key&, int64_t rid) {
+        auto vit = versions_.find(rid);
+        if (vit != versions_.end() && !row_visible(vit->second, querySCN, readerTxn)) return true;
+        auto it = row_map_.find(rid);
+        if (it == row_map_.end()) return true;
+        return cb(rid, it->second);
+    });
+}
+
 std::vector<int64_t> Table::all_row_ids(uint64_t querySCN, uint64_t readerTxn) const {
     std::shared_lock<std::shared_mutex> lock(mu_);
     std::vector<int64_t> out;

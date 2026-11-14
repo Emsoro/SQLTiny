@@ -66,6 +66,11 @@ public:
     void for_each_visible(uint64_t querySCN, const RowCallback& cb,
                           uint64_t readerTxn = 0) const;
 
+    /// 按主键首列前缀遍历(利用 PK AVL 前缀扫描,JOIN eq_ref/ref 探测用)。
+    /// 只回调 MVCC 可见的行;first_pk_value 为 NULL 时不回调任何行
+    void for_each_by_pk_prefix(const types::Value& first_pk_value, uint64_t querySCN,
+                               const RowCallback& cb, uint64_t readerTxn = 0) const;
+
     /// 所有行 id (只返回物理存在且可见的)
     std::vector<int64_t> all_row_ids(uint64_t querySCN = 0,
                                      uint64_t readerTxn = 0) const;

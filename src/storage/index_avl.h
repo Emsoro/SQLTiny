@@ -75,6 +75,11 @@ public:
                     const std::function<bool(const Key&, int64_t)>& cb,
                     bool inclusive_hi = false) const;
 
+    /// 前缀扫描:所有以 prefix 逐列相等的键(前缀剪枝遍历,O(log n + 命中数))。
+    /// 用于复合主键首列的等值探测 (JOIN eq_ref/ref)
+    void prefix_scan(const Key& prefix,
+                     const std::function<bool(const Key&, int64_t)>& cb) const;
+
     /// 全量扫描
     void for_each(const std::function<void(const Key&, int64_t)>& cb) const;
 
@@ -107,6 +112,8 @@ private:
     void do_range_scan(AvlNode* n, const Key& lo, const Key& hi,
                        const std::function<bool(const Key&, int64_t)>& cb,
                        bool inclusive_hi) const;
+    void do_prefix_scan(AvlNode* n, const Key& prefix,
+                        const std::function<bool(const Key&, int64_t)>& cb) const;
     void do_for_each(AvlNode* n, const std::function<void(const Key&, int64_t)>& cb) const;
     void clear_tree(AvlNode* n);
     int  do_height(AvlNode* n) const;

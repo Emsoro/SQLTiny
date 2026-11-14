@@ -57,6 +57,7 @@ struct EquiJoinKey {
     int  right_col = -1;   // 右表行内的下标
     std::string left_name, right_name;
     bool right_is_pk = false;
+    bool right_pk_first = false;  // join 列是(复合)主键首列 → 可用 PK AVL 前缀探测
 };
 static bool is_equi_pair(const ast::Expression& e) {
     return e.kind == ast::ExprKind::BinaryOp && e.binop == ast::BinOp::Eq &&
@@ -114,6 +115,11 @@ static EquiJoinKey extract_equi(const ast::Expression& on,
     if (rdef.primary_key_cols.size() == 1 && rdef.primary_key_cols[0].size() == 1) {
         int pk_idx = rdef.column_index(rdef.primary_key_cols[0][0]);
         k.right_is_pk = (pk_idx == k.right_col);
+    }
+    // join 列是(复合)主键首列 → 逐左行做 PK AVL 前缀扫描,右表零物化
+    if (!rdef.primary_key_cols.empty() && !rdef.primary_key_cols[0].empty()) {
+        int pk0_idx = rdef.column_index(rdef.primary_key_cols[0][0]);
+        if (pk0_idx == k.right_col) k.right_pk_first = true;
     }
     return k;
 }
@@ -588,12 +594,15 @@ ResultSet Executor::exec_select(const ast::SelectStmt& s) {
             if (lower == "count")  return SqlType::BigInt;
             if (lower == "avg")    return SqlType::Decimal;
             if (lower == "sum") {
-                // MySQL 语义:SUM(整型)->整型, SUM(浮点)->DOUBLE,避免聚合值以字符串回包
+                // 声明类型必须与实际聚合值一致:整型输入用 int64 累加;浮点/DECIMAL 输入
+                // 经 double 路径聚合(恒返回 double)。若 DECIMAL 误报 LONGLONG,pymysql
+                // 会对文本 '300.5' 调 int() 崩溃并中断行读取,污染连接包序。
                 if (!e.func_args.empty() && slots) {
                     auto t = infer_type(*e.func_args[0], slots);
                     if (is_numeric(t))
-                        return (t == SqlType::Double || t == SqlType::Float) ? SqlType::Double
-                                                                            : SqlType::BigInt;
+                        return (t == SqlType::Double || t == SqlType::Float ||
+                                t == SqlType::Decimal) ? SqlType::Double
+                                                       : SqlType::BigInt;
                 }
                 return SqlType::Decimal;
             }
@@ -738,6 +747,54 @@ ResultSet Executor::exec_select(const ast::SelectStmt& s) {
         return ctx;
     };
 
+    // WHERE 谓词下推:把只引用主表列的 AND 连接词提前到主表扫描,
+    // 大幅减少进入 JOIN 的行数 (如 WHERE e.emp_no=10001 先把 30 万行滤成 1 行)。
+    // 下推只是预过滤:最终 after_where 仍用完整 WHERE 复核,语义不变。
+    std::vector<const ast::Expression*> pushdown_conjuncts;
+    if (s.where) {
+        int primary_cols = static_cast<int>(tbl->def().columns.size());
+        std::vector<const ast::Expression*> all_conj;
+        std::function<void(const ast::Expression&)> split_and =
+            [&](const ast::Expression& e) {
+                if (e.kind == ast::ExprKind::BinaryOp && e.binop == ast::BinOp::And &&
+                    e.lhs && e.rhs) { split_and(*e.lhs); split_and(*e.rhs); }
+                else all_conj.push_back(&e);
+            };
+        split_and(*s.where);
+        std::function<bool(const ast::Expression&)> primary_only =
+            [&](const ast::Expression& e) -> bool {
+                switch (e.kind) {
+                    case ast::ExprKind::Literal: return true;
+                    case ast::ExprKind::Column: {
+                        int idx = -1;
+                        if (!e.table_name.empty()) {
+                            // 限定名必须精确命中(真实表名或别名),否则保守不下推
+                            auto it = base_col_index.find(e.table_name + "." + e.column_name);
+                            if (it == base_col_index.end()) return false;
+                            idx = it->second;
+                        } else {
+                            if (ambiguous_cols.count(e.column_name)) return false;  // 裸名歧义
+                            auto it = base_col_index.find(e.column_name);
+                            if (it == base_col_index.end()) return false;           // 未知名
+                            idx = it->second;
+                        }
+                        return idx >= 0 && idx < primary_cols;   // 只允许主表列
+                    }
+                    case ast::ExprKind::BinaryOp:
+                        return e.lhs && e.rhs && primary_only(*e.lhs) && primary_only(*e.rhs);
+                    case ast::ExprKind::UnaryOp:
+                        return e.operand && primary_only(*e.operand);
+                    case ast::ExprKind::FunctionCall: {
+                        for (auto& a : e.func_args) if (a && !primary_only(*a)) return false;
+                        return true;
+                    }
+                    default: return false;   // Subquery/Case/Star/Placeholder:保守不下推
+                }
+            };
+        for (auto* c : all_conj)
+            if (primary_only(*c)) pushdown_conjuncts.push_back(c);
+    }
+
     // M6 P2 · JOIN 执行计划: 每个 join 选 HASH / NESTED_LOOP / CROSS。
     // Hash Join 把等值 JOIN 从 O(N×M) 降到 O(N+M);非等值条件仍退化到嵌套循环,
     // 但列索引只构建一次(见上方 base_col_index),常数开销大幅下降。
@@ -746,6 +803,7 @@ ResultSet Executor::exec_select(const ast::SelectStmt& s) {
         EquiJoinKey equi;
         bool pure_equi = false;         // ON 就是单个等值条件
         bool hash_join = false;
+        bool idx_probe = false;         // PK 首列前缀索引探测 (右表零物化)
         size_t right_rows = 0, left_rows = 0;
         size_t est_cost = 0;
         std::string table;
@@ -767,6 +825,9 @@ ResultSet Executor::exec_select(const ast::SelectStmt& s) {
                                   right_offset, right_cols, jtbl->def());
             p.pure_equi = is_equi_pair(*jc.on);
             p.hash_join = p.equi.valid;
+            // PK 首列等值:逐左行前缀探测,避免右表全量物化 + 建哈希桶
+            // (左侧行数不大于右表才划算: 探测成本 O(left·log right + 输出行数))
+            p.idx_probe = p.equi.valid && p.equi.right_pk_first && p.left_rows <= p.right_rows;
         }
         // 成本估算: nested loop = left×right, hash = left+right。
         // 下一轮的输入行数按「上一轮输出」粗估: hash 取 max(left,right),嵌套循环取乘积上界。
@@ -806,8 +867,11 @@ ResultSet Executor::exec_select(const ast::SelectStmt& s) {
             if (p.kind == ast::JoinKind::Cross) {
                 extra = "Using cross join (cartesian)";
             } else if (p.hash_join) {
-                extra = fmt::format("Using hash join (build: {}, cost {} vs nested {})",
-                                    p.table, p.est_cost, p.left_rows * p.right_rows);
+                extra = p.idx_probe
+                    ? fmt::format("Using index probe; cost {} vs hash join {}",
+                                  p.left_rows, p.left_rows + p.right_rows)
+                    : fmt::format("Using hash join (build: {}, cost {} vs nested {})",
+                                  p.table, p.est_cost, p.left_rows * p.right_rows);
                 if (!p.pure_equi) extra += "; Using where (residual predicate)";
             } else {
                 extra = fmt::format("Using nested loop (cost {})", p.est_cost);
@@ -831,7 +895,18 @@ ResultSet Executor::exec_select(const ast::SelectStmt& s) {
     uint64_t sqscn = query_scn(session_);
     uint64_t rtxn = reader_txn(session_);
     std::vector<storage::Row> left_rows;
-    tbl->for_each_visible(sqscn, [&](int64_t, const storage::Row& row) { left_rows.push_back(row); return true; }, rtxn);
+    if (pushdown_conjuncts.empty()) {
+        tbl->for_each_visible(sqscn, [&](int64_t, const storage::Row& row) { left_rows.push_back(row); return true; }, rtxn);
+    } else {
+        // 下推谓词预过滤:只把通过主表局部条件的行送入 JOIN
+        tbl->for_each_visible(sqscn, [&](int64_t, const storage::Row& row) {
+            auto ctx = build_ctx(row);
+            for (auto* c : pushdown_conjuncts)
+                if (!to_bool(eval(*c, ctx))) return true;   // 预过滤掉,继续扫描
+            left_rows.push_back(row);
+            return true;
+        }, rtxn);
+    }
 
     for (size_t ji = 0; ji < s.joins.size(); ++ji) {
         auto& jc = s.joins[ji];
@@ -864,7 +939,30 @@ ResultSet Executor::exec_select(const ast::SelectStmt& s) {
                 jc.kind != ast::JoinKind::Right) continue;
 
             std::vector<storage::Row> matches;
-            if (plan.hash_join && plan.equi.left_col >= 0 &&
+            if (plan.idx_probe && plan.equi.left_col >= 0 &&
+                plan.equi.left_col < static_cast<int>(l.size())) {
+                // ---- PK 前缀索引探测:逐左行查右表 PK AVL,右表零物化 ----
+                const auto& keyv = l[plan.equi.left_col];
+                if (!keyv.is_null()) {
+                    jtbl->for_each_by_pk_prefix(keyv, sqscn,
+                        [&](int64_t, const storage::Row& r) {
+                            if (plan.equi.right_col < 0 ||
+                                plan.equi.right_col >= static_cast<int>(r.size()) ||
+                                !keyv.sql_equals(r[plan.equi.right_col])) return true;
+                            if (plan.pure_equi) {
+                                // 纯等值:前缀扫描已保证首列相等
+                                storage::Row flat = l; flat.insert(flat.end(), r.begin(), r.end());
+                                matches.push_back(std::move(flat));
+                            } else {
+                                // 复合 ON:等值项已由索引保证,其余谓词完整 eval 兜底
+                                storage::Row flat = l; flat.insert(flat.end(), r.begin(), r.end());
+                                auto ctx = build_ctx(flat);
+                                if (to_bool(eval(*jc.on, ctx))) matches.push_back(std::move(flat));
+                            }
+                            return true;
+                        }, rtxn);
+                }
+            } else if (plan.hash_join && plan.equi.left_col >= 0 &&
                 plan.equi.left_col < static_cast<int>(l.size())) {
                 std::string key = join_hash_key(l[plan.equi.left_col]);
                 auto it = key.empty() ? buckets.end() : buckets.find(key);

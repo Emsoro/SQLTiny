@@ -231,6 +231,35 @@ void IndexAvl::range_scan(const Key& lo, const Key& hi,
     do_range_scan(root_, lo, hi, cb, inclusive_hi);
 }
 
+// ---------- 前缀扫描 ----------
+// 节点 key 截断到 prefix 长度与 prefix 逐列比较,决定剪枝方向:
+//   截断 < prefix → 只走右子树;截断 > prefix → 只走左子树;
+//   截断 == prefix → 节点本身命中(键长 >= 前缀长),左右子树都可能还有命中,两边都递归。
+// 总成本 O(log n + 命中数)。
+void IndexAvl::do_prefix_scan(AvlNode* n, const Key& prefix,
+                              const std::function<bool(const Key&, int64_t)>& cb) const {
+    if (!n) return;
+    size_t m = prefix.size();
+    int cmp = 0;
+    for (size_t i = 0; i < m; ++i) {
+        if (n->key.size() <= i) { cmp = -1; break; }   // 节点 key 更短 → 字典序更小
+        cmp = n->key.parts()[i].compare(prefix.parts()[i]);
+        if (cmp != 0) break;
+    }
+    if (cmp < 0) { do_prefix_scan(n->right, prefix, cb); return; }
+    if (cmp > 0) { do_prefix_scan(n->left,  prefix, cb); return; }
+    if (n->key.size() >= m) {
+        if (!cb(n->key, n->row_id)) return;
+    }
+    do_prefix_scan(n->left,  prefix, cb);
+    do_prefix_scan(n->right, prefix, cb);
+}
+
+void IndexAvl::prefix_scan(const Key& prefix,
+                           const std::function<bool(const Key&, int64_t)>& cb) const {
+    do_prefix_scan(root_, prefix, cb);
+}
+
 void IndexAvl::do_range_scan(AvlNode* n, const Key& lo, const Key& hi,
                              const std::function<bool(const Key&, int64_t)>& cb,
                              bool inclusive_hi) const {

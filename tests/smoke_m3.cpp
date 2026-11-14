@@ -16,6 +16,16 @@ static int exec_int(core::Session& s, const char* sql) {
     int64_t v = 0; r.rows[0][0].try_to_int(v); return static_cast<int>(v);
 }
 
+// 数值断言与内部表示解耦:整型 SUM 现返回 Int64 (与 MySQL 数值语义一致),
+// 旧实现返回 double —— 两种表示都必须通过
+static bool num_eq(const types::Value& v, double expected) {
+    double d = 0;
+    if (v.try_to_double(d)) return d == expected;
+    int64_t i = 0;
+    if (v.try_to_int(i)) return static_cast<double>(i) == expected;
+    return false;
+}
+
 // ---------- GROUP BY ----------
 int test_group_by() {
     core::Session s;
@@ -26,9 +36,9 @@ int test_group_by() {
     auto r = s.execute("SELECT dept, SUM(salary) FROM t GROUP BY dept ORDER BY dept");
     CHECK_OK(r);
     CHECK(r.rows.size() == 3);
-    CHECK(r.rows[0][0].v_str == "A" && r.rows[0][1].v_double == 300.0);
-    CHECK(r.rows[1][0].v_str == "B" && r.rows[1][1].v_double == 700.0);
-    CHECK(r.rows[2][0].v_str == "C" && r.rows[2][1].v_double == 500.0);
+    CHECK(r.rows[0][0].v_str == "A" && num_eq(r.rows[0][1], 300.0));
+    CHECK(r.rows[1][0].v_str == "B" && num_eq(r.rows[1][1], 700.0));
+    CHECK(r.rows[2][0].v_str == "C" && num_eq(r.rows[2][1], 500.0));
 
     // 空 group_by = 全表一组 (等效旧 flat 聚合)
     CHECK(exec_int(s, "SELECT COUNT(*) FROM t") == 5);
@@ -49,7 +59,7 @@ int test_having() {
     CHECK_OK(r);
     CHECK(r.rows.size() == 1);   // 只有 B
     CHECK(r.rows[0][0].v_str == "B");
-    CHECK(r.rows[0][1].v_double == 700.0);
+    CHECK(num_eq(r.rows[0][1], 700.0));
 
     // >= 应该保留 B 和 C
     r = s.execute("SELECT dept, SUM(salary) AS total FROM t GROUP BY dept HAVING SUM(salary) >= 500 ORDER BY dept");
