@@ -587,12 +587,33 @@ ResultSet Executor::exec_select(const ast::SelectStmt& s) {
                            [](unsigned char c){ return std::tolower(c); });
             if (lower == "count")  return SqlType::BigInt;
             if (lower == "avg")    return SqlType::Decimal;
-            if (lower == "sum" || lower == "min" || lower == "max") {
+            if (lower == "sum") {
+                // MySQL 语义:SUM(整型)->整型, SUM(浮点)->DOUBLE,避免聚合值以字符串回包
                 if (!e.func_args.empty() && slots) {
                     auto t = infer_type(*e.func_args[0], slots);
-                    if (is_numeric(t)) return t;
+                    if (is_numeric(t))
+                        return (t == SqlType::Double || t == SqlType::Float) ? SqlType::Double
+                                                                            : SqlType::BigInt;
                 }
                 return SqlType::Decimal;
+            }
+            if (lower == "min" || lower == "max") {
+                // MySQL 语义:MIN/MAX 返回与参数相同的类型(含 DATE/DATETIME/字符串)
+                if (!e.func_args.empty() && slots) {
+                    auto t = infer_type(*e.func_args[0], slots);
+                    if (t != SqlType::Null) return t;
+                }
+                return SqlType::Decimal;
+            }
+            if (lower == "coalesce" || lower == "ifnull") {
+                // 取第一个非 NULL 参数的类型,避免 COALESCE(SUM(int),0) 落到字符串类型
+                if (!e.func_args.empty() && slots) {
+                    for (auto& a : e.func_args) {
+                        auto t = infer_type(*a, slots);
+                        if (t != SqlType::Null) return t;
+                    }
+                }
+                return SqlType::Varchar;
             }
             return SqlType::Varchar;
         }
@@ -1040,35 +1061,37 @@ ResultSet Executor::exec_select(const ast::SelectStmt& s) {
                     }
                     agg_row.push_back(types::Value::make_int(c));
                 } else if (lower == "sum" || lower == "avg") {
-                    double acc = 0; int64_t c = 0;
+                    // 整型列用 int64 累加,避免大整数 SUM 经 double 以字符串回包
+                    double acc = 0; int64_t iacc = 0; int64_t c = 0; bool all_int = true;
                     for (auto& row : flat_rows) {
                         auto ctx = build_ctx(row);
                         auto v = eval(*e->func_args[0], ctx);
-                        double d;
-                        if (v.try_to_double(d)) { acc += d; c++; }
+                        if (v.is_null()) continue;
+                        if (v.is_int()) { iacc += v.v_int; acc += static_cast<double>(v.v_int); }
+                        else {
+                            all_int = false;
+                            double d; if (v.try_to_double(d)) acc += d;
+                        }
+                        c++;
                     }
                     // SQL 标准: 空集 SUM / AVG 返回 NULL (只有 COUNT 返回 0)
                     if (c == 0) agg_row.push_back(types::Value::make_null());
                     else if (lower == "avg") agg_row.push_back(types::Value::make_double(acc / c));
+                    else if (all_int) agg_row.push_back(types::Value::make_int(iacc));
                     else agg_row.push_back(types::Value::make_double(acc));
-                } else if (lower == "min") {
-                    double best = 0; bool first = true;
+                } else if (lower == "min" || lower == "max") {
+                    // 保留原值类型(DATE/DATETIME/字符串),用 Value 原生比较 ——
+                    // 旧实现经 try_to_double 会把日期 '2019-12-31' 截成 2019
+                    types::Value best; bool first = true;
                     for (auto& row : flat_rows) {
                         auto ctx = build_ctx(row);
                         auto v = eval(*e->func_args[0], ctx);
-                        double d; if (!v.try_to_double(d)) continue;
-                        if (first || d < best) { best = d; first = false; }
+                        if (v.is_null()) continue;
+                        if (first) { best = v; first = false; continue; }
+                        int cv = v.compare(best);
+                        if ((lower == "min" && cv < 0) || (lower == "max" && cv > 0)) best = v;
                     }
-                    agg_row.push_back(first ? types::Value::make_null() : types::Value::make_double(best));
-                } else if (lower == "max") {
-                    double best = 0; bool first = true;
-                    for (auto& row : flat_rows) {
-                        auto ctx = build_ctx(row);
-                        auto v = eval(*e->func_args[0], ctx);
-                        double d; if (!v.try_to_double(d)) continue;
-                        if (first || d > best) { best = d; first = false; }
-                    }
-                    agg_row.push_back(first ? types::Value::make_null() : types::Value::make_double(best));
+                    agg_row.push_back(first ? types::Value::make_null() : best);
                 } else if (contains_agg(*e)) {
                     // 标量函数嵌套聚合 (COALESCE(SUM(x),0)): 纯值递归,不构造临时 AST
                     std::function<types::Value(const ast::Expression&)> eval_nested =
@@ -1090,21 +1113,31 @@ ResultSet Executor::exec_select(const ast::SelectStmt& s) {
                                         for (auto& v : vals) if (!v.is_null()) ++n;
                                         return types::Value::make_int(n);
                                     }
-                                    double acc = 0, best = 0; int64_t n = 0; bool first = true;
+                                    double acc = 0; int64_t iacc = 0; int64_t n = 0;
+                                    bool all_int = true, first = true;
+                                    types::Value best;
                                     for (auto& v : vals) {
-                                        double d;
-                                        if (!v.try_to_double(d)) continue;
+                                        if (v.is_null()) continue;
                                         if (low == "min" || low == "max") {
-                                            if (first || (low == "min" ? d < best : d > best)) {
-                                                best = d; first = false;
+                                            if (first) { best = v; first = false; }
+                                            else {
+                                                int cv = v.compare(best);
+                                                if ((low == "min" && cv < 0) || (low == "max" && cv > 0))
+                                                    best = v;
                                             }
-                                        } else acc += d;
+                                        } else if (v.is_int()) {
+                                            iacc += v.v_int; acc += static_cast<double>(v.v_int);
+                                        } else {
+                                            all_int = false;
+                                            double d; if (v.try_to_double(d)) acc += d;
+                                        }
                                         ++n;
                                     }
                                     if (n == 0) return types::Value::make_null();
                                     if (low == "avg") return types::Value::make_double(acc / n);
-                                    if (low == "sum") return types::Value::make_double(acc);
-                                    return types::Value::make_double(best);
+                                    if (low == "sum") return all_int ? types::Value::make_int(iacc)
+                                                                     : types::Value::make_double(acc);
+                                    return first ? types::Value::make_null() : best;
                                 }
                                 if (low == "coalesce" || low == "ifnull") {
                                     for (auto& a : src.func_args) {
@@ -1183,18 +1216,33 @@ ResultSet Executor::exec_select(const ast::SelectStmt& s) {
                             }
                             return types::Value::make_int(c);
                         } else {
-                            double acc = 0; int64_t c = 0;
+                            double acc = 0; int64_t iacc = 0; int64_t c = 0;
+                            bool all_int = true, first = true;
+                            types::Value best;
                             for (auto& row : bucket_rows) {
                                 auto ctx = build_ctx(row);
                                 auto v = eval(*expr.func_args[0], ctx);
-                                double d; if (!v.try_to_double(d)) continue;
-                                if (lower == "sum" || lower == "avg") { acc += d; c++; }
-                                else if (lower == "min") { if (c == 0 || d < acc) { acc = d; c++; } }
-                                else if (lower == "max") { if (c == 0 || d > acc) { acc = d; c++; } }
+                                if (v.is_null()) continue;
+                                if (lower == "min" || lower == "max") {
+                                    if (first) { best = v; first = false; }
+                                    else {
+                                        int cv = v.compare(best);
+                                        if ((lower == "min" && cv < 0) || (lower == "max" && cv > 0))
+                                            best = v;
+                                    }
+                                } else if (v.is_int()) {
+                                    iacc += v.v_int; acc += static_cast<double>(v.v_int);
+                                } else {
+                                    all_int = false;
+                                    double d; if (v.try_to_double(d)) acc += d;
+                                }
+                                c++;
                             }
                             if (c == 0) return types::Value::make_null();
                             if (lower == "avg") return types::Value::make_double(acc / c);
-                            return types::Value::make_double(acc);
+                            if (lower == "sum") return all_int ? types::Value::make_int(iacc)
+                                                               : types::Value::make_double(acc);
+                            return first ? types::Value::make_null() : best;
                         }
                     }
                     // 非聚合函数:用桶内第一行算

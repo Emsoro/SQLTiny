@@ -437,6 +437,13 @@ std::optional<HandshakeResponse> parse_handshake_response(const uint8_t* data, s
     if (hr.client_cap & CLIENT_PLUGIN_AUTH && !r.eof()) {
         hr.auth_plugin = r.null_string();
     }
+    // 客户端连接属性(Navicat/DBeaver 等 GUI 客户端默认携带 CLIENT_CONNECT_ATTRS):
+    // 必须把这段键值对消费掉,否则残留字节会在命令循环里被当成下一条命令读包,
+    // 造成连接错位,客户端表现为 "2013 Lost connection to server during query"
+    if (hr.client_cap & CLIENT_CONNECT_ATTRS && !r.eof()) {
+        uint64_t alen = r.lenenc_int();
+        for (uint64_t i = 0; i < alen && !r.eof(); ++i) (void)r.u8();
+    }
     return hr;
 }
 

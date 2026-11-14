@@ -58,6 +58,13 @@ endif()
 add_executable(sqltiny_server src/main.cpp)
 target_link_libraries(sqltiny_server PRIVATE sqltiny)
 
+# Windows 版本资源:让 exe 属性页(详细信息)带产品名/版本/版权等元数据
+if(WIN32)
+  enable_language(RC)
+  configure_file(src/version.rc.in ${CMAKE_CURRENT_BINARY_DIR}/version.rc @ONLY)
+  target_sources(sqltiny_server PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/version.rc)
+endif()
+
 # ---------- 测试 ----------
 function(add_smoke_test name source)
   add_executable(${name} ${source})

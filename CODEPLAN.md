@@ -38,6 +38,22 @@
 - **调试设施**:`--query-log FILE`(逐条记录命令 0x?? + SQL + 执行结果);`tests/dbx_probe.cpp`(58 断言,进程内用 `Session::execute` 逐条跑 DBX 连接/元数据/事务阶段的典型 SQL)、`tests/test_stmt_prepare.py`(7 断言,裸 socket 走 `COM_STMT_*` 全流程)。
 - **回归适配**:`tests/smoke_m25_e2e.cpp` 改为兼容经典 EOF 帧(列定义后的 `0xfe` 包,包长 < 9),否则老用例会把 EOF 误判为结果集结束;`ctest` 在启动 server 后恢复 10/10。
 
+### 本轮交付(v1.2.2 稳定性与兼容性修复)
+
+以 employees 标准数据集(test_db-master,392 万行 / 6 表)与真实 MySQL 同库对比验证驱动,逐条修复:
+
+- **握手残留字节(Navicat 2013)**:`parse_handshake_response` 未消费 `CLIENT_CONNECT_ATTRS` 连接属性段——带完整能力位的 GUI 客户端握手后,残留属性字节被当成下一条命令读包,连接错位报 `2013 Lost connection during query`。现按 lenenc 长度跳过属性段;`mysql_proto.h` 新增 `CLIENT_CONNECT_ATTRS` 常量;`tests/_verify_fixes.py` 用裸 socket 模拟 Navicat 握手(caps=0x00ffa684 + 属性串)回归,握手 OK 且后续 COM_QUERY 正常。
+- **DATE 聚合**:MIN/MAX 经 `try_to_double` 把 `'2019-12-31'` 截成 2019 只返回年份。现改用 `Value::compare` 原生比较并保留原值类型;`infer_type` 对 MIN/MAX 返回参数原类型(DATE/DATETIME/字符串)。`MIN/MAX(hire_date)` 返回完整日期。
+- **整型 SUM 以字符串回包**:聚合值统一走 double,列类型推断与值类型错位。现整型列用 int64 累加返回 `make_int`,SUM(int) 类型推断为 BigInt;分组桶 / 嵌套聚合(COALESCE(SUM(x),0)) / HAVING 内联三条路径同步修正;COALESCE/IFNULL 取第一个非 NULL 参数的类型。
+- **Windows 版本资源**:新增 `src/version.rc.in`(经 `configure_file(@ONLY)` 注入 CMake 项目版本)挂接到 `sqltiny_server` 目标,exe 属性页显示产品名 / 版本 / 版权;版本号只维护 CMakeLists 一处。
+
+### employees 数据集对比验证
+
+- `tests/load_employees.py`:把 `test_db-master` 的 employees 数据集灌入 SQLTiny(默认 3307,WAL 模式),多行批插(~3.5 万行/s,392 万行约 50s);避开外键、ENUM→CHAR(1),保留复合主键与 DATE。
+- `tests/compare_employees.py`:同一组 14 条查询(过滤 / GROUP BY / 2 表&3 表 JOIN / SUM·AVG·COUNT / 定点)在 MySQL 与 SQLTiny 双端执行并规范化比对,修复后 **14/14 MATCH**。
+- 行数精确一致:employees 300024 / departments 9 / dept_manager 24 / dept_emp 331603 / titles 443308 / salaries 2844047;548MB WAL 重放 783 万条记录完整恢复 392 万行。
+- **已知差距(待办)**:JOIN/聚合性能比 MySQL 慢 1~2 个数量级(3 表 JOIN 求均薪 77s vs 6.5s,疑似大表 JOIN 未利用主键索引走全表扫描);AVG 仍以 Decimal 字符串回包。
+
 ### 验证基线
 
 | 测试 | 结果 |
@@ -53,6 +69,8 @@
 | `test_wal_recovery.py` / `test_concurrency.py` | 重启恢复全通过 / 5 线程 15s 无 crash |
 | `test_perf_vs_sqlite.py` | Release 版 server 单进程 / 多进程(`multiprocessing.Pool`)两种模式对比 SQLite,结果保存 `benchmark/`(带时间戳 JSON + CSV、`history.csv` 追加、`latest.json`) |
 | `stress_stability.py` | 稳定性压测:复杂查询计时 / 并发 soak(ops·错误率·p50/p95/p99) / 事务冲突不变量 / `kill -9` 崩溃恢复(WAL replay 原子性) / RSS 内存稳定;`--self-server` 自动拉起实例 |
+| `load_employees.py` / `compare_employees.py` | employees 标准数据集(392 万行 / 6 表)灌入 + 与真实 MySQL 同库 14 条查询对比 —— 14/14 MATCH;WAL 548MB 重放完整恢复 |
+| `_verify_fixes.py` | 裸 socket 模拟 Navicat 握手(CONNECT_ATTRS)+ DATE 聚合 / SUM / COALESCE 类型断言(回归防护) |
 | `test_sqlalchemy.py` | 33 PASS / 0 FAIL / 0 GAP(原 #5–#8 与 DESCRIBE/SHOW FULL TABLES 反射限制均已修复) |
 | **实测客户端** | DBX/dbExpress(Delphi)连接 + 打开表 + 浏览索引/列正常;类 Navicat 图形工具浏览表/索引/列正常;PyMySQL / mysql CLI 正常 |
 
@@ -63,6 +81,7 @@
 | `CMakeLists.txt` | `project(SQLTiny VERSION 1.2.0 LANGUAGES CXX)` |
 | `vcpkg.json` | `"version-string": "1.2.0"` |
 | `src/main.cpp` | 启动横幅 `SQLTiny v1.2.0 — MySQL wire protocol server` |
+| `src/version.rc.in` | exe Windows 版本资源(经 configure_file 注入 CMake 版本),右键属性页显示产品名 / 版本 / 版权 |
 | `README.md` / `CODEPLAN.md` | 本版本变更清单与验证基线 |
 | 协议层 `@@version` / `VERSION()` | 仍为 `5.7.0-SQLTiny` —— MySQL 客户端兼容用伪装版本,**不是**产品版本,不随产品版本改动 |
 
@@ -745,6 +764,8 @@ SQLTiny 第一版可以简化:
    - **大结果集(>16MB 分包)**:`src/net/mysql_proto.cpp` 当前对 >16MB 结果包未处理(注释明说"先不考虑"),需补分包并加专项压测(超大 SELECT 结果、流式返回)
    - **超长事务**:配合 #3 版本回收(长事务导致 `versions_` 不压缩、内存增长),加"开事务→持续写入→长时 hold→崩溃恢复"专项压测
 
+7. **employees 数据集验证完成(2026-11-14)**:与真实 MySQL 同库对比 14/14 MATCH;同步修复 Navicat 2013(握手 `CLIENT_CONNECT_ATTRS` 残留字节)、DATE MIN/MAX(年份截断)、整型 SUM 字符串回包三项。**剩余差距**:大表 JOIN 疑似未利用主键索引走全表扫描(3 表 JOIN 77s vs MySQL 6.5s,待补 JOIN 索引利用);AVG 仍以字符串回包 —— 详见 §0 v1.2.2 交付。
+
 ---
 
 ## 8. 测试体系:用例分类与测试点
@@ -793,6 +814,7 @@ SQLTiny 第一版可以简化:
 | C08 | MySQL 协议 / 客户端兼容 | `smoke_m25_e2e.cpp`、`test_sqlalchemy.py` | 握手与 packet、COM_QUERY、OK/EOF/ERR;SQLAlchemy 15 组:Engine、Core DDL/CRUD、聚合、ORM、2.0 风格 select/insert/update/delete、`text():param`、Session rollback、relationship 级联、`engine.begin()` 事务块、类型映射(DateTime/Boolean/Float)、Inspector(`DESCRIBE`/`SHOW FULL TABLES` 已支持) | ✅ 33 PASS / 0 FAIL / 0 GAP |
 | C09 | 并发 / 性能 / 稳定性 | `test_concurrency.py`、`test_perf_vs_sqlite.py`、`stress_stability.py` | 5 线程 15s 读写一致性、大数据量 INSERT + JOIN 对比、10 条复杂查询计时、并发 soak + 事务冲突不变量(无丢写/幻行)、`kill -9` 崩溃恢复(WAL replay 原子性)、RSS 内存稳定 | ✅ 无 crash / PASS |
 | C10 | 第三方客户端兼容(v1.1.0) | `dbx_probe.cpp`、`test_stmt_prepare.py`、`smoke_m6_session_db.cpp` | 进程内跑 DBX/dbExpress 连接/元数据/事务典型 SQL(58 断言)、裸 socket 走 `COM_STMT_PREPARE/EXECUTE/CLOSE` binary protocol 全流程(7 断言)、多库会话级隔离、`smoke_m25_e2e` 适配经典 EOF 帧 | ✅ 58/58、7/7、PASS |
+| C11 | 真实数据集对比(v1.2.2) | `load_employees.py`、`compare_employees.py`、`_verify_fixes.py` | test_db-master employees 6 表 392 万行灌入(WAL)、与 MySQL 14 条查询双端比对、Navicat 式握手(CONNECT_ATTRS)回归、DATE 聚合 / SUM 类型断言 | ✅ 14/14 MATCH |
 
 **分层**:C01–C07 为进程内 C++ smoke(无需 server,纳入 `CTest`);C08–C10 需要 server(端口 3306 或由脚本自动起停的随机端口);`test_txn_vs_sqlite.py` 自带 server 生命周期管理。当前 `ctest` **10/10**(10 个 CTest 目标,含 v1.1.0 新增的 `dbx_probe`;需先启动 3306 端口的 server 供 `smoke_m25_e2e` 连接)。
 

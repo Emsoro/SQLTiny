@@ -24,6 +24,7 @@ constexpr uint32_t CLIENT_MULTI_STATEMENTS   = 0x00010000;
 constexpr uint32_t CLIENT_MULTI_RESULTS      = 0x00020000;
 constexpr uint32_t CLIENT_PLUGIN_AUTH        = 0x00080000;
 constexpr uint32_t CLIENT_PLUGIN_AUTH_LENENC = 0x00200000;
+constexpr uint32_t CLIENT_CONNECT_ATTRS      = 0x00100000;
 constexpr uint32_t CLIENT_DEPRECATE_EOF      = 0x01000000;
 constexpr uint32_t CLIENT_SESSION_TRACK      = 0x02000000;
 

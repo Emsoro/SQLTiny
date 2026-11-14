@@ -59,3 +59,6 @@ sqltiny_data/
 
 # Navicat 兼容性调试现场(data 目录 + 日志)
 _navicat_debug/
+
+# employees 数据集验证现场(WAL 数据 + 加载/查询日志)
+_employees_test/
