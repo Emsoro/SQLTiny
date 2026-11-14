@@ -1,6 +1,6 @@
 # SQLTiny — 轻量级嵌入式数据库 · MySQL 协议兼容
 
-> **当前版本 `v1.2.5`(2026-11-14)** · 版本号统一维护在 `CMakeLists.txt`(`project(SQLTiny VERSION 1.2.5)`)、`vcpkg.json`(`version-string`)与 `src/main.cpp` 启动横幅。协议层对外仍伪装为 `5.7.0-SQLTiny` 以兼容 MySQL 客户端,与产品版本无关。
+> **当前版本 `v2.0.0`(2026-11-15)** · 版本号统一维护在 `CMakeLists.txt`(`project(SQLTiny VERSION 2.0.0)`)、`vcpkg.json`(`version-string`)与 `src/main.cpp` 启动横幅。协议层对外仍伪装为 `5.7.0-SQLTiny` 以兼容 MySQL 客户端,与产品版本无关。
 
 **SQLTiny** 是用现代 C++20 从零重写的轻量级关系型数据库,核心设计灵感来自 [HSQLDB](http://hsqldb.org/),额外暴露 **MySQL Wire Protocol**——标准 MySQL 客户端(`mysql` CLI、Navicat、DBeaver、Connector/J、PyMySQL、DBX/dbExpress)直接连接。
 
@@ -32,6 +32,46 @@
 > 🔒 **锁分层**: Catalog.mu_(DDL) → Table.mu_ shared_lock(SELECT 多读者并行) / unique_lock(DML 独占) → RowLockMap(行级冲突检测) → TransactionManager.writeLock_(提交边界) → WalManager.mu_(WAL 文件读写)
 >
 > 🧊 **MVCC**: SELECT 完全不加锁,`for_each_visible(querySCN, readerTxn)` 按 `createSCN/deleteSCN` 与 `pendingTxn` 过滤;未提交行只对所属事务可见,commit 才 `finalize_commit` 对外发布
+
+---
+
+## 🆕 v2.0.0 更新内容
+
+本版本为**存储引擎索引结构升级**:主键索引从自研 AVL 树整体替换为 **B+ 树**(`IndexBPlusTree`),所有内部节点只存路由分隔键、全部条目落在叶子、叶子单向链表相连。
+
+### 索引级收益(微基准 `bench_index`,Release,200 万条 salaries 主键)
+
+| 操作 | AVL(v1.2.5) | B+ 树(v2.0.0) | 变化 |
+|---|---|---|---|
+| 随机点查 ×20 万 | 351.6 ms | **285.4 ms** | **+19%** |
+| 复合键前缀扫描 ×20 万(JOIN 探测路径) | 449.7 ms | **340.4 ms** | **+24%** |
+| 全量遍历 | 67.9 ms | **8.9 ms** | **7.6x** |
+| 乱序插入 200 万 | 3787.8 ms | 3704.3 ms | 持平 |
+| 树高 | 22 层 | 4 层 | 扇出 64 |
+
+### 端到端(employees 数据集,Release 构建,`tests/_bench_join.py`)
+
+| 查询 | AVL | B+ 树 | 变化 |
+|---|---|---|---|
+| 3 表 JOIN 求各部门均薪 | 18.99 s | **18.42 s** | +3.0% |
+| `employees⋈salaries WHERE emp_no=10001` | 2.17 s | **2.10 s** | +3.2% |
+| 单员工行数 | 2.09 s | **2.00 s** | +4.3% |
+| 高薪员工数(下推+混合谓词) | 7.20 s | **6.90 s** | +4.2% |
+| 2 表 JOIN 计行(哈希路径) | 0.97 s | **0.93 s** | +4.1% |
+
+> 说明:v1.2.5 文档中的 23.8s 为 Debug 构建数字;**自 v2.0.0 起性能基线统一使用 Release 构建**(同条件 Release 下 AVL 为 18.99s)。端到端提升约 3~4%——JOIN 耗时大头在执行器逐行求值/MVCC 过滤,与索引结构无关;索引级收益(扫描 +24%、遍历 7.6x)将在扫描密集型负载中进一步放大。WAL 回放(548MB)两者持平(~10s)。
+
+### 做了什么
+
+- **`IndexBPlusTree`**(`storage/index_bptree.h/.cpp`):内部节点最多 64 子/叶子最多 128 条,分裂自底向上迭代上推分隔键;叶子链支撑 `range_scan`/`prefix_scan`/`for_each` 顺序推进,命中即止;键全局有序,前缀扫描越过前缀即剪枝
+- **惰性删除**:只从叶子移除条目,不收缩树高、不回收空叶——分隔键允许"偏高"(指向已删键),路由/扫描语义不变;以最小复杂度保证 MVCC 逻辑删场景下的正确性
+- **`Key` 迁至 `storage/index_key.h`**:AVL 与 B+ 树共用键类型;`IndexAvl` 保留用于对照测试
+- **`tests/bench_index`**:AVL/B+ 树 A/B 微基准(顺序/乱序插入、点查、前缀扫描、全量遍历),不进 ctest
+- **`smoke_m1` 新增 B+ 树测试块**:乱序插入/点查/重复拒绝/删除/范围扫描/复合键前缀扫描(cb 提前停)/非唯一等键 find_all 与按 row_id 删除/全量扫描有序性/不变量校验
+
+### 回归
+
+`ctest` **10/10**;`test_full_flow.py` **48/48**;`test_vs_sqlite.py` 全场景一致;`test_stmt_prepare.py` 7/7;`compare_employees.py` **14/14 MATCH**。
 
 ---
 
@@ -175,6 +215,7 @@ SQL 语法:`SET SESSION TRANSACTION ISOLATION LEVEL <级别>`(会话默认)、`S
 | **M6 客户端兼容性 (v1.1.2)** | ✅ | DBeaver / Database Client 实测修复:DDL 选项跳过 · SHOW TABLES WHERE/LIKE · REFERENTIAL_CONSTRAINTS · 双引号与裸关键字别名 · INSTR 系列函数 |
 | **M6 P2 JOIN 优化 (v1.2.0)** | ✅ | Hash Join + 预建列索引 + 成本估算 + `EXPLAIN`;INNER/LEFT JOIN 约 77x / 62x 提速 · 500×2000 大表 INNER JOIN 仅 9ms |
 | **M6 P2 JOIN 优化·续 (v1.2.5)** | ✅ | PK 前缀索引探测(右表零物化)+ WHERE 谓词下推;employees 3 表 JOIN 77s→23.8s · 单员工⋈薪酬 28s→2.3s · SUM(DECIMAL) 列类型一致性修复 |
+| **存储引擎升级 (v2.0.0)** | ✅ | 主键索引 AVL → **B+ 树**;索引级:点查 +19% · 前缀扫描 +24% · 全量遍历 7.6x · 树高 22→4;端到端 employees JOIN 18.99s→18.42s(Release 基线) |
 | **后续** | 📋 | 等待队列/死锁检测 → 存储过程 · caching_sha2_password / SSL · 复制 |
 
 ---
@@ -231,10 +272,10 @@ FROM users u INNER JOIN orders o ON o.user_id = u.id;
 | 产物 | 类型 | 说明 |
 |---|---|---|
 | `build/Debug/sqltiny.lib` | 静态库 | 引擎核心,嵌入式进程内调用 |
-| `build/Debug/sqltiny_server.exe` | 可执行 | MySQL 协议 TCP 服务器(v1.2.5) |
+| `build/Debug/sqltiny_server.exe` | 可执行 | MySQL 协议 TCP 服务器(v2.0.0) |
 | `build/Release/sqltiny_server.exe` | 可执行(发布版) | 同上,Release 版约 **0.9 MB** 单文件(静态 CRT + fmt 静态链接,无 dll 依赖,可直接拷贝部署);Debug 版约 4.8 MB |
 
-**`sqltiny_server.exe` 文件信息(v1.2.5)**:
+**`sqltiny_server.exe` 文件信息(v2.0.0)**:
 
 | 属性 | 值 |
 |---|---|

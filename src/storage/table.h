@@ -2,7 +2,7 @@
 
 #include "parser/ast.h"
 #include "types/value.h"
-#include "storage/index_avl.h"
+#include "storage/index_bptree.h"
 #include <string>
 #include <vector>
 #include <optional>
@@ -115,13 +115,13 @@ private:
     // M5.6 MVCC:row_id → 版本元信息
     std::map<int64_t, VersionInfo> versions_;
 
-    // M6: 表级读写锁, 保护 row_map_ / versions_ / AVL 索引并发访问
+    // M6: 表级读写锁, 保护 row_map_ / versions_ / 主键索引并发访问
     // SELECT/遍历 → shared_lock (多读者并行)
     // INSERT/DELETE/UPDATE → unique_lock (独占)
     mutable std::shared_mutex mu_;
 
-    // 主键 AVL 索引 —— key 是 PK 列值按顺序拼接
-    std::unique_ptr<IndexAvl> pk_index_;
+    // 主键 B+ 树索引(v2.0.0,替换 AVL)—— key 是 PK 列值按顺序拼接
+    std::unique_ptr<IndexBPlusTree> pk_index_;
 
     Row pk_from_row(const Row& row) const;
     Key pk_key(const Row& pk) const;

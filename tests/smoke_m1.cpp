@@ -4,10 +4,12 @@
 #include <string>
 #include <vector>
 #include <algorithm>
+#include <random>
 #include <fmt/format.h>
 
 #include "types/value.h"
 #include "storage/index_avl.h"
+#include "storage/index_bptree.h"
 #include "parser/lexer.h"
 
 using namespace sqltiny;
@@ -115,7 +117,113 @@ int test_avl() {
     return 0;
 }
 
-// ---------- Lexer ----------
+// ---------- B+ 树(v2.0.0 主键索引) ----------
+int test_bptree() {
+    using storage::IndexBPlusTree;
+    using storage::Key;
+
+    // 唯一索引:乱序插入 + 点查 + 重复拒绝 + 删除
+    IndexBPlusTree idx(true);
+    std::vector<int> order(100);
+    for (int i = 0; i < 100; ++i) order[i] = i;
+    std::mt19937 rng(42);
+    std::shuffle(order.begin(), order.end(), rng);
+    for (int i : order) {
+        bool ok = idx.insert(Key(types::Value::make_int(i)), i * 10);
+        CHECK(ok);
+    }
+    CHECK(idx.size() == 100);
+    CHECK(idx.height() <= 7);
+    CHECK(idx.check_invariants());
+
+    auto r = idx.find(Key(types::Value::make_int(42)));
+    CHECK(r.has_value() && *r == 420);
+    CHECK(!idx.find(Key(types::Value::make_int(999))).has_value());
+    CHECK(!idx.insert(Key(types::Value::make_int(42)), 0));  // unique 拒绝
+
+    for (int i = 0; i < 100; i += 2)
+        CHECK(idx.remove(Key(types::Value::make_int(i)), i * 10));
+    CHECK(!idx.remove(Key(types::Value::make_int(20)), 200));  // 已删
+    CHECK(idx.size() == 50);
+    CHECK(idx.check_invariants());
+    CHECK(!idx.find(Key(types::Value::make_int(42))).has_value());
+    CHECK(idx.find(Key(types::Value::make_int(43))).has_value());
+
+    // 范围扫描 [20, 40]
+    std::vector<int64_t> hits;
+    idx.range_scan(Key(types::Value::make_int(20)),
+                   Key(types::Value::make_int(40)),
+                   [&](const Key&, int64_t rid) { hits.push_back(rid); return true; },
+                   false);
+    CHECK(hits.size() == 10);
+    for (int64_t rid : hits) CHECK(rid % 20 == 10);
+
+    // 多列键 + 前缀扫描(模拟复合主键首列探测)
+    IndexBPlusTree mkey(true);
+    for (int a = 0; a < 50; ++a)
+        for (int b = 0; b < 5; ++b) {
+            std::vector<types::Value> parts{ types::Value::make_int(a), types::Value::make_int(b) };
+            CHECK(mkey.insert(Key(parts), a * 100 + b));
+        }
+    CHECK(mkey.size() == 250);
+    CHECK(mkey.check_invariants());
+    // 逐列前缀 (a) 应命中全部 5 个 b
+    std::vector<int64_t> pf;
+    mkey.prefix_scan(Key(types::Value::make_int(30)),
+                     [&](const Key& k, int64_t rid) {
+                         if (k.size() != 2 || k.parts()[0].v_int != 30)
+                             fprintf(stderr, "FAIL: prefix hit bad key\n");
+                         pf.push_back(rid); return true;
+                     });
+    CHECK(pf.size() == 5);
+    CHECK(std::all_of(pf.begin(), pf.end(), [](int64_t rid) { return rid / 100 == 30; }));
+    // cb 提前停止
+    int stopped = 0;
+    mkey.prefix_scan(Key(types::Value::make_int(31)),
+                     [&](const Key&, int64_t) { ++stopped; return stopped < 2; });
+    CHECK(stopped == 2);
+    // 不存在的前缀:零命中
+    int none = 0;
+    mkey.prefix_scan(Key(types::Value::make_int(999)),
+                     [&](const Key&, int64_t) { ++none; return true; });
+    CHECK(none == 0);
+
+    // 非唯一索引:等键多条目 + find_all + 按 row_id 删除
+    IndexBPlusTree mkeys(false);
+    for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 3; ++j)
+            CHECK(mkeys.insert(Key(types::Value::make_int(7)), i * 10 + j));
+    CHECK(mkeys.size() == 9);
+    CHECK(mkeys.check_invariants());
+    auto all = mkeys.find_all(Key(types::Value::make_int(7)));
+    CHECK(all.size() == 9);
+    std::sort(all.begin(), all.end());
+    for (int j = 0; j < 3; ++j) CHECK(all[j] == j);
+    CHECK(mkeys.remove(Key(types::Value::make_int(7)), 11));
+    CHECK(!mkeys.remove(Key(types::Value::make_int(7)), 11));  // 已删
+    CHECK(mkeys.size() == 8);
+    CHECK(mkeys.find_all(Key(types::Value::make_int(7))).size() == 8);
+    CHECK(mkeys.check_invariants());
+
+    // 全量扫描有序性
+    IndexBPlusTree big(true);
+    std::vector<int> seq(5000);
+    for (int i = 0; i < 5000; ++i) seq[i] = i;
+    std::shuffle(seq.begin(), seq.end(), rng);
+    for (int i : seq) CHECK(big.insert(Key(types::Value::make_int(i)), i));
+    CHECK(big.size() == 5000);
+    CHECK(big.check_invariants());
+    int64_t last = -1, cnt = 0;
+    big.for_each([&](const Key& k, int64_t) {
+        CHECK(k.parts()[0].v_int > last);
+        last = k.parts()[0].v_int;
+        ++cnt;
+    });
+    CHECK(cnt == 5000);
+
+    printf("  B+ Tree ..... PASS\n");
+    return 0;
+}
 int test_lexer() {
     using namespace parser;
 
@@ -220,6 +328,7 @@ int main() {
     int rc = 0;
     rc |= test_value();
     rc |= test_avl();
+    rc |= test_bptree();
     rc |= test_lexer();
     if (rc == 0) printf("All smoke tests PASSED.\n");
     return rc;

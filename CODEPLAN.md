@@ -7,7 +7,7 @@
 
 ---
 
-## 0. 当前状态(2026-11-14,v1.2.5)
+## 0. 当前状态(2026-11-15,v2.0.0)
 
 > 下文 M1–M5 为原始规划、M6 各节含设计稿伪代码,均保留供追溯。**落地状态以本节与各节 ✅ 标记为准;实际目录与运行方式见 `README.md`,架构图见 `architecture.svg`。**
 
@@ -24,6 +24,7 @@
 | **M6 P3 客户端兼容(v1.1.0)** | ✅ | **服务端预编译语句(`COM_STMT_*` binary protocol)、information_schema 虚拟表、SHOW 扩展、CASE 表达式、EOF 帧兼容、`--query-log`** |
 | **M6 P2 JOIN 优化** | ✅ | Hash Join + 预建列索引 + 成本估算 + `EXPLAIN`;INNER/LEFT JOIN 约 77x / 62x 提速 |
 | **M6 P2 JOIN 优化·续(v1.2.5)** | ✅ | **PK 前缀索引探测** + WHERE 谓词下推 + SUM(DECIMAL) 列类型一致性修复;employees 3 表 JOIN 77s→23.8s |
+| **存储引擎升级(v2.0.0)** | ✅ | 主键索引 **AVL → B+ 树**(`IndexBPlusTree`);索引级点查 +19% / 前缀扫描 +24% / 全量遍历 7.6x / 树高 22→4;端到端 employees JOIN 18.99s→18.42s(Release 基线) |
 | M6 P4 | ⬜ | 复制与更大测试覆盖;认证(caching_sha2_password / SSL)仍未做 |
 
 ### 本轮交付(v1.1.0 客户端兼容性)
@@ -38,6 +39,30 @@
 - **协议命令**:`COM_FIELD_LIST`(db 限定 + `\0` 截断)、`COM_STATISTICS`、`COM_PROCESS_INFO`、`COM_CHANGE_USER`;SSL 请求返回明确 ERR;`@@max_allowed_packet` / `@@net_write_timeout` / `@@net_read_timeout` / `@@sql_mode` / `@@lower_case_table_names` / `@@sql_auto_is_null`。
 - **调试设施**:`--query-log FILE`(逐条记录命令 0x?? + SQL + 执行结果);`tests/dbx_probe.cpp`(58 断言,进程内用 `Session::execute` 逐条跑 DBX 连接/元数据/事务阶段的典型 SQL)、`tests/test_stmt_prepare.py`(7 断言,裸 socket 走 `COM_STMT_*` 全流程)。
 - **回归适配**:`tests/smoke_m25_e2e.cpp` 改为兼容经典 EOF 帧(列定义后的 `0xfe` 包,包长 < 9),否则老用例会把 EOF 误判为结果集结束;`ctest` 在启动 server 后恢复 10/10。
+
+### 本轮交付(v2.0.0 主键索引 AVL → B+ 树)
+
+主键索引从自研 AVL 树整体替换为 B+ 树。内部节点只存路由分隔键,全部 (Key, row_id) 落在叶子;叶子单向链表相连,范围/前缀/全量扫描沿链顺序推进,缓存局部性显著优于 AVL 递归中序遍历。
+
+- **`IndexBPlusTree`**(`storage/index_bptree.h/.cpp`):内部节点 ≤64 子 / 叶子 ≤128 条;插入自底向上迭代分裂,叶子分裂上推右叶首键、内部分裂继续上推中位分隔键;`range_scan`/`prefix_scan`/`for_each` 沿叶子链推进,`prefix_scan` 依赖键全局有序性"越过前缀即剪枝";`Key` 迁至 `storage/index_key.h` 供两种索引共用;`IndexAvl` 保留用于对照测试。
+- **惰性删除**:只从叶子移除条目,不收缩树高、不回收空叶——分隔键允许"偏高"(指向已删键),路由/扫描语义不变;非唯一索引的等键条目跨叶分裂场景由 `find_all`/`remove` 的左右兄弟叶回查覆盖。
+- **`tests/bench_index`**(不进 ctest):AVL/B+ 树 A/B 微基准 —— 顺序/乱序插入(模拟 WAL 回放/最坏路径)、随机点查、复合键前缀扫描(JOIN 探测路径)、全量遍历。
+- **`smoke_m1` 新增 B+ 树测试块**:乱序插入、点查、unique 重复拒绝、删除、范围扫描、复合键前缀扫描(cb 提前停)、非唯一等键 find_all/按 row_id 删除、全量扫描有序性、不变量校验(children==seps+1、分隔键下界、叶子链全局有序且计数一致)。
+
+**性能实测(Release 构建;v1.2.5 文档的 23.8s 为 Debug 数字,自 v2.0.0 起性能基线统一 Release)**:
+
+| 指标 | AVL | B+ 树 | 变化 |
+|---|---|---|---|
+| 微基准:点查 ×20 万 | 351.6ms | 285.4ms | +19% |
+| 微基准:复合键前缀扫描 ×20 万 | 449.7ms | 340.4ms | +24% |
+| 微基准:全量遍历 200 万 | 67.9ms | 8.9ms | 7.6x |
+| 微基准:乱序插入 200 万 | 3787.8ms | 3704.3ms | 持平 |
+| 端到端:3 表 JOIN(Release) | 18.99s | 18.42s | +3.0% |
+| 端到端:emp⋈sal emp_no=10001 | 2.17s | 2.10s | +3.2% |
+| 端到端:混合谓词 | 7.20s | 6.90s | +4.2% |
+| WAL 回放 548MB | ~10s | ~11s | 持平 |
+
+端到端仅 +3~4%:JOIN 耗时大头在执行器逐行求值/MVCC 过滤(与索引结构无关);索引级收益(前缀扫描 +24%、遍历 7.6x)在扫描密集型负载中放大。WAL 回放持平:回放 783 万条记录的耗时主要在 WAL 解码与行物化,且本数据集插入路径接近顺序、AVL 顺序插入本就不慢。
 
 ### 本轮交付(v1.2.5 大表 JOIN 主键索引利用)
 
@@ -64,7 +89,7 @@ employees 标准数据集(392 万行)实测:3 表 JOIN 求均薪 77s vs MySQL 6.
 - `tests/load_employees.py`:把 `test_db-master` 的 employees 数据集灌入 SQLTiny(默认 3307,WAL 模式),多行批插(~3.5 万行/s,392 万行约 50s);避开外键、ENUM→CHAR(1),保留复合主键与 DATE。
 - `tests/compare_employees.py`:同一组 14 条查询(过滤 / GROUP BY / 2 表&3 表 JOIN / SUM·AVG·COUNT / 定点)在 MySQL 与 SQLTiny 双端执行并规范化比对,修复后 **14/14 MATCH**。
 - 行数精确一致:employees 300024 / departments 9 / dept_manager 24 / dept_emp 331603 / titles 443308 / salaries 2844047;548MB WAL 重放 783 万条记录完整恢复 392 万行。
-- **已知差距(待办)**:PK 前缀索引探测已落地(v1.2.5,3 表 JOIN 77s→23.8s),但与 MySQL 仍有约 3.6x 差距(逐行 RPC 往返 + 每行重新构造 ExecContext 的常数开销);AVG 仍以 Decimal 字符串回包;结果集 >16MB 未分包;超长事务专项压测未做。
+- **已知差距(待办)**:PK 前缀索引探测已落地(v1.2.5)、主键索引已升级 B+ 树(v2.0.0),Release 基线下 3 表 JOIN 18.4s,与 MySQL(6.5s)仍有约 2.8x 差距(逐行 RPC 往返 + 每行重新构造 ExecContext 的常数开销);AVG 仍以 Decimal 字符串回包;结果集 >16MB 未分包;超长事务专项压测未做。
 
 ### 验证基线
 
@@ -86,18 +111,18 @@ employees 标准数据集(392 万行)实测:3 表 JOIN 求均薪 77s vs MySQL 6.
 | `test_sqlalchemy.py` | 33 PASS / 0 FAIL / 0 GAP(原 #5–#8 与 DESCRIBE/SHOW FULL TABLES 反射限制均已修复) |
 | **实测客户端** | DBX/dbExpress(Delphi)连接 + 打开表 + 浏览索引/列正常;类 Navicat 图形工具浏览表/索引/列正常;PyMySQL / mysql CLI 正常 |
 
-### 版本标识(v1.2.5)
+### 版本标识(v2.0.0)
 
 | 位置 | 内容 |
 |---|---|
-| `CMakeLists.txt` | `project(SQLTiny VERSION 1.2.5 LANGUAGES CXX)` |
-| `vcpkg.json` | `"version-string": "1.2.5"` |
-| `src/main.cpp` | 启动横幅 `SQLTiny v1.2.5 — MySQL wire protocol server` |
+| `CMakeLists.txt` | `project(SQLTiny VERSION 2.0.0 LANGUAGES CXX)` |
+| `vcpkg.json` | `"version-string": "2.0.0"` |
+| `src/main.cpp` | 启动横幅 `SQLTiny v2.0.0 — MySQL wire protocol server` |
 | `src/version.rc.in` | exe Windows 版本资源(经 configure_file 注入 CMake 版本),右键属性页显示产品名 / 版本 / 版权 |
 | `README.md` / `CODEPLAN.md` | 本版本变更清单与验证基线 |
 | 协议层 `@@version` / `VERSION()` | 仍为 `5.7.0-SQLTiny` —— MySQL 客户端兼容用伪装版本,**不是**产品版本,不随产品版本改动 |
 
-> v1.1.0 统一了此前分散的版本号(启动横幅 `v1.0`、manifest `0.1.0`、CMake 未声明),交付 Prepared Statement、information_schema、SHOW 扩展与 EOF 帧兼容。**v1.1.2** 在此基础上交付 DBeaver / Database Client 实测兼容修复(DDL 选项跳过、SHOW TABLES WHERE/LIKE 过滤、`REFERENTIAL_CONSTRAINTS` 虚拟表、系统变量补齐、双引号与裸关键字别名、`INSTR/LOCATE/POSITION` 函数)。**v1.2.0** 交付 JOIN 性能优化(Hash Join + 预建列索引 + 成本估算 + `EXPLAIN`),INNER/LEFT JOIN 约 77x / 62x 提速,详见 README「v1.2.0 更新内容」。**v1.2.5** 交付大表 JOIN 主键索引利用(PK 前缀索引探测 + WHERE 谓词下推)与 SUM(DECIMAL) 列类型一致性修复,employees 3 表 JOIN 77s→23.8s、单员工⋈薪酬 28s→2.3s,详见 README「v1.2.5 更新内容」。
+> v1.1.0 统一了此前分散的版本号(启动横幅 `v1.0`、manifest `0.1.0`、CMake 未声明),交付 Prepared Statement、information_schema、SHOW 扩展与 EOF 帧兼容。**v1.1.2** 在此基础上交付 DBeaver / Database Client 实测兼容修复(DDL 选项跳过、SHOW TABLES WHERE/LIKE 过滤、`REFERENTIAL_CONSTRAINTS` 虚拟表、系统变量补齐、双引号与裸关键字别名、`INSTR/LOCATE/POSITION` 函数)。**v1.2.0** 交付 JOIN 性能优化(Hash Join + 预建列索引 + 成本估算 + `EXPLAIN`),INNER/LEFT JOIN 约 77x / 62x 提速,详见 README「v1.2.0 更新内容」。**v1.2.5** 交付大表 JOIN 主键索引利用(PK 前缀索引探测 + WHERE 谓词下推)与 SUM(DECIMAL) 列类型一致性修复,employees 3 表 JOIN 77s→23.8s、单员工⋈薪酬 28s→2.3s,详见 README「v1.2.5 更新内容」。**v2.0.0** 主键索引整体升级 B+ 树,索引级点查 +19% / 前缀扫描 +24% / 全量遍历 7.6x,端到端 employees JOIN 18.99s→18.42s(Release 基线),详见 README「v2.0.0 更新内容」。
 
 ---
 

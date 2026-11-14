@@ -18,7 +18,7 @@ Row Table::pk_from_row(const Row& row) const {
 Key Table::pk_key(const Row& pk) const { return Key(pk); }
 
 Table::Table(TableDef def) : def_(std::move(def)) {
-    if (!def_.primary_key_cols.empty()) pk_index_ = std::make_unique<IndexAvl>(true /*unique*/);
+    if (!def_.primary_key_cols.empty()) pk_index_ = std::make_unique<IndexBPlusTree>(true /*unique*/);
 }
 
 static Table::VersionInfo make_version(uint64_t createSCN, uint64_t pendingTxn) {
