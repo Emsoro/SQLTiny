@@ -1,6 +1,6 @@
 # SQLTiny — 轻量级嵌入式数据库 · MySQL 协议兼容
 
-> **当前版本 `v2.0.1`(2026-11-15)** · 版本号统一维护在 `CMakeLists.txt`(`project(SQLTiny VERSION 2.0.1)`)、`vcpkg.json`(`version-string`)与 `src/main.cpp` 启动横幅。协议层对外仍伪装为 `5.7.0-SQLTiny` 以兼容 MySQL 客户端,与产品版本无关。
+> **当前版本 `v2.0.2`(2026-11-15)** · 版本号统一维护在 `CMakeLists.txt`(`project(SQLTiny VERSION 2.0.2)`)、`vcpkg.json`(`version-string`)与 `src/main.cpp` 启动横幅。协议层对外仍伪装为 `5.7.0-SQLTiny` 以兼容 MySQL 客户端,与产品版本无关。
 
 **SQLTiny** 是用现代 C++20 从零重写的轻量级关系型数据库,核心设计灵感来自 [HSQLDB](http://hsqldb.org/),额外暴露 **MySQL Wire Protocol**——标准 MySQL 客户端(`mysql` CLI、Navicat、DBeaver、Connector/J、PyMySQL、DBX/dbExpress)直接连接。
 
@@ -32,6 +32,35 @@
 > 🔒 **锁分层**: Catalog.mu_(DDL) → Table.mu_ shared_lock(SELECT 多读者并行) / unique_lock(DML 独占) → RowLockMap(行级冲突检测) → TransactionManager.writeLock_(提交边界) → WalManager.mu_(WAL 文件读写)
 >
 > 🧊 **MVCC**: SELECT 完全不加锁,`for_each_visible(querySCN, readerTxn)` 按 `createSCN/deleteSCN` 与 `pendingTxn` 过滤;未提交行只对所属事务可见,commit 才 `finalize_commit` 对外发布
+
+---
+
+## 🆕 v2.0.2 更新内容
+
+在 v2.0.1 基础上扩大**聚合下推覆盖面**,把此前仍走「物化中间行」的两类查询也纳入下推,employees 数据集 5 项 JOIN 基准全部进入下推快路径。
+
+### 两项扩展
+
+1. **WHERE 按表侧拆分**:`WHERE` 按 `AND` 拆成连接词后分类——只引用左表列的在扫描阶段预过滤,只引用右表列的在探测回调里过滤,跨表引用则整体回退。此前只要 `WHERE` 出现右表列就放弃下推,`高薪员工数` 这类混合谓词因此仍物化 280 万行。
+2. **哈希等值 JOIN 也下推**:下推判据由「仅 PK 前缀探测」放宽为「PK 前缀探测 **或** 哈希等值探测」;哈希路径在融合分支内本地物化右表建桶,探测时直接累加,不再物化 `left × matches` 拼装行。
+
+同时加固:表达式中出现**子查询 / CASE / 占位符 / 星号**时一律不下推(引用面无法静态判定)。
+
+### 实测(employees 392 万行,Release)
+
+| 查询 | v2.0.1 | v2.0.2 | MySQL | 剩余差距 |
+|---|---|---|---|---|
+| 3 表 JOIN 求各部门均薪 | 2.06 s | **2.05 s** | 1.60 s | 1.28x |
+| `employees⋈salaries WHERE emp_no=10001` | 0.105 s | **0.081 s** | <0.01 s | — |
+| 单员工行数 | 0.094 s | **0.086 s** | <0.01 s | — |
+| 高薪员工数(下推+混合谓词) | 2.76 s | **0.94 s** | 0.37 s | 2.5x |
+| 2 表 JOIN 计行(哈希路径) | 0.37 s | **0.13 s** | 0.05 s | 2.5x |
+
+自 v2.0.0 累计:3 表 JOIN **18.42 s → 2.05 s(9x)**、高薪员工数 **6.90 s → 0.94 s(7.3x)**、2 表哈希计行 **0.93 s → 0.13 s(7.2x)**。
+
+### 回归
+
+`ctest` **10/10**;`smoke_m6_hsqldb_matrix` 73/73;`test_full_flow` **48/48**;`test_vs_sqlite` 全场景一致;`test_stmt_prepare` 7/7;`compare_employees` **14/14 MATCH**;逐行数值与 MySQL 一致(仅既有的 AVG 小数位 / SUM 类型表现差异)。
 
 ---
 
@@ -247,6 +276,7 @@ SQL 语法:`SET SESSION TRANSACTION ISOLATION LEVEL <级别>`(会话默认)、`S
 | **M6 P2 JOIN 优化·续 (v1.2.5)** | ✅ | PK 前缀索引探测(右表零物化)+ WHERE 谓词下推;employees 3 表 JOIN 77s→23.8s · 单员工⋈薪酬 28s→2.3s · SUM(DECIMAL) 列类型一致性修复 |
 | **存储引擎升级 (v2.0.0)** | ✅ | 主键索引 AVL → **B+ 树**;索引级:点查 +19% · 前缀扫描 +24% · 全量遍历 7.6x · 树高 22→4;端到端 employees JOIN 18.99s→18.42s(Release 基线) |
 | **3 表 JOIN 执行优化 (v2.0.1)** | ✅ | ExecContext 零拷贝 + idx_probe 跳过右表物化 + **聚合下推到 PK 前缀探测**;employees 3 表 JOIN **18.25s→1.97s**(9.3x),与 MySQL 差距 11.7x→1.25x |
+| **下推覆盖面扩展 (v2.0.2)** | ✅ | WHERE 按表侧拆分 + 哈希等值 JOIN 也下推 + 子查询/CASE 不下推加固;高薪员工数 2.76s→0.94s · 2 表哈希计行 0.37s→0.13s |
 | **后续** | 📋 | 等待队列/死锁检测 → 存储过程 · caching_sha2_password / SSL · 复制 |
 
 ---
@@ -303,10 +333,10 @@ FROM users u INNER JOIN orders o ON o.user_id = u.id;
 | 产物 | 类型 | 说明 |
 |---|---|---|
 | `build/Debug/sqltiny.lib` | 静态库 | 引擎核心,嵌入式进程内调用 |
-| `build/Debug/sqltiny_server.exe` | 可执行 | MySQL 协议 TCP 服务器(v2.0.1) |
+| `build/Debug/sqltiny_server.exe` | 可执行 | MySQL 协议 TCP 服务器(v2.0.2) |
 | `build/Release/sqltiny_server.exe` | 可执行(发布版) | 同上,Release 版约 **0.9 MB** 单文件(静态 CRT + fmt 静态链接,无 dll 依赖,可直接拷贝部署);Debug 版约 4.8 MB |
 
-**`sqltiny_server.exe` 文件信息(v2.0.1)**:
+**`sqltiny_server.exe` 文件信息(v2.0.2)**:
 
 | 属性 | 值 |
 |---|---|

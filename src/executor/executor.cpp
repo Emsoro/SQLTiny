@@ -953,6 +953,10 @@ ResultSet Executor::exec_select(const ast::SelectStmt& s) {
     auto cols_in_range = [&](const ast::Expression& e, int lo, int hi) -> bool {
         std::function<bool(const ast::Expression&)> rec =
             [&](const ast::Expression& x) -> bool {
+                // 子查询/CASE/占位符/星号: 引用面无法静态判定,一律不下推
+                if (x.kind == ast::ExprKind::Subquery || x.kind == ast::ExprKind::Case ||
+                    x.kind == ast::ExprKind::Placeholder || x.kind == ast::ExprKind::Star)
+                    return false;
                 if (x.kind == ast::ExprKind::Column) {
                     if (!x.column_name.empty() && x.column_name[0] == '@') return false;
                     std::string key = x.table_name.empty()
@@ -969,10 +973,13 @@ ResultSet Executor::exec_select(const ast::SelectStmt& s) {
             };
         return rec(e);
     };
+    std::vector<const ast::Expression*> fused_left_preds, fused_right_preds;  // WHERE 按表侧拆分
     if (has_agg && !s.having && !s.distinct && !s.joins.empty()) {
         const auto& lastp = join_plans.back();
         // 仅 INNER: LEFT JOIN 无匹配需保留左行(聚合下推路径不做 NULL 补齐)
-        if (lastp.idx_probe && lastp.pure_equi && lastp.kind == ast::JoinKind::Inner &&
+        // 探测方式: PK 前缀探测(不物化右表)或 哈希等值探测(需物化右表建桶)
+        if (lastp.pure_equi && lastp.kind == ast::JoinKind::Inner &&
+            (lastp.idx_probe || lastp.hash_join) &&
             slots.size() == s.joins.size() + 1) {
             auto& rslot = slots.back();
             fused_right_offset = rslot.col_offset;
@@ -986,7 +993,23 @@ ResultSet Executor::exec_select(const ast::SelectStmt& s) {
             bool ok = true;
             for (auto& [ge, _] : s.group_by)
                 if (!cols_in_range(*ge, 0, fused_right_offset)) { ok = false; break; }
-            if (ok && s.where && !cols_in_range(*s.where, 0, fused_right_offset)) ok = false;
+            if (ok && s.where) {
+                // WHERE 按 AND 拆分: 只引用左表列的在扫描阶段预过滤,只引用右表列的在探测时过滤;
+                // 跨表引用/无法解析的连接词则整体回退到通用(物化)路径
+                std::vector<const ast::Expression*> conj;
+                std::function<void(const ast::Expression&)> split_and_where =
+                    [&](const ast::Expression& e) {
+                        if (e.kind == ast::ExprKind::BinaryOp && e.binop == ast::BinOp::And &&
+                            e.lhs && e.rhs) { split_and_where(*e.lhs); split_and_where(*e.rhs); }
+                        else conj.push_back(&e);
+                    };
+                split_and_where(*s.where);
+                for (auto* c : conj) {
+                    if (cols_in_range(*c, 0, fused_right_offset)) fused_left_preds.push_back(c);
+                    else if (cols_in_range(*c, fused_right_offset, total_cols)) fused_right_preds.push_back(c);
+                    else { ok = false; break; }
+                }
+            }
             if (ok) {
                 for (auto& [e, _] : s.columns) {
                     FusedCol fc;
@@ -1071,13 +1094,28 @@ ResultSet Executor::exec_select(const ast::SelectStmt& s) {
             std::unordered_map<std::string, size_t> gmap;
             const int rcol = plan.equi.right_col;
             const int lcol = plan.equi.left_col;
+            // 哈希探测所需: 右表物化 + 等值桶(仅非 idx_probe 路径)
+            std::vector<storage::Row> fr_right;
+            std::unordered_map<std::string, std::vector<size_t>> fr_buckets;
+            if (!plan.idx_probe) {
+                jtbl->for_each_visible(sqscn, [&](int64_t, const storage::Row& row) {
+                    fr_right.push_back(row); return true;
+                }, rtxn);
+                for (size_t ri = 0; ri < fr_right.size(); ++ri) {
+                    if (rcol < 0 || rcol >= static_cast<int>(fr_right[ri].size())) continue;
+                    std::string hk = join_hash_key(fr_right[ri][rcol]);
+                    if (!hk.empty()) fr_buckets[std::move(hk)].push_back(ri);
+                }
+            }
             for (auto& l : left_rows) {
                 if (lcol < 0 || lcol >= static_cast<int>(l.size())) continue;
                 if (static_cast<int>(l.size()) < fused_right_offset) continue;  // 左行必须是完整前缀
-                if (s.where) {
+                bool pre_skip = false;
+                for (auto* c : fused_left_preds) {                              // 左表侧 WHERE 预过滤
                     auto wctx = build_ctx(l);
-                    if (!to_bool(eval(*s.where, wctx))) continue;               // WHERE 只引用左表列
+                    if (!to_bool(eval(*c, wctx))) { pre_skip = true; break; }
                 }
+                if (pre_skip) continue;
                 const auto& keyv = l[lcol];
                 if (keyv.is_null()) continue;
                 std::string key;
@@ -1089,50 +1127,77 @@ ResultSet Executor::exec_select(const ast::SelectStmt& s) {
                 auto git = gmap.find(key);
                 if (git != gmap.end()) gp = &grps[git->second];
                 bool any = false;
-                jtbl->for_each_by_pk_prefix(keyv, sqscn,
-                    [&](int64_t, const storage::Row& r) {
-                        if (rcol < 0 || rcol >= static_cast<int>(r.size())) return true;
-                        if (!keyv.sql_equals(r[rcol])) return true;
-                        if (!any) {
-                            any = true;
-                            if (!gp) {
-                                grps.push_back(FGrp{});
-                                gp = &grps.back();
-                                gp->accs.resize(fused_cols.size());
-                                gp->rep = l;                       // 仅首次命中构造一次
-                                gp->rep.resize(total_cols);
-                                gmap.emplace(key, grps.size() - 1);
-                            }
-                            for (int i = 0; i < fused_right_cols && i < static_cast<int>(r.size()); ++i)
-                                gp->rep[fused_right_offset + i] = r[i];
+                // 单条匹配行: 首次命中建组(含代表性整行) + 累加聚合
+                auto process_match = [&](const storage::Row& r) {
+                    if (!any) {
+                        any = true;
+                        if (!gp) {
+                            grps.push_back(FGrp{});
+                            gp = &grps.back();
+                            gp->accs.resize(fused_cols.size());
+                            gp->rep = l;                       // 仅首次命中构造一次
+                            gp->rep.resize(total_cols);
+                            gmap.emplace(key, grps.size() - 1);
                         }
-                        for (size_t ci = 0; ci < fused_cols.size(); ++ci) {
-                            const auto& fc = fused_cols[ci];
-                            if (fc.kind == 0) continue;
-                            auto& a = gp->accs[ci];
-                            if (fc.kind == 1) { ++a.c; continue; }          // COUNT(*)
-                            if (!fc.arg) continue;
-                            auto v = eval(*fc.arg, build_right_ctx(r));
-                            if (v.is_null()) continue;
-                            if (fc.kind == 2) ++a.c;                       // COUNT(col)
-                            else if (fc.kind == 3 || fc.kind == 4) {       // SUM / AVG
-                                if (v.is_int()) { a.iacc += v.v_int; a.acc += static_cast<double>(v.v_int); }
-                                else {
-                                    a.all_int = false;
-                                    double d; if (v.try_to_double(d)) a.acc += d;
-                                }
-                                ++a.c;
-                            } else {                                       // MIN / MAX
-                                if (a.first) { a.best = v; a.first = false; }
-                                else {
-                                    int cv = v.compare(a.best);
-                                    if ((fc.kind == 5 && cv < 0) || (fc.kind == 6 && cv > 0)) a.best = v;
-                                }
-                                ++a.c;
+                        for (int i = 0; i < fused_right_cols && i < static_cast<int>(r.size()); ++i)
+                            gp->rep[fused_right_offset + i] = r[i];
+                    }
+                    for (size_t ci = 0; ci < fused_cols.size(); ++ci) {
+                        const auto& fc = fused_cols[ci];
+                        if (fc.kind == 0) continue;
+                        auto& a = gp->accs[ci];
+                        if (fc.kind == 1) { ++a.c; continue; }          // COUNT(*)
+                        if (!fc.arg) continue;
+                        auto v = eval(*fc.arg, build_right_ctx(r));
+                        if (v.is_null()) continue;
+                        if (fc.kind == 2) ++a.c;                       // COUNT(col)
+                        else if (fc.kind == 3 || fc.kind == 4) {       // SUM / AVG
+                            if (v.is_int()) { a.iacc += v.v_int; a.acc += static_cast<double>(v.v_int); }
+                            else {
+                                a.all_int = false;
+                                double d; if (v.try_to_double(d)) a.acc += d;
                             }
+                            ++a.c;
+                        } else {                                       // MIN / MAX
+                            if (a.first) { a.best = v; a.first = false; }
+                            else {
+                                int cv = v.compare(a.best);
+                                if ((fc.kind == 5 && cv < 0) || (fc.kind == 6 && cv > 0)) a.best = v;
+                            }
+                            ++a.c;
                         }
-                        return true;
-                    }, rtxn);
+                    }
+                };
+                // 右表侧 WHERE: 不满足则跳过该匹配行
+                auto pass_right_preds = [&](const storage::Row& r) {
+                    for (auto* c : fused_right_preds) {
+                        auto rc = build_right_ctx(r);
+                        if (!to_bool(eval(*c, rc))) return false;
+                    }
+                    return true;
+                };
+                if (plan.idx_probe) {
+                    jtbl->for_each_by_pk_prefix(keyv, sqscn,
+                        [&](int64_t, const storage::Row& r) {
+                            if (rcol < 0 || rcol >= static_cast<int>(r.size())) return true;
+                            if (!keyv.sql_equals(r[rcol])) return true;
+                            if (!pass_right_preds(r)) return true;     // 索引已过滤的键不受影响
+                            process_match(r);
+                            return true;
+                        }, rtxn);
+                } else {
+                    std::string hk = join_hash_key(keyv);
+                    auto bit = hk.empty() ? fr_buckets.end() : fr_buckets.find(hk);
+                    if (bit != fr_buckets.end()) {
+                        for (size_t ri : bit->second) {
+                            const auto& r = fr_right[ri];
+                            if (rcol < 0 || rcol >= static_cast<int>(r.size())) continue;
+                            if (!keyv.sql_equals(r[rcol])) continue;
+                            if (!pass_right_preds(r)) continue;
+                            process_match(r);
+                        }
+                    }
+                }
             }
             // 无 GROUP BY 时,空输入也要产出一行(COUNT=0 / SUM=NULL,与 MySQL 一致)
             if (s.group_by.empty() && grps.empty()) {
