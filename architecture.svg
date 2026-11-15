@@ -22,10 +22,10 @@
 <rect x="0" y="0" width="1600" height="6" fill="url(#accent)"/>
 <rect x="30" y="28" width="6" height="46" rx="3" fill="#2546B0"/>
 <text x="48" y="52" font-size="26" font-weight="bold" fill="#14213D">SQLTiny — Architecture</text>
-<text x="48" y="77" font-size="13.5" fill="#5B6B8C">C++20 embedded database · MySQL wire protocol · HSQLDB 2.7.4 four isolation levels · MVCC transactions</text>
+<text x="48" y="77" font-size="13.5" fill="#5B6B8C">C++20 embedded database · MySQL wire protocol · 4 isolation levels · MVCC transactions</text>
 <rect x="1240" y="32" width="330" height="36" rx="18" fill="#E7EDFF" stroke="#3D63D8"/>
 <circle cx="1262" cy="50" r="5" fill="#0E8F7E"/>
-<text x="1278" y="55" font-size="12.5" font-weight="bold" fill="#2546B0">M6 · 4 ISOLATION LEVELS · MVCC</text>
+<text x="1278" y="55" font-size="12.5" font-weight="bold" fill="#2546B0">v2.0.3 · 4 ISOLATION LEVELS · MVCC</text>
 
 <!-- ========== PANEL A: REQUEST FLOW ========== -->
 <rect x="30" y="100" width="520" height="1120" rx="14" fill="#FFFFFF" stroke="#CBD8EC"/>
@@ -72,7 +72,7 @@
 <circle cx="86" cy="512" r="10" fill="#2546B0"/>
 <text x="86" y="516" font-size="11" font-weight="bold" fill="#FFFFFF" text-anchor="middle">5</text>
 <text x="106" y="505" font-size="13" font-weight="bold" fill="#14213D">Executor — query_scn(session_) · for_each_visible</text>
-<text x="106" y="523" font-size="11" fill="#4C5F82">WHERE / GROUP BY / ORDER BY · JOIN · aggregate · subquery IN</text>
+<text x="106" y="523" font-size="11" fill="#4C5F82">PK prefix probe · Hash Join · aggregate pushdown · subquery IN</text>
 <text x="106" y="540" font-size="11" fill="#4C5F82">DML: tryLockRowWrite + RowAction + writerTxn</text>
 <path d="M 290 552 L 290 576" fill="none" stroke="#3D63D8" stroke-width="1.3" marker-end="url(#ahB)"/>
 
@@ -90,7 +90,7 @@
 <circle cx="86" cy="704" r="10" fill="#2546B0"/>
 <text x="86" y="708" font-size="11" font-weight="bold" fill="#FFFFFF" text-anchor="middle">7</text>
 <text x="106" y="697" font-size="13" font-weight="bold" fill="#14213D">Catalog → Table → Row</text>
-<text x="106" y="715" font-size="11" fill="#4C5F82">AVL PK index · row_map_ · Table.mu_ shared_mutex</text>
+<text x="106" y="715" font-size="11" fill="#4C5F82">B+ tree PK index · row_map_ · Table.mu_ shared_mutex</text>
 <text x="106" y="732" font-size="11" fill="#4C5F82">versions_: createSCN / deleteSCN / pendingTxn / pending delete / insert</text>
 <path d="M 290 744 L 290 768" fill="none" stroke="#C07A16" stroke-width="1.3" marker-end="url(#ahA)"/>
 
@@ -125,7 +125,7 @@
 <path d="M 64 1094 L 516 1094" stroke="#E3EAF5" stroke-width="1"/>
 <text x="64" y="1118" font-size="12.5" font-weight="bold" fill="#14213D">Design principles</text>
 <text x="64" y="1138" font-size="11.5" fill="#4C5F82">① No dirty reads at any level — pendingTxn rows are owner-only</text>
-<text x="64" y="1156" font-size="11.5" fill="#4C5F82">② RU → RC (+ read-only next txn), RR → SERIALIZABLE (HSQLDB)</text>
+<text x="64" y="1156" font-size="11.5" fill="#4C5F82">② RU → RC (+ read-only next txn), RR → SERIALIZABLE</text>
 <text x="64" y="1174" font-size="11.5" fill="#4C5F82">③ RC = statement snapshot; RR/SER = txn snapshot + 40001</text>
 <text x="64" y="1192" font-size="11.5" fill="#4C5F82">④ Commit is the only publication point for rows and WAL</text>
 
@@ -206,7 +206,7 @@
 <rect x="1048" y="520" width="506" height="78" rx="7" fill="#FFFFFF" stroke="#CBD8EC"/>
 <text x="1070" y="542" font-size="11.5" fill="#4C5F82">SELECT / INSERT / UPDATE / DELETE use the session read snapshot</text>
 <text x="1070" y="560" font-size="11.5" fill="#4C5F82">UPDATE = delete(old rid) + insert(new rid), 2 RowActions with own ids</text>
-<text x="1070" y="578" font-size="11.5" fill="#4C5F82">SELECT takes zero locks; JOIN is O(N×M) nested loop (M6 P2: hash join)</text>
+<text x="1070" y="578" font-size="11.5" fill="#4C5F82">SELECT takes zero locks · Hash Join + PK prefix probe · agg pushdown</text>
 <path d="M 596 602 L 1554 602" stroke="#E9EFF8" stroke-width="1"/>
 
 <!-- Row 6: Transaction Manager (indigo) -->
@@ -232,11 +232,11 @@
 <rect x="782" y="722" width="260" height="82" rx="7" fill="#F4F7FC" stroke="#7E90B4"/>
 <text x="912" y="742" font-size="12.5" font-weight="bold" fill="#14213D" text-anchor="middle">table.cpp · catalog.cpp</text>
 <text x="912" y="760" font-size="11" fill="#4C5F82" text-anchor="middle">VersionInfo · row_map_</text>
-<text x="912" y="778" font-size="11" fill="#4C5F82" text-anchor="middle">AVL PK index · shared_mutex</text>
+<text x="912" y="778" font-size="11" fill="#4C5F82" text-anchor="middle">B+ tree PK index · shared_mutex</text>
 <rect x="1048" y="722" width="506" height="82" rx="7" fill="#FFFFFF" stroke="#CBD8EC"/>
 <text x="1070" y="742" font-size="11.5" fill="#4C5F82">for_each_visible(querySCN, readerTxn): owner sees own pending writes</text>
 <text x="1070" y="760" font-size="11.5" fill="#4C5F82">VersionInfo{createSCN, deleteSCN, pendingTxn, pendingInsert, pendingDelete}</text>
-<text x="1070" y="778" font-size="11.5" fill="#4C5F82">finalize_commit() at commit · AVL enforces the unique primary key</text>
+<text x="1070" y="778" font-size="11.5" fill="#4C5F82">finalize_commit() at commit · B+ tree enforces the unique primary key</text>
 <path d="M 596 808 L 1554 808" stroke="#E9EFF8" stroke-width="1"/>
 
 <!-- Row 8: Persistence (amber) -->
@@ -267,15 +267,15 @@
 <text x="942" y="1025" font-size="10.5" fill="#4C5F82">expected divergences</text>
 <rect x="1242" y="966" width="298" height="76" rx="7" fill="#FFF0D8" stroke="#C07A16"/>
 <text x="1258" y="990" font-size="12" font-weight="bold" fill="#14213D">Regression</text>
-<text x="1258" y="1009" font-size="10.5" fill="#4C5F82">ctest 7/7 · full_flow 17/17 ·</text>
+<text x="1258" y="1009" font-size="10.5" fill="#4C5F82">ctest 10/10 · full_flow 48/48 ·</text>
 <text x="1258" y="1025" font-size="10.5" fill="#4C5F82">WAL recovery &amp; concurrency OK</text>
 
-<text x="610" y="1066" font-size="12" font-weight="bold" fill="#2546B0">Isolation semantics (HSQLDB 2.7.4)</text>
+<text x="610" y="1066" font-size="12" font-weight="bold" fill="#2546B0">Isolation semantics (4 levels)</text>
 <text x="610" y="1086" font-size="11.5" fill="#4C5F82">READ UNCOMMITTED → READ COMMITTED (+ read-only when set for the next transaction)</text>
 <text x="610" y="1103" font-size="11.5" fill="#4C5F82">READ COMMITTED (default) → statement-level snapshot, non-repeatable reads allowed</text>
 <text x="610" y="1120" font-size="11.5" fill="#4C5F82">REPEATABLE READ → SERIALIZABLE → one transaction-level snapshot (SNAPSHOT ISOLATION)</text>
 <text x="610" y="1137" font-size="11.5" fill="#4C5F82">SERIALIZABLE → stale / concurrent row writes abort with 40001 (MySQL errno 1213)</text>
 <text x="610" y="1161" font-size="12" font-weight="bold" fill="#B4690E">Known gaps</text>
-<text x="610" y="1179" font-size="11.5" fill="#4C5F82">① JOIN is a pure nested loop O(N×M) — M6 P2 needs Index Nested Loop / Hash Join</text>
-<text x="610" y="1196" font-size="11.5" fill="#4C5F82">② DESCRIBE / SHOW FULL TABLES not implemented (2 SQLAlchemy inspector checks fail)</text>
+<text x="610" y="1179" font-size="11.5" fill="#4C5F82">① FOR UPDATE / LOCK IN SHARE MODE · deadlock detection · wait queue</text>
+<text x="610" y="1196" font-size="11.5" fill="#4C5F82">② caching_sha2_password / SSL auth · replication · >16MB result set chunking</text>
 </svg>

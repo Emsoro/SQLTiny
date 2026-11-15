@@ -1056,7 +1056,67 @@ ResultSet Executor::exec_select(const ast::SelectStmt& s) {
     uint64_t sqscn = query_scn(session_);
     uint64_t rtxn = reader_txn(session_);
     std::vector<storage::Row> left_rows;
-    if (pushdown_conjuncts.empty()) {
+
+    // ---- 主表 PK 首列等值 → 索引前缀探测,避免全表扫描 ----
+    // 实测:employees WHERE emp_no=10001 走全表扫描 74ms(30 万行逐行 eval),
+    // salaries(280 万行)同条件 678ms;PK 前缀探测可降到亚毫秒级。
+    // 只认「PK 首列 = 同类型家族字面量」:索引按键存储类型严格比较,而 WHERE 求值允许
+    // 隐式转换,跨类型下推会漏行,故此处置信域保守。
+    const types::Value* pk_eq_lit = nullptr;
+    if (s.where && !tbl->def().primary_key_cols.empty() &&
+        !tbl->def().primary_key_cols.front().empty()) {
+        int pk_off = tbl->def().column_index(tbl->def().primary_key_cols.front().front());
+        if (pk_off >= 0 && pk_off < static_cast<int>(tbl->def().columns.size())) {
+            types::SqlType pk_type = tbl->def().columns[pk_off].type.type;
+            std::vector<const ast::Expression*> eq_conj;
+            std::function<void(const ast::Expression&)> split_eq =
+                [&](const ast::Expression& e) {
+                    if (e.kind == ast::ExprKind::BinaryOp && e.binop == ast::BinOp::And &&
+                        e.lhs && e.rhs) { split_eq(*e.lhs); split_eq(*e.rhs); }
+                    else eq_conj.push_back(&e);
+                };
+            split_eq(*s.where);
+            for (auto* c : eq_conj) {
+                if (c->kind != ast::ExprKind::BinaryOp || c->binop != ast::BinOp::Eq) continue;
+                const ast::Expression* col = nullptr;
+                const ast::Expression* lit = nullptr;
+                if (c->lhs && c->lhs->kind == ast::ExprKind::Column &&
+                    c->rhs && c->rhs->kind == ast::ExprKind::Literal) {
+                    col = c->lhs.get(); lit = c->rhs.get();
+                } else if (c->rhs && c->rhs->kind == ast::ExprKind::Column &&
+                           c->lhs && c->lhs->kind == ast::ExprKind::Literal) {
+                    col = c->rhs.get(); lit = c->lhs.get();
+                }
+                if (!col || !lit || lit->literal.is_null()) continue;
+                std::string ck = col->table_name.empty()
+                    ? col->column_name : (col->table_name + "." + col->column_name);
+                auto it = base_col_index.find(ck);
+                if (it == base_col_index.end() || it->second != pk_off) continue;
+                bool same_family = (types::is_integer(pk_type) && lit->literal.is_int()) ||
+                                   (types::is_numeric(pk_type) && lit->literal.is_numeric()) ||
+                                   (types::is_string(pk_type) && lit->literal.is_string()) ||
+                                   (types::is_datetime(pk_type) && lit->literal.is_string());
+                if (!same_family) continue;
+                pk_eq_lit = &lit->literal;
+                break;
+            }
+        }
+    }
+
+    // 存在逻辑删除历史时索引不再是全扫的超集(见 Table::has_dead_rows 说明),
+    // 此时回退全表扫描以保证四个隔离级别下的可见性语义。
+    const bool pk_probe_ok = pk_eq_lit && !tbl->has_dead_rows();
+    if (pk_probe_ok) {
+        // 索引探测:只访问首列匹配的键(谓词仍逐行复核,保证与全扫语义一致)
+        tbl->for_each_by_pk_prefix(*pk_eq_lit, sqscn, [&](int64_t, const storage::Row& row) {
+            for (auto* c : pushdown_conjuncts) {
+                auto ctx = build_ctx(row);
+                if (!to_bool(eval(*c, ctx))) return true;
+            }
+            left_rows.push_back(row);
+            return true;
+        }, rtxn);
+    } else if (pushdown_conjuncts.empty()) {
         tbl->for_each_visible(sqscn, [&](int64_t, const storage::Row& row) { left_rows.push_back(row); return true; }, rtxn);
     } else {
         // 下推谓词预过滤:只把通过主表局部条件的行送入 JOIN

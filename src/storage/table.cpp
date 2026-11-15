@@ -77,6 +77,7 @@ bool Table::delete_by_pk(const Row& pk_values, uint64_t deleteSCN,
         // MVCC 逻辑删除:标记 deleteSCN,物理保留到 checkpoint 压缩
         pk_index_->remove(key, rid);           // 从索引拿掉,新查询看不到
         auto& vi = versions_[rid];
+        if (vi.deleteSCN == 0) ++dead_rows_;   // 首次置删:计入逻辑删除行数
         vi.deleteSCN = deleteSCN;
         if (pendingTxn != 0) {
             vi.pendingTxn = pendingTxn;
@@ -92,7 +93,11 @@ void Table::erase_row(int64_t row_id) {
     if (it == row_map_.end()) return;
     if (pk_index_) pk_index_->remove(Key(pk_from_row(it->second)), row_id);
     row_map_.erase(it);
-    versions_.erase(row_id);
+    auto vit = versions_.find(row_id);
+    if (vit != versions_.end()) {
+        if (vit->second.deleteSCN != 0) --dead_rows_;
+        versions_.erase(vit);
+    }
 }
 
 void Table::restore_row(int64_t row_id) {
@@ -105,6 +110,7 @@ void Table::restore_row(int64_t row_id) {
         if (!pk_index_->find(key)) pk_index_->insert(key, row_id);
     }
     auto& vi = versions_[row_id];
+    if (vi.deleteSCN != 0) --dead_rows_;   // 回滚删除:不再是逻辑删除行
     vi.deleteSCN = 0;
     vi.pendingDelete = false;
     if (!vi.pendingInsert) vi.pendingTxn = 0;

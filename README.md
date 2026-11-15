@@ -1,6 +1,6 @@
 # SQLTiny — 轻量级嵌入式数据库 · MySQL 协议兼容
 
-> **当前版本 `v2.0.2`(2026-11-15)** · 版本号统一维护在 `CMakeLists.txt`(`project(SQLTiny VERSION 2.0.2)`)、`vcpkg.json`(`version-string`)与 `src/main.cpp` 启动横幅。协议层对外仍伪装为 `5.7.0-SQLTiny` 以兼容 MySQL 客户端,与产品版本无关。
+> **当前版本 `v2.0.3`(2026-11-15)** · 版本号统一维护在 `CMakeLists.txt`(`project(SQLTiny VERSION 2.0.3)`)、`vcpkg.json`(`version-string`)与 `src/main.cpp` 启动横幅。协议层对外仍伪装为 `5.7.0-SQLTiny` 以兼容 MySQL 客户端,与产品版本无关。
 
 **SQLTiny** 是用现代 C++20 从零重写的轻量级关系型数据库,核心设计灵感来自 [HSQLDB](http://hsqldb.org/),额外暴露 **MySQL Wire Protocol**——标准 MySQL 客户端(`mysql` CLI、Navicat、DBeaver、Connector/J、PyMySQL、DBX/dbExpress)直接连接。
 
@@ -32,6 +32,34 @@
 > 🔒 **锁分层**: Catalog.mu_(DDL) → Table.mu_ shared_lock(SELECT 多读者并行) / unique_lock(DML 独占) → RowLockMap(行级冲突检测) → TransactionManager.writeLock_(提交边界) → WalManager.mu_(WAL 文件读写)
 >
 > 🧊 **MVCC**: SELECT 完全不加锁,`for_each_visible(querySCN, readerTxn)` 按 `createSCN/deleteSCN` 与 `pendingTxn` 过滤;未提交行只对所属事务可见,commit 才 `finalize_commit` 对外发布
+
+---
+
+## 🆕 v2.0.3 更新内容
+
+主键点查此前与普通查询同路:全表扫描 30 万 / 280 万行并逐行 `eval` 谓词,`SELECT COUNT(*) FROM employees WHERE emp_no=10001` 要 **74 ms**。本版本让「主表主键首列等值」直接走**主键前缀索引探测**,不再扫整表。
+
+### 两处改动
+
+1. **执行器:`WHERE pk = 常量` → 索引前缀探测**(`src/executor/executor.cpp`)。`WHERE` 按 `AND` 拆成连接词后找「主表 PK 首列 = 字面量」等值条件,命中则用 `for_each_by_pk_prefix` 只访问键匹配的行;谓词仍在回调里逐行复核,与全表扫描语义一致。为防跨类型漏行,只接受**同类型家族**字面量(整型列配整型字面量、字符串列配字符串字面量等),跨类型仍走全表扫描;`IS NULL` / 参数占位符不参与探测。
+2. **存储层:逻辑删除回退保护**(`src/storage/table.{h,cpp}`)。MVCC 逻辑删除会**立即**把键从主键索引摘掉、却保留 `row_map_` 里的物理行,此时「索引扫描」不再是「全表扫描」的超集(旧快照 / 未提交删除的行会漏)。因此新增 `dead_rows_` 计数器与 `has_dead_rows()`(首次置删自增、物理清除 / 回滚恢复自减),存在逻辑删除历史时点查**自动回退全表扫描**,四个隔离级别下的可见性语义不变。
+
+### 实测(employees 392 万行,Release,5 次均值)
+
+| 查询 | v2.0.2 | v2.0.3 | 提升 |
+|---|---|---|---|
+| `SELECT COUNT(*) FROM employees WHERE emp_no=10001` | 74 ms | **0.13 ms** | ~570x |
+| `SELECT COUNT(*) FROM salaries WHERE emp_no=10001` | 678 ms | **0.17 ms** | ~4000x |
+| `WHERE emp_no>499000`(范围,非等值) | 92 ms | 92 ms | 不变(仍全表扫描) |
+| `WHERE first_name='Georgi'`(无索引列) | 87 ms | 87 ms | 不变(仍全表扫描) |
+
+**适用范围**:索引探测只对「主键首列等值」生效,范围 / `LIKE` / 非主键列 / 复合主键非首列一概不受影响。
+
+### 边界验证
+
+- 不存在的主键 → `0`;`salaries` 单员工 → `17` 行;`emp_no>499000` → `999`;`first_name='Georgi'` → `253`,逐条与 MySQL 一致。
+- 删除提交后点查该行 → `0`;`DELETE` + `ROLLBACK` 后该行重新可见(`dead_rows_` 回退路径生效),表总行数不变。
+- `architecture.svg` 同步更新:移除 HSQLDB 字样、PK 索引标注 AVL → B+ 树、执行器标注 PK 前缀探测 / Hash Join / 聚合下推,版本徽标改为 `v2.0.3`。
 
 ---
 
@@ -277,6 +305,7 @@ SQL 语法:`SET SESSION TRANSACTION ISOLATION LEVEL <级别>`(会话默认)、`S
 | **存储引擎升级 (v2.0.0)** | ✅ | 主键索引 AVL → **B+ 树**;索引级:点查 +19% · 前缀扫描 +24% · 全量遍历 7.6x · 树高 22→4;端到端 employees JOIN 18.99s→18.42s(Release 基线) |
 | **3 表 JOIN 执行优化 (v2.0.1)** | ✅ | ExecContext 零拷贝 + idx_probe 跳过右表物化 + **聚合下推到 PK 前缀探测**;employees 3 表 JOIN **18.25s→1.97s**(9.3x),与 MySQL 差距 11.7x→1.25x |
 | **下推覆盖面扩展 (v2.0.2)** | ✅ | WHERE 按表侧拆分 + 哈希等值 JOIN 也下推 + 子查询/CASE 不下推加固;高薪员工数 2.76s→0.94s · 2 表哈希计行 0.37s→0.13s |
+| **主键点查索引探测 (v2.0.3)** | ✅ | `WHERE PK首列=常量` 走 `for_each_by_pk_prefix`,不再全表扫描;逻辑删除历史自动回退全扫保证 MVCC 可见性;`employees` 点查 74ms→**0.13ms** · `salaries` 678ms→**0.17ms** |
 | **后续** | 📋 | 等待队列/死锁检测 → 存储过程 · caching_sha2_password / SSL · 复制 |
 
 ---
@@ -333,10 +362,10 @@ FROM users u INNER JOIN orders o ON o.user_id = u.id;
 | 产物 | 类型 | 说明 |
 |---|---|---|
 | `build/Debug/sqltiny.lib` | 静态库 | 引擎核心,嵌入式进程内调用 |
-| `build/Debug/sqltiny_server.exe` | 可执行 | MySQL 协议 TCP 服务器(v2.0.2) |
+| `build/Debug/sqltiny_server.exe` | 可执行 | MySQL 协议 TCP 服务器(v2.0.3) |
 | `build/Release/sqltiny_server.exe` | 可执行(发布版) | 同上,Release 版约 **0.9 MB** 单文件(静态 CRT + fmt 静态链接,无 dll 依赖,可直接拷贝部署);Debug 版约 4.8 MB |
 
-**`sqltiny_server.exe` 文件信息(v2.0.2)**:
+**`sqltiny_server.exe` 文件信息(v2.0.3)**:
 
 | 属性 | 值 |
 |---|---|

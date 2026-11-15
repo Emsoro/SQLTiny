@@ -105,6 +105,15 @@ public:
     void erase_row(int64_t row_id);     // 回滚未提交 INSERT:物理移除
     void restore_row(int64_t row_id);   // 回滚未提交 DELETE:恢复可见 + 主键索引
 
+    /// 是否存在「逻辑删除」历史(deleteSCN != 0 但行仍物理保留)。
+    /// 逻辑删除会立即把键从主键索引摘掉、却保留 row_map_ 中的旧版本,因此存在这种
+    /// 历史时「按索引扫描」不再是全表扫描的超集(旧快照/未提交删除的行会漏),
+    /// 执行器据此决定是否还能用主键索引做扫描。
+    bool has_dead_rows() const {
+        std::shared_lock<std::shared_mutex> lock(mu_);
+        return dead_rows_ > 0;
+    }
+
 private:
     TableDef def_;
     // 行存储:row_id → Row
@@ -114,6 +123,9 @@ private:
 
     // M5.6 MVCC:row_id → 版本元信息
     std::map<int64_t, VersionInfo> versions_;
+
+    // deleteSCN != 0 的行数(逻辑删除但物理保留),供 has_dead_rows() 廉价判断
+    int64_t dead_rows_ = 0;
 
     // M6: 表级读写锁, 保护 row_map_ / versions_ / 主键索引并发访问
     // SELECT/遍历 → shared_lock (多读者并行)
