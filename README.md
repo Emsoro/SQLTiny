@@ -1,6 +1,6 @@
 # SQLTiny — 轻量级嵌入式数据库 · MySQL 协议兼容
 
-> **当前版本 `v2.0.0`(2026-11-15)** · 版本号统一维护在 `CMakeLists.txt`(`project(SQLTiny VERSION 2.0.0)`)、`vcpkg.json`(`version-string`)与 `src/main.cpp` 启动横幅。协议层对外仍伪装为 `5.7.0-SQLTiny` 以兼容 MySQL 客户端,与产品版本无关。
+> **当前版本 `v2.0.1`(2026-11-15)** · 版本号统一维护在 `CMakeLists.txt`(`project(SQLTiny VERSION 2.0.1)`)、`vcpkg.json`(`version-string`)与 `src/main.cpp` 启动横幅。协议层对外仍伪装为 `5.7.0-SQLTiny` 以兼容 MySQL 客户端,与产品版本无关。
 
 **SQLTiny** 是用现代 C++20 从零重写的轻量级关系型数据库,核心设计灵感来自 [HSQLDB](http://hsqldb.org/),额外暴露 **MySQL Wire Protocol**——标准 MySQL 客户端(`mysql` CLI、Navicat、DBeaver、Connector/J、PyMySQL、DBX/dbExpress)直接连接。
 
@@ -18,7 +18,7 @@
 | 🔧 **服务端预编译语句** | `COM_STMT_PREPARE / EXECUTE / CLOSE / RESET / SEND_LONG_DATA` 完整 binary protocol |
 | 🗂️ **information_schema** | SCHEMATA / TABLES / COLUMNS 等虚拟表,第三方工具元数据浏览直接可用 |
 | 🗃️ **多库 Catalog** | CREATE/DROP/USE DATABASE,库级独立表注册 |
-| ⚡ **AVL 内存索引** | 自带平衡 BST,主键查询 O(log n) |
+| ⚡ **B+ 树内存索引** | 主键索引为自研 B+ 树(v2.0.0 起),点查 O(logₙ) · 叶子链顺序扫描 |
 | 🪶 **轻量** | 单库文件,启动毫秒级,依赖仅 fmtlib;**静态编译**(`x64-windows-static`),产物不依赖 `fmt.dll` / VC 运行时 DLL |
 
 ---
@@ -32,6 +32,36 @@
 > 🔒 **锁分层**: Catalog.mu_(DDL) → Table.mu_ shared_lock(SELECT 多读者并行) / unique_lock(DML 独占) → RowLockMap(行级冲突检测) → TransactionManager.writeLock_(提交边界) → WalManager.mu_(WAL 文件读写)
 >
 > 🧊 **MVCC**: SELECT 完全不加锁,`for_each_visible(querySCN, readerTxn)` 按 `createSCN/deleteSCN` 与 `pendingTxn` 过滤;未提交行只对所属事务可见,commit 才 `finalize_commit` 对外发布
+
+---
+
+## 🆕 v2.0.1 更新内容
+
+本版本聚焦 **3 表 JOIN 执行性能**。在 v2.0.0(B+ 树)基线上对 employees 标准数据集(392 万行)实测:3 表 JOIN 求各部门均薪 **18.25s**,而 MySQL 仅 **1.57s**。定位到三处执行器开销并逐一修复,最终 **18.25s → 1.97s(9.3x)**,与 MySQL 差距从 **11.7x 缩到 1.25x**。
+
+### 端到端(employees 392 万行,Release 构建)
+
+| 查询 | v2.0.0 | v2.0.1 | MySQL |
+|---|---|---|---|
+| **3 表 JOIN + GROUP BY + AVG** | 18.25 s | **1.97 s** | 1.57 s |
+| 3 表 JOIN + `COUNT(*)` | 6.44 s | **1.60 s** | — |
+| 3 表 + `SUM/AVG/MIN/MAX/COUNT` 五聚合 | — | 3.28 s | — |
+| `employees⋈salaries WHERE emp_no=10001` | 2.10 s | **0.08 s** | — |
+
+### 根因与修复
+
+1. **`ExecContext` 每行深拷贝**(占比最大):`build_ctx` 每行都拷贝整行 + 深拷贝 `col_index`(约 40 节点 map);GROUP BY 分桶 + 聚合两遍约 **1100 万次**调用,产生数亿次分配。改为 `row_ref` / `idx_ref` 指针,**`eval` 优先零拷贝取行与列索引**,`build_ctx` 变成 O(1)。**18.25 s → 7.24 s**
+2. **`idx_probe` 仍在物化右表**:注释称"右表零物化",代码却无条件 `for_each_visible` 拷贝右表全部行并逐行 `to_string` 建哈希桶——salaries 的 280 万行被白做一遍。改为仅非 `idx_probe` 路径物化。**7.24 s → 6.27 s**,点查 **2.10 s → 0.08 s**
+3. **中间行物化**(结构性修复):JOIN 为 314 万匹配行各构造 10 列整行(每行含 6 次字符串堆分配)。新增**聚合下推到 PK 前缀探测 JOIN**:当分组键与 WHERE 只引用左表列、聚合参数只引用右表列时,边探测边累加,不再物化中间行,每个分组仅保留 1 条代表性整行(供 ORDER BY 与非聚合列)。**6.27 s → 1.97 s**
+
+### 附带修正
+
+- 聚合下推严格限定 `INNER JOIN`(LEFT JOIN 无匹配需补 NULL 行);由 `smoke_m6_hsqldb_matrix` 的「无匹配时 LEFT JOIN 保留左表」用例发现
+- 聚合结果 `ORDER BY` 原实现对任意两行都用桶首行求值(恒等,等于不排序);下推路径改用各分组代表性行求值,`ORDER BY d.dept_name` 现按字母序正确输出
+
+### 回归
+
+`ctest` **10/10**;`smoke_m6_hsqldb_matrix` **73/73**;`test_full_flow` **48/48**;`test_vs_sqlite` 全场景一致;`test_stmt_prepare` 7/7;`compare_employees` **14/14 MATCH**(其中 3 表 JOIN:SQLTiny 1.87s vs MySQL 1.62s)。
 
 ---
 
@@ -216,6 +246,7 @@ SQL 语法:`SET SESSION TRANSACTION ISOLATION LEVEL <级别>`(会话默认)、`S
 | **M6 P2 JOIN 优化 (v1.2.0)** | ✅ | Hash Join + 预建列索引 + 成本估算 + `EXPLAIN`;INNER/LEFT JOIN 约 77x / 62x 提速 · 500×2000 大表 INNER JOIN 仅 9ms |
 | **M6 P2 JOIN 优化·续 (v1.2.5)** | ✅ | PK 前缀索引探测(右表零物化)+ WHERE 谓词下推;employees 3 表 JOIN 77s→23.8s · 单员工⋈薪酬 28s→2.3s · SUM(DECIMAL) 列类型一致性修复 |
 | **存储引擎升级 (v2.0.0)** | ✅ | 主键索引 AVL → **B+ 树**;索引级:点查 +19% · 前缀扫描 +24% · 全量遍历 7.6x · 树高 22→4;端到端 employees JOIN 18.99s→18.42s(Release 基线) |
+| **3 表 JOIN 执行优化 (v2.0.1)** | ✅ | ExecContext 零拷贝 + idx_probe 跳过右表物化 + **聚合下推到 PK 前缀探测**;employees 3 表 JOIN **18.25s→1.97s**(9.3x),与 MySQL 差距 11.7x→1.25x |
 | **后续** | 📋 | 等待队列/死锁检测 → 存储过程 · caching_sha2_password / SSL · 复制 |
 
 ---
@@ -272,10 +303,10 @@ FROM users u INNER JOIN orders o ON o.user_id = u.id;
 | 产物 | 类型 | 说明 |
 |---|---|---|
 | `build/Debug/sqltiny.lib` | 静态库 | 引擎核心,嵌入式进程内调用 |
-| `build/Debug/sqltiny_server.exe` | 可执行 | MySQL 协议 TCP 服务器(v2.0.0) |
+| `build/Debug/sqltiny_server.exe` | 可执行 | MySQL 协议 TCP 服务器(v2.0.1) |
 | `build/Release/sqltiny_server.exe` | 可执行(发布版) | 同上,Release 版约 **0.9 MB** 单文件(静态 CRT + fmt 静态链接,无 dll 依赖,可直接拷贝部署);Debug 版约 4.8 MB |
 
-**`sqltiny_server.exe` 文件信息(v2.0.0)**:
+**`sqltiny_server.exe` 文件信息(v2.0.1)**:
 
 | 属性 | 值 |
 |---|---|
@@ -510,7 +541,7 @@ SQLTiny/
 ├── src/
 │   ├── types/                 SqlType + Value 运行时值 + MySQL 协议类型映射
 │   ├── parser/                Lexer + AST + 递归下降 Parser(支持多库/多 JOIN)
-│   ├── storage/               AVL 内存索引 + 表存储
+│   ├── storage/               B+ 树内存索引 + 表存储
 │   ├── catalog/               Catalog 多库化 (databases_[db].tables_)
 │   ├── core/                  Database / Session 入口
 │   ├── executor/              Executor + infer_type() 静态类型推断 + 内置函数

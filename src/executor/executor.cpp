@@ -740,10 +740,15 @@ ResultSet Executor::exec_select(const ast::SelectStmt& s) {
         }
         for (auto& [n, c] : name_count) if (c > 1) ambiguous_cols.insert(n);
     }
+    // 热路径:零拷贝上下文 —— 只存「行 + 列索引」的指针,不拷行、不拷 map。
+    // 旧实现每行都 ExecContext{...,flat_row}(拷贝整行) + col_index = base_col_index
+    // (深拷贝 ~40 节点 map),万行级聚合下是决定性常数开销。生命周期由调用方保证
+    // (行来自容器/局部变量,存活期覆盖 ctx 使用范围)。
     auto build_ctx = [&](const storage::Row& flat_row) {
-        ExecContext ctx{ catalog_, primary_table, {}, flat_row };
+        ExecContext ctx{ catalog_, primary_table, {}, {} };
         ctx.exec = this;   // 子查询递归求值需要
-        ctx.col_index = base_col_index;
+        ctx.row_ref = &flat_row;
+        ctx.idx_ref = &base_col_index;
         return ctx;
     };
 
@@ -888,6 +893,139 @@ ResultSet Executor::exec_select(const ast::SelectStmt& s) {
         return r;
     }
 
+    // 聚合检测: SELECT 列(含嵌套在标量函数内的聚合)、GROUP BY、HAVING 任一出现即走聚合路径。
+    // 旧实现只扫 SELECT 顶层,COALESCE(SUM(x),0) 与「SELECT 无聚合但有 GROUP BY/HAVING」会被漏掉。
+    auto is_agg_func = [](const std::string& n) {
+        std::string low = n;
+        std::transform(low.begin(), low.end(), low.begin(),
+                       [](unsigned char c) { return std::tolower(c); });
+        return low == "count" || low == "sum" || low == "avg" || low == "min" || low == "max";
+    };
+    std::function<bool(const ast::Expression&)> contains_agg =
+        [&](const ast::Expression& e) -> bool {
+            if (e.kind == ast::ExprKind::FunctionCall) {
+                if (is_agg_func(e.func_name)) return true;
+                for (auto& a : e.func_args) if (a && contains_agg(*a)) return true;
+            }
+            if (e.lhs && contains_agg(*e.lhs)) return true;
+            if (e.rhs && contains_agg(*e.rhs)) return true;
+            if (e.operand && contains_agg(*e.operand)) return true;
+            return false;
+        };
+    bool has_agg = !s.group_by.empty() || static_cast<bool>(s.having);
+    for (auto& [e, _] : s.columns) if (contains_agg(*e)) has_agg = true;
+
+    // 输出列别名/类型(提前: 聚合下推路径会在 JOIN 阶段直接产出结果)
+    r.column_names.clear();
+    r.column_types.clear();
+    std::vector<_SlotRef> slot_refs;
+    for (auto& slot : slots) {
+        slot_refs.push_back({ slot.alias.empty() ? slot.real_name : slot.alias, slot.def });
+    }
+    for (auto& [e, alias] : s.columns) {
+        if (e->kind == ast::ExprKind::Star) {
+            for (auto& slot : slots) {
+                for (auto& col : slot.def->columns) {
+                    std::string name = slot.alias.empty() ? col.name : (slot.alias + "." + col.name);
+                    r.column_names.push_back(name);
+                    r.column_types.push_back(col.type.type);
+                }
+            }
+        } else {
+            std::string name = alias.empty() ? "<expr>" : alias;
+            if (e->kind == ast::ExprKind::Column) name = e->column_name;
+            r.column_names.push_back(name);
+            r.column_types.push_back(infer_type(*e, &slot_refs));
+        }
+    }
+
+    // ---- 聚合下推到 PK 前缀探测 JOIN ----
+    // 判据(保守): 最后一个 JOIN 为纯等值 PK 前缀探测;有 GROUP BY,无 HAVING/DISTINCT;
+    // 分组键与 WHERE 只引用左表列;聚合参数只引用右表列;非聚合 SELECT 列只引用左表列。
+    // 满足时边探测边累加,不再物化中间行 —— 中间行构造(每行 10 列、含多次字符串分配)
+    // 是 3 表 JOIN 的决定性开销。
+    struct FusedCol { int kind = 0; const ast::Expression* arg = nullptr; };
+    std::vector<FusedCol> fused_cols;   // 0=非聚合 1=COUNT(*) 2=COUNT 3=SUM 4=AVG 5=MIN 6=MAX
+    std::map<std::string, int> right_col_index;   // 右表列名 -> 行内局部下标
+    int  fused_right_offset = 0, fused_right_cols = 0;
+    bool fuse_agg = false;
+    // 表达式中所有列引用是否都落在 [lo, hi) 的行偏移区间
+    auto cols_in_range = [&](const ast::Expression& e, int lo, int hi) -> bool {
+        std::function<bool(const ast::Expression&)> rec =
+            [&](const ast::Expression& x) -> bool {
+                if (x.kind == ast::ExprKind::Column) {
+                    if (!x.column_name.empty() && x.column_name[0] == '@') return false;
+                    std::string key = x.table_name.empty()
+                        ? x.column_name : (x.table_name + "." + x.column_name);
+                    auto it = base_col_index.find(key);
+                    if (it == base_col_index.end()) return false;
+                    return it->second >= lo && it->second < hi;
+                }
+                if (x.lhs && !rec(*x.lhs)) return false;
+                if (x.rhs && !rec(*x.rhs)) return false;
+                if (x.operand && !rec(*x.operand)) return false;
+                for (auto& a : x.func_args) if (a && !rec(*a)) return false;
+                return true;
+            };
+        return rec(e);
+    };
+    if (has_agg && !s.having && !s.distinct && !s.joins.empty()) {
+        const auto& lastp = join_plans.back();
+        // 仅 INNER: LEFT JOIN 无匹配需保留左行(聚合下推路径不做 NULL 补齐)
+        if (lastp.idx_probe && lastp.pure_equi && lastp.kind == ast::JoinKind::Inner &&
+            slots.size() == s.joins.size() + 1) {
+            auto& rslot = slots.back();
+            fused_right_offset = rslot.col_offset;
+            fused_right_cols   = static_cast<int>(rslot.def->columns.size());
+            for (int i = 0; i < fused_right_cols; ++i) {
+                const std::string& bare = rslot.def->columns[i].name;
+                right_col_index[bare] = i;
+                right_col_index[rslot.real_name + "." + bare] = i;
+                if (!rslot.alias.empty()) right_col_index[rslot.alias + "." + bare] = i;
+            }
+            bool ok = true;
+            for (auto& [ge, _] : s.group_by)
+                if (!cols_in_range(*ge, 0, fused_right_offset)) { ok = false; break; }
+            if (ok && s.where && !cols_in_range(*s.where, 0, fused_right_offset)) ok = false;
+            if (ok) {
+                for (auto& [e, _] : s.columns) {
+                    FusedCol fc;
+                    if (e->kind == ast::ExprKind::Star) { ok = false; break; }  // SELECT * 不走下推
+                    if (e->kind == ast::ExprKind::FunctionCall && is_agg_func(e->func_name)) {
+                        std::string low = e->func_name;
+                        std::transform(low.begin(), low.end(), low.begin(),
+                                       [](unsigned char c) { return std::tolower(c); });
+                        if (e->func_star_arg && low == "count") { fc.kind = 1; }
+                        else if (e->func_args.empty() || !e->func_args[0]) { ok = false; break; }
+                        else {
+                            if (contains_agg(*e->func_args[0])) { ok = false; break; }  // 嵌套聚合不下推
+                            if (!cols_in_range(*e->func_args[0], fused_right_offset, total_cols)) {
+                                ok = false; break;
+                            }
+                            fc.arg = e->func_args[0].get();
+                            fc.kind = (low == "count") ? 2 : (low == "sum") ? 3
+                                    : (low == "avg")   ? 4 : (low == "min") ? 5 : 6;
+                        }
+                    } else {
+                        if (contains_agg(*e) || !cols_in_range(*e, 0, fused_right_offset)) {
+                            ok = false; break;
+                        }
+                    }
+                    fused_cols.push_back(fc);
+                }
+            }
+            fuse_agg = ok;
+        }
+    }
+    // 右表局部上下文: 聚合参数在右表行上直接求值,无需拼接整行
+    auto build_right_ctx = [&](const storage::Row& r) {
+        ExecContext ctx{ catalog_, primary_table, {}, {} };
+        ctx.exec = this;
+        ctx.row_ref = &r;
+        ctx.idx_ref = &right_col_index;
+        return ctx;
+    };
+
     // 生成候选行:先主表遍历,CROSS/INNER/LEFT/RIGHT JOIN 追加
     std::vector<storage::Row> candidate_rows;
 
@@ -908,21 +1046,135 @@ ResultSet Executor::exec_select(const ast::SelectStmt& s) {
         }, rtxn);
     }
 
+    bool fused_done = false;                      // 聚合下推已直接产出结果
+    std::vector<storage::Row> fused_agg_rows;     // 每个分组一行(SELECT 投影)
+    std::vector<storage::Row> fused_reps;         // 每个分组的代表性整行(供 ORDER BY / 非聚合列)
+
     for (size_t ji = 0; ji < s.joins.size(); ++ji) {
         auto& jc = s.joins[ji];
         auto* jtbl = resolve_table(jc.table_name);
-        std::vector<storage::Row> right_rows;
-        jtbl->for_each_visible(sqscn, [&](int64_t, const storage::Row& row) { right_rows.push_back(row); return true; }, rtxn);
         const JoinPlan& plan = join_plans[ji];
 
-        // ---- Hash Join: 右表按等值 key 分桶,左表 O(1) probe ----
+        // ---- 聚合下推:最后一个 PK 前缀探测 JOIN 直接边探测边聚合,不物化中间行 ----
+        if (fuse_agg && ji + 1 == s.joins.size()) {
+            struct FAcc {
+                int64_t c = 0, iacc = 0;
+                double  acc = 0;
+                bool    all_int = true, first = true;
+                types::Value best;
+            };
+            struct FGrp {
+                storage::Row rep;
+                std::vector<FAcc> accs;
+            };
+            std::vector<FGrp> grps;
+            std::unordered_map<std::string, size_t> gmap;
+            const int rcol = plan.equi.right_col;
+            const int lcol = plan.equi.left_col;
+            for (auto& l : left_rows) {
+                if (lcol < 0 || lcol >= static_cast<int>(l.size())) continue;
+                if (static_cast<int>(l.size()) < fused_right_offset) continue;  // 左行必须是完整前缀
+                if (s.where) {
+                    auto wctx = build_ctx(l);
+                    if (!to_bool(eval(*s.where, wctx))) continue;               // WHERE 只引用左表列
+                }
+                const auto& keyv = l[lcol];
+                if (keyv.is_null()) continue;
+                std::string key;
+                {
+                    auto kctx = build_ctx(l);
+                    for (auto& [ge, _] : s.group_by) key += eval(*ge, kctx).to_string() + "\x01";
+                }
+                FGrp* gp = nullptr;
+                auto git = gmap.find(key);
+                if (git != gmap.end()) gp = &grps[git->second];
+                bool any = false;
+                jtbl->for_each_by_pk_prefix(keyv, sqscn,
+                    [&](int64_t, const storage::Row& r) {
+                        if (rcol < 0 || rcol >= static_cast<int>(r.size())) return true;
+                        if (!keyv.sql_equals(r[rcol])) return true;
+                        if (!any) {
+                            any = true;
+                            if (!gp) {
+                                grps.push_back(FGrp{});
+                                gp = &grps.back();
+                                gp->accs.resize(fused_cols.size());
+                                gp->rep = l;                       // 仅首次命中构造一次
+                                gp->rep.resize(total_cols);
+                                gmap.emplace(key, grps.size() - 1);
+                            }
+                            for (int i = 0; i < fused_right_cols && i < static_cast<int>(r.size()); ++i)
+                                gp->rep[fused_right_offset + i] = r[i];
+                        }
+                        for (size_t ci = 0; ci < fused_cols.size(); ++ci) {
+                            const auto& fc = fused_cols[ci];
+                            if (fc.kind == 0) continue;
+                            auto& a = gp->accs[ci];
+                            if (fc.kind == 1) { ++a.c; continue; }          // COUNT(*)
+                            if (!fc.arg) continue;
+                            auto v = eval(*fc.arg, build_right_ctx(r));
+                            if (v.is_null()) continue;
+                            if (fc.kind == 2) ++a.c;                       // COUNT(col)
+                            else if (fc.kind == 3 || fc.kind == 4) {       // SUM / AVG
+                                if (v.is_int()) { a.iacc += v.v_int; a.acc += static_cast<double>(v.v_int); }
+                                else {
+                                    a.all_int = false;
+                                    double d; if (v.try_to_double(d)) a.acc += d;
+                                }
+                                ++a.c;
+                            } else {                                       // MIN / MAX
+                                if (a.first) { a.best = v; a.first = false; }
+                                else {
+                                    int cv = v.compare(a.best);
+                                    if ((fc.kind == 5 && cv < 0) || (fc.kind == 6 && cv > 0)) a.best = v;
+                                }
+                                ++a.c;
+                            }
+                        }
+                        return true;
+                    }, rtxn);
+            }
+            // 无 GROUP BY 时,空输入也要产出一行(COUNT=0 / SUM=NULL,与 MySQL 一致)
+            if (s.group_by.empty() && grps.empty()) {
+                grps.push_back(FGrp{});
+                grps.back().accs.resize(fused_cols.size());
+            }
+            for (auto& g : grps) {
+                storage::Row row;
+                auto rctx = build_ctx(g.rep);
+                for (size_t ci = 0; ci < fused_cols.size(); ++ci) {
+                    const auto& fc = fused_cols[ci];
+                    if (fc.kind == 0) { row.push_back(eval(*s.columns[ci].first, rctx)); continue; }
+                    auto& a = g.accs[ci];
+                    if (fc.kind == 1 || fc.kind == 2) row.push_back(types::Value::make_int(a.c));
+                    else if (fc.kind == 3) row.push_back(a.c == 0 ? types::Value::make_null()
+                                             : (a.all_int ? types::Value::make_int(a.iacc)
+                                                          : types::Value::make_double(a.acc)));
+                    else if (fc.kind == 4) row.push_back(a.c == 0 ? types::Value::make_null()
+                                             : types::Value::make_double(a.acc / static_cast<double>(a.c)));
+                    else row.push_back(a.first ? types::Value::make_null() : a.best);
+                }
+                fused_agg_rows.push_back(std::move(row));
+                fused_reps.push_back(std::move(g.rep));
+            }
+            fused_done = true;
+            break;
+        }
+
+        // 右表物化 + 哈希桶:仅哈希/嵌套循环路径需要。
+        // PK 前缀探测(idx_probe)通过索引直接取右表行,若仍物化整表(如 salaries 280 万行)
+        // 并逐行 to_string 建桶,等于白白付出全表拷贝与哈希成本。
+        std::vector<storage::Row> right_rows;
         std::unordered_map<std::string, std::vector<size_t>> buckets;
-        if (plan.hash_join) {
-            for (size_t ri = 0; ri < right_rows.size(); ++ri) {
-                if (plan.equi.right_col < 0 ||
-                    plan.equi.right_col >= static_cast<int>(right_rows[ri].size())) continue;
-                std::string key = join_hash_key(right_rows[ri][plan.equi.right_col]);
-                if (!key.empty()) buckets[std::move(key)].push_back(ri);
+        if (!plan.idx_probe) {
+            jtbl->for_each_visible(sqscn, [&](int64_t, const storage::Row& row) { right_rows.push_back(row); return true; }, rtxn);
+            if (plan.hash_join) {
+                for (size_t ri = 0; ri < right_rows.size(); ++ri) {
+                    if (plan.equi.right_col < 0 ||
+                        plan.equi.right_col >= static_cast<int>(right_rows[ri].size())) continue;
+                    std::string key = join_hash_key(right_rows[ri][plan.equi.right_col]);
+                    if (!key.empty()) buckets[std::move(key)].push_back(ri);
+                }
             }
         }
 
@@ -1007,6 +1259,36 @@ ResultSet Executor::exec_select(const ast::SelectStmt& s) {
         left_rows = std::move(new_left);
     }
 
+    // 聚合下推路径:结果已产出,补齐 ORDER BY / LIMIT 后直接返回
+    if (fused_done) {
+        if (!s.order_by.empty() && fused_agg_rows.size() > 1) {
+            std::vector<size_t> ord(fused_agg_rows.size());
+            for (size_t i = 0; i < ord.size(); ++i) ord[i] = i;
+            std::stable_sort(ord.begin(), ord.end(), [&](size_t ia, size_t ib) {
+                auto ca = build_ctx(fused_reps[ia]);
+                auto cb = build_ctx(fused_reps[ib]);
+                for (auto& [oe, asc] : s.order_by) {
+                    int c = eval(*oe, ca).compare(eval(*oe, cb));
+                    if (c != 0) return asc ? c < 0 : c > 0;
+                }
+                return false;
+            });
+            std::vector<storage::Row> sorted;
+            sorted.reserve(fused_agg_rows.size());
+            for (size_t i : ord) sorted.push_back(std::move(fused_agg_rows[i]));
+            fused_agg_rows = std::move(sorted);
+        }
+        int64_t off = s.offset.value_or(0);
+        int64_t lim = s.limit.value_or(static_cast<int64_t>(fused_agg_rows.size()));
+        if (off > 0 && static_cast<size_t>(off) < fused_agg_rows.size())
+            fused_agg_rows.erase(fused_agg_rows.begin(), fused_agg_rows.begin() + off);
+        if (lim >= 0 && static_cast<size_t>(lim) < fused_agg_rows.size())
+            fused_agg_rows.resize(static_cast<size_t>(lim));
+        r.rows = std::move(fused_agg_rows);
+        r.affected_rows = static_cast<int64_t>(r.rows.size());
+        return r;
+    }
+
     // 没有 JOIN —— 主表行直接放
     if (s.joins.empty()) {
         for (auto& l : left_rows) {
@@ -1028,56 +1310,6 @@ ResultSet Executor::exec_select(const ast::SelectStmt& s) {
             match = to_bool(v);
         }
         if (match) after_where.push_back(std::move(row));
-    }
-
-    // 聚合检测: SELECT 列(含嵌套在标量函数内的聚合)、GROUP BY、HAVING 任一出现即走聚合路径。
-    // 旧实现只扫 SELECT 顶层,COALESCE(SUM(x),0) 与「SELECT 无聚合但有 GROUP BY/HAVING」会被漏掉。
-    auto is_agg_func = [](const std::string& n) {
-        std::string low = n;
-        std::transform(low.begin(), low.end(), low.begin(),
-                       [](unsigned char c) { return std::tolower(c); });
-        return low == "count" || low == "sum" || low == "avg" || low == "min" || low == "max";
-    };
-    std::function<bool(const ast::Expression&)> contains_agg =
-        [&](const ast::Expression& e) -> bool {
-            if (e.kind == ast::ExprKind::FunctionCall) {
-                if (is_agg_func(e.func_name)) return true;
-                for (auto& a : e.func_args) if (a && contains_agg(*a)) return true;
-            }
-            if (e.lhs && contains_agg(*e.lhs)) return true;
-            if (e.rhs && contains_agg(*e.rhs)) return true;
-            if (e.operand && contains_agg(*e.operand)) return true;
-            return false;
-        };
-    bool has_agg = !s.group_by.empty() || static_cast<bool>(s.having);
-    for (auto& [e, _] : s.columns) if (contains_agg(*e)) has_agg = true;
-
-    // 输出列别名
-    r.column_names.clear();
-    r.column_types.clear();
-    // 构造 slot refs 供 infer_type 用
-    std::vector<_SlotRef> slot_refs;
-    for (auto& slot : slots) {
-        slot_refs.push_back({ slot.alias.empty() ? slot.real_name : slot.alias, slot.def });
-    }
-    for (auto& [e, alias] : s.columns) {
-        if (e->kind == ast::ExprKind::Star) {
-            // SELECT * 展开所有列
-            for (auto& slot : slots) {
-                for (auto& col : slot.def->columns) {
-                    std::string name = slot.alias.empty() ? col.name : (slot.alias + "." + col.name);
-                    r.column_names.push_back(name);
-                    r.column_types.push_back(col.type.type);
-                }
-            }
-        } else {
-            std::string name = alias.empty() ? "<expr>" : alias;
-            if (e->kind == ast::ExprKind::Column) {
-                name = e->column_name;
-            }
-            r.column_names.push_back(name);
-            r.column_types.push_back(infer_type(*e, &slot_refs));
-        }
     }
 
     auto compute_row = [&](storage::Row& flat_row) -> storage::Row {

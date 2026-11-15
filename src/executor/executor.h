@@ -28,6 +28,12 @@ struct ExecContext {
     storage::Row current_row;
     std::map<std::string, int> col_index;
 
+    // 热路径零拷贝:指向「调用方持有的行」与「共享列索引」。设置后优先于上面两个值成员,
+    // 避免每行构造 ctx 时拷贝整行 + 深拷贝 col_index(万行级聚合是决定性常数开销)。
+    // 生命周期契约:两者指向的对象必须比 ctx 活得更久(调用方保证行来自容器/外层变量)。
+    const storage::Row* row_ref = nullptr;
+    const std::map<std::string, int>* idx_ref = nullptr;
+
     // 子查询求值时递归调 exec_select 需要 executor 指针
     Executor* exec = nullptr;
 

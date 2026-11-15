@@ -63,25 +63,29 @@ types::Value Executor::eval(const ast::Expression& e, const ExecContext& ctx) co
                 return types::Value::make_null();
             }
             // 优先 alias.col, 其次裸 col
+            // 热路径(row_ref/idx_ref 已设置)零拷贝取行与列索引,避免每行深拷贝 map
+            const std::map<std::string, int>& col_index =
+                ctx.idx_ref ? *ctx.idx_ref : ctx.col_index;
+            const storage::Row& row = ctx.row_ref ? *ctx.row_ref : ctx.current_row;
             std::string key = e.table_name.empty() ? e.column_name : (e.table_name + "." + e.column_name);
-            auto it = ctx.col_index.find(key);
-            if (it == ctx.col_index.end()) {
+            auto it = col_index.find(key);
+            if (it == col_index.end()) {
                 // 裸列尝试所有表
-                for (auto& [k, idx] : ctx.col_index) {
+                for (auto& [k, idx] : col_index) {
                     // k 可能 "users.id" 或 "id";取点号后的部分
                     auto dot = k.find('.');
                     std::string bare = (dot == std::string::npos) ? k : k.substr(dot + 1);
                     if (_stricmp(bare.c_str(), e.column_name.c_str()) == 0) {
-                        if (it == ctx.col_index.end() ||
-                            ctx.col_index.find(e.column_name) == ctx.col_index.end()) {
-                            it = ctx.col_index.find(k);
+                        if (it == col_index.end() ||
+                            col_index.find(e.column_name) == col_index.end()) {
+                            it = col_index.find(k);
                         }
                     }
                 }
             }
-            if (it != ctx.col_index.end() && it->second >= 0 &&
-                it->second < static_cast<int>(ctx.current_row.size())) {
-                return ctx.current_row[it->second];
+            if (it != col_index.end() && it->second >= 0 &&
+                it->second < static_cast<int>(row.size())) {
+                return row[it->second];
             }
             return types::Value::make_null();
         }
