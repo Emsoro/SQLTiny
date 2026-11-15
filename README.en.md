@@ -1,6 +1,6 @@
 # SQLTiny — Lightweight Embedded Database · MySQL Protocol Compatible
 
-> **Current version `v2.0.4` (2026-11-15)** · The version number is maintained in `CMakeLists.txt` (`project(SQLTiny VERSION 2.0.4)`), `vcpkg.json` (`version-string`) and the startup banner in `src/main.cpp`. The wire protocol still reports `5.7.0-SQLTiny` for MySQL client compatibility — that string is unrelated to the product version.
+> **Current version `v2.0.5` (2026-11-16)** · The version number is maintained in `CMakeLists.txt` (`project(SQLTiny VERSION 2.0.5)`), `vcpkg.json` (`version-string`) and the startup banner in `src/main.cpp`. The wire protocol still reports `5.7.0-SQLTiny` for MySQL client compatibility — that string is unrelated to the product version.
 
 **SQLTiny** is a lightweight relational database written from scratch in modern C++20, with its core design inspired by [HSQLDB](http://hsqldb.org/). It additionally exposes the **MySQL Wire Protocol**, so standard MySQL clients (`mysql` CLI, Navicat, DBeaver, Connector/J, PyMySQL, DBX/dbExpress) can connect directly.
 
@@ -34,6 +34,50 @@
 > 🔒 **Lock hierarchy**: Catalog.mu_ (DDL) → Table.mu_ shared_lock (concurrent SELECT readers) / unique_lock (exclusive DML) → RowLockMap (row-level conflict detection) → TransactionManager.writeLock_ (commit boundary) → WalManager.mu_ (WAL file I/O)
 >
 > 🧊 **MVCC**: SELECT takes no locks at all; `for_each_visible(querySCN, readerTxn)` filters by `createSCN/deleteSCN` and `pendingTxn`. Uncommitted rows are visible only to their owning transaction; `finalize_commit` publishes them at commit.
+
+---
+
+## 🆕 What's new in v2.0.5
+
+`tests/compare_employees.py` grew from 14 to **39 queries** (basic 14 / nested subqueries 10 / WITH·CTE 4 / complex 11) executed against the same dataset on MySQL 3306 and SQLTiny. Three classes of problems surfaced and were all fixed.
+
+### 1. Silent correctness bugs (wrong results, no error)
+
+| Bug | Symptom | Fix |
+|---|---|---|
+| GROUP BY alias ignored | `GROUP BY g` evaluated an unknown column as NULL, collapsing everything into one group | Group keys resolve back to the SELECT expression |
+| Aggregate nested in a function | `ROUND(AVG(salary),2)` returned `0` | Recursive evaluation inside aggregate context |
+| Date functions missing | `YEAR(hire_date)` silently NULL, per-year grouping collapsed | YEAR/MONTH/DAY and friends implemented |
+
+### 2. Syntax gaps closed
+
+WITH / CTE (including multiple CTEs), `WITH RECURSIVE`, scalar subqueries (WHERE comparison and SELECT list, correlated included), `EXISTS`, FROM derived tables, `COUNT(DISTINCT)`, `BETWEEN`, and **window functions `ROW_NUMBER() OVER (PARTITION BY … ORDER BY …)`**.
+
+### 3. Performance fixes
+
+| Problem | Before | After |
+|---|---|---|
+| GROUP BY bucketing was a linear scan, O(groups²) | salaries 300K groups **timed out at 100s** | **3.80s** (`unordered_map`) |
+| Correlated `IN` subquery re-scanned the inner table per outer row | **timed out at 100s** | **0.096s** (outer-column equality now probes the PK prefix) |
+| Recursive CTE iterated over the accumulated full set (exponential growth under UNION ALL) | **timed out at 100s** | **0.001s** (previous-round delta working set) |
+| Correlated subquery results were cached as if uncorrelated | only the first row returned (2 MISMATCH) | decorrelation now sets `outer_used` |
+
+### 4. Final result (39 queries, MySQL vs SQLTiny)
+
+| Category | Count | Result | MySQL | SQLTiny |
+|---|---|---|---|---|
+| Basic | 14 | 14 MATCH | 14.00s | **5.45s** |
+| Nested | 10 | 10 MATCH | 3.26s | 5.84s |
+| WITH | 4 | 4 MATCH | 1.42s | 4.13s |
+| Complex | 11 | 11 MATCH | 9.82s | 12.73s |
+
+`SUMMARY: fails = 0`. The comparison script now uses **one connection per query with a 100s timeout**, so a single timeout can no longer invalidate the connection and cascade into `(0,'')` false errors — most of the 11 initial ST-ERRs were exactly that.
+
+### 5. Tests
+
+- New `smoke_sql_keywords` (**649 PASS**) and `smoke_sql_syntax` (**160 PASS / 15 GAP**); CTest now has **12 targets**
+- `smoke_m25_e2e` now connects to **3307** instead of 3306, so it no longer fails auth against a password-protected MySQL
+- CTest **12/12** green
 
 ---
 
@@ -354,6 +398,7 @@ SQL syntax: `SET SESSION TRANSACTION ISOLATION LEVEL <level>` (session default),
 | **Wider pushdown coverage (v2.0.2)** | ✅ | WHERE split by table side + hash equi-join pushdown + subquery/CASE hardening; high earners 2.76s→0.94s · 2-table hash row count 0.37s→0.13s |
 | **PK point-lookup index probe (v2.0.3)** | ✅ | `WHERE leading PK column = constant` uses `for_each_by_pk_prefix` instead of a full scan; logical-delete history falls back to a full scan to preserve MVCC visibility; `employees` point lookup 74ms→**0.13ms** · `salaries` 678ms→**0.17ms** |
 | **Fused aggregates + UNION ALL (v2.0.4)** | ✅ | Single-pass aggregate path: `SUM(salary)` 2.97s→**0.35s**, `WHERE salary>100000` count 0.774s→**0.248s**; UNION/UNION ALL (dedupe, chaining, trailing ORDER BY/LIMIT) + `ORDER BY 1` positional references; verified against MySQL across three endpoints |
+| **Complex-query correctness + syntax (v2.0.5)** | ✅ | WITH/recursive CTE, scalar subqueries, EXISTS, derived tables, COUNT(DISTINCT), BETWEEN, `ROW_NUMBER() OVER`, date functions; GROUP BY alias and nested aggregates fixed; high-cardinality bucketing O(n²)→O(1), correlated-subquery decorrelation; `compare_employees.py` **39/39 MATCH** |
 | **Upcoming** | 📋 | Wait queue / deadlock detection → stored procedures · caching_sha2_password / SSL · replication |
 
 ---
@@ -408,10 +453,10 @@ FROM users u INNER JOIN orders o ON o.user_id = u.id;
 | Artifact | Type | Description |
 |---|---|---|
 | `build/Debug/sqltiny.lib` | static library | Engine core, for in-process embedding |
-| `build/Debug/sqltiny_server.exe` | executable | MySQL protocol TCP server (v2.0.4) |
+| `build/Debug/sqltiny_server.exe` | executable | MySQL protocol TCP server (v2.0.5) |
 | `build/Release/sqltiny_server.exe` | executable (release) | Same, Release build is about **0.9 MB** in a single file (static CRT + static fmt, no DLL dependencies, copy-and-run); Debug build is about 4.8 MB |
 
-**`sqltiny_server.exe` file info (v2.0.4)**:
+**`sqltiny_server.exe` file info (v2.0.5)**:
 
 | Property | Value |
 |---|---|
@@ -478,7 +523,7 @@ python tests\stress_stability.py --self-server --phase all   # stress suite (sel
 
 ### Test overview (CTest 10/10 · 8 Python scripts)
 
-> `smoke_m25_e2e` connects over TCP to 3306 and needs a running server; without one CTest is 9/10.
+> `smoke_m25_e2e` connects over TCP to **3307** and needs a running server; without one CTest is 11/12.
 ```
 smoke_m1              3/3   PASS  Value / AVL / Lexer
 smoke_m2              5/5   PASS  CRUD / aggregates / expressions / DDL edge / IS NULL

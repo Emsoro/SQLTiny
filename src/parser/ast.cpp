@@ -51,4 +51,83 @@ ExprPtr Expression::make_subquery(StmtPtr stmt) {
     return e;
 }
 
+namespace {
+
+std::unique_ptr<SelectStmt> clone_select(const SelectStmt& s) {
+    auto out = std::make_unique<SelectStmt>();
+    for (const auto& cte : s.ctes) {
+        SelectStmt::CteDef c;
+        c.name = cte.name;
+        c.column_names = cte.column_names;
+        c.recursive = cte.recursive;
+        c.query = cte.query ? clone_stmt(*cte.query) : nullptr;
+        out->ctes.push_back(std::move(c));
+    }
+    out->distinct = s.distinct;
+    out->explain = s.explain;
+    for (const auto& [expr, alias] : s.columns)
+        out->columns.emplace_back(expr ? expr->clone() : nullptr, alias);
+    out->from_tables = s.from_tables;
+    out->from_aliases = s.from_aliases;
+    for (const auto& d : s.from_derived)
+        out->from_derived.push_back(d ? clone_stmt(*d) : nullptr);
+    for (const auto& j : s.joins) {
+        JoinClause jc;
+        jc.kind = j.kind;
+        jc.table_name = j.table_name;
+        jc.alias = j.alias;
+        jc.on = j.on ? j.on->clone() : nullptr;
+        jc.derived = j.derived ? clone_stmt(*j.derived) : nullptr;
+        out->joins.push_back(std::move(jc));
+    }
+    out->where = s.where ? s.where->clone() : nullptr;
+    for (const auto& [expr, asc] : s.group_by)
+        out->group_by.emplace_back(expr ? expr->clone() : nullptr, asc);
+    out->having = s.having ? s.having->clone() : nullptr;
+    for (const auto& [expr, asc] : s.order_by)
+        out->order_by.emplace_back(expr ? expr->clone() : nullptr, asc);
+    out->limit = s.limit;
+    out->offset = s.offset;
+    out->set_op = s.set_op;
+    out->set_right = s.set_right ? clone_stmt(*s.set_right) : nullptr;
+    return out;
+}
+
+} // namespace
+
+StmtPtr clone_stmt(const Statement& st) {
+    // 子查询/CTE/派生表只会是 SELECT
+    if (st.kind != StmtKind::Select || !st.select_) return nullptr;
+    auto out = std::make_unique<Statement>();
+    out->kind = StmtKind::Select;
+    out->select_ = clone_select(*st.select_);
+    out->raw = st.raw;
+    return out;
+}
+
+ExprPtr Expression::clone() const {
+    auto e = std::make_unique<Expression>();
+    e->kind = kind;
+    e->literal = literal;
+    e->table_name = table_name;
+    e->column_name = column_name;
+    e->table_star = table_star;
+    e->binop = binop;
+    e->lhs = lhs ? lhs->clone() : nullptr;
+    e->rhs = rhs ? rhs->clone() : nullptr;
+    e->unary = unary;
+    e->operand = operand ? operand->clone() : nullptr;
+    e->func_name = func_name;
+    for (const auto& a : func_args) e->func_args.push_back(a ? a->clone() : nullptr);
+    e->func_star_arg = func_star_arg;
+    e->func_distinct = func_distinct;
+    e->subquery_stmt = subquery_stmt ? clone_stmt(*subquery_stmt) : nullptr;
+    e->subquery_exists = subquery_exists;
+    e->case_base = case_base ? case_base->clone() : nullptr;
+    for (const auto& [w, r] : case_whens)
+        e->case_whens.emplace_back(w ? w->clone() : nullptr, r ? r->clone() : nullptr);
+    e->case_else = case_else ? case_else->clone() : nullptr;
+    return e;
+}
+
 } // namespace sqltiny::ast

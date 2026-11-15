@@ -42,6 +42,8 @@ static const KwEntry k_keywords[] = {
     {"DISTINCT",   TokenKind::KwDistinct},
     {"ALL",        TokenKind::KwAll},
     {"UNION",      TokenKind::KwUnion},
+    {"OVER",       TokenKind::KwOver},
+    {"PARTITION",  TokenKind::KwPartition},
     {"INSERT",     TokenKind::KwInsert},
     {"INTO",       TokenKind::KwInto},
     {"VALUES",     TokenKind::KwValues},
@@ -140,7 +142,8 @@ static const KwEntry k_keywords[] = {
     {"CURRENT_DATE",     TokenKind::KwCurrentDate},
     {"CURRENT_TIME",     TokenKind::KwCurrentTime},
     {"USER",       TokenKind::KwUser},
-    {"DATABASE",   TokenKind::KwDatabaseKw},
+    // DATABASE 已在 DDL 段映射为 KwDatabase;DATABASE() 函数与 CREATE DATABASE 共用该 kind,
+    // 这里不再重复登记(重复项永远命中不到,且会让关键字表出现二义)。
     {"COUNT",      TokenKind::KwCount},
     {"SUM",        TokenKind::KwSum},
     {"AVG",        TokenKind::KwAvg},
@@ -154,7 +157,50 @@ static const KwEntry k_keywords[] = {
     {"LENGTH",     TokenKind::KwLength},
     {"COMMENT",    TokenKind::KwComment},
     {"TEMPORARY",  TokenKind::KwTemporary},
-    {"REPLACE",    TokenKind::KwReplace},
+    // REPLACE 已在 DML 段登记,这里不重复
+
+    // ---------- 补充的常用关键词 ----------
+    // 之前枚举里已声明但表里漏登记的
+    {"INTERSECT",  TokenKind::KwIntersect},
+    {"EXCEPT",     TokenKind::KwExcept},
+    {"ZEROFILL",   TokenKind::KwZerofill},
+    {"OUT",        TokenKind::KwOut},
+    {"OUTFILE",    TokenKind::KwOut},
+    // DDL / DML 修饰
+    {"COLLATE",    TokenKind::KwCollate},
+    {"ENGINE",     TokenKind::KwEngine},
+    {"VALUE",      TokenKind::KwValue},
+    {"IGNORE",     TokenKind::KwIgnore},
+    {"DUPLICATE",  TokenKind::KwDuplicate},
+    {"USING",      TokenKind::KwUsing},
+    // 运算符类关键字
+    {"REGEXP",     TokenKind::KwRegexp},
+    {"RLIKE",      TokenKind::KwRlike},
+    {"XOR",        TokenKind::KwXor},
+    {"DIV",        TokenKind::KwDiv},
+    {"MOD",        TokenKind::KwMod},
+    // 查询结构 / 对象
+    {"WITH",       TokenKind::KwWith},
+    {"RECURSIVE",  TokenKind::KwRecursive},
+    {"VIEW",       TokenKind::KwView},
+    {"TRIGGER",    TokenKind::KwTrigger},
+    // 事务 / 会话
+    {"ISOLATION",  TokenKind::KwIsolation},
+    {"LEVEL",      TokenKind::KwLevel},
+    {"READ",       TokenKind::KwRead},
+    {"WRITE",      TokenKind::KwWrite},
+    {"COMMITTED",  TokenKind::KwCommitted},
+    {"UNCOMMITTED",TokenKind::KwUncommitted},
+    {"REPEATABLE", TokenKind::KwRepeatable},
+    {"SERIALIZABLE",TokenKind::KwSerializable},
+    {"AUTOCOMMIT", TokenKind::KwAutocommit},
+    {"NAMES",      TokenKind::KwNames},
+    // 约束动作 / 锁
+    {"CASCADE",    TokenKind::KwCascade},
+    {"RESTRICT",   TokenKind::KwRestrict},
+    {"ACTION",     TokenKind::KwAction},
+    {"LOCK",       TokenKind::KwLock},
+    {"UNLOCK",     TokenKind::KwUnlock},
 };
 
 // 简单的大小写无关比较 (ASCII 范围)

@@ -132,6 +132,47 @@ static std::pair<std::string, std::string> split_qname(const std::string& q) {
     return {q.substr(0, dot), q.substr(dot + 1)};
 }
 
+static std::string ci_lower(std::string s) {
+    std::transform(s.begin(), s.end(), s.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return s;
+}
+
+static std::string row_dedup_key(const storage::Row& row) {
+    std::string k;
+    for (auto& v : row) { k += v.to_string(); k.push_back('\x01'); }
+    return k;
+}
+
+// 把结果集物化成临时表(CTE / 派生表用)。显式列名优先,其次结果列名(去掉表限定)
+static std::shared_ptr<storage::Table> table_from_result(
+        const std::string& name, const ResultSet& rs,
+        const std::vector<std::string>& col_names) {
+    storage::TableDef def;
+    def.name = name;
+    size_t n = rs.column_names.size();
+    for (auto& row : rs.rows) n = std::max(n, row.size());
+    for (size_t i = 0; i < n; ++i) {
+        ast::ColumnDef c;
+        std::string nm = (i < col_names.size() && !col_names[i].empty()) ? col_names[i]
+                       : (i < rs.column_names.size() ? rs.column_names[i]
+                                                     : fmt::format("col{}", i + 1));
+        auto dot = nm.rfind('.');
+        if (dot != std::string::npos) nm = nm.substr(dot + 1);
+        c.name = nm;
+        c.type.type = i < rs.column_types.size() ? rs.column_types[i] : types::SqlType::Varchar;
+        c.nullable = true;
+        def.columns.push_back(std::move(c));
+    }
+    auto tbl = std::make_shared<storage::Table>(std::move(def));
+    for (auto& row : rs.rows) {
+        storage::Row r2 = row;
+        r2.resize(n, types::Value::make_null());
+        tbl->insert(r2);
+    }
+    return tbl;
+}
+
 // MVCC 读上下文:READ COMMITTED 取语句级 SCN,RR/SERIALIZABLE 取事务快照 SCN
 static uint64_t query_scn(core::Session* s) {
     return s ? s->readSCN() : core::Database::instance().wal().current_scn();
@@ -148,6 +189,13 @@ std::string Executor::default_db() const {
 }
 
 ResultSet Executor::execute(const ast::Statement& stmt) {
+    // 顶层语句开始时清空子查询缓存(缓存键是 AST 节点指针,跨语句会失效)
+    if (exec_depth_ == 0) { sq_cache_.clear(); eval_error_.clear(); }
+    struct DepthGuard {
+        int& d;
+        explicit DepthGuard(int& x) : d(x) { ++d; }
+        ~DepthGuard() { --d; }
+    } guard(exec_depth_);
     ResultSet r;
     switch (stmt.kind) {
         case ast::StmtKind::Select:      return exec_select(*stmt.select_);
@@ -247,6 +295,8 @@ ResultSet Executor::exec_insert(const ast::InsertStmt& s) {
                 int idx = def.column_index(s.columns[i]);
                 if (idx < 0) continue;
                 ExecContext ctx{ catalog_, s.table_name, {}, {} };
+            ctx.exec = this;
+                ctx.exec = this;
                 row[idx] = eval(*expr_row[i], ctx);
                 set_flags[idx] = true;  // 显式设置了(哪怕值是 NULL)
             }
@@ -257,6 +307,7 @@ ResultSet Executor::exec_insert(const ast::InsertStmt& s) {
                     if (cdef.is_auto_increment) row[i] = types::Value::make_int(tbl->next_auto_increment());
                     else if (cdef.default_value) {
                         ExecContext ctx2{ catalog_, s.table_name, {}, {} };
+                        ctx2.exec = this;
                         row[i] = eval(*cdef.default_value, ctx2);
                     }
                     else row[i] = types::Value::make_null();
@@ -265,6 +316,7 @@ ResultSet Executor::exec_insert(const ast::InsertStmt& s) {
         } else {
             // 按位置对齐
             ExecContext ctx{ catalog_, s.table_name, {}, {} };
+            ctx.exec = this;
             for (auto& e : expr_row) row.push_back(eval(*e, ctx));
             for (size_t i = row.size(); i < def.columns.size(); ++i) {
                 auto& cdef = def.columns[i];
@@ -403,6 +455,7 @@ ResultSet Executor::exec_update(const ast::UpdateStmt& s) {
     uint64_t qscn = query_scn(session_);
     tbl->for_each_visible(qscn, [&](int64_t rid, const storage::Row& row) {
         ExecContext ctx{ catalog_, s.table_name, {}, row };
+        ctx.exec = this;
         ctx.col_index.clear();
         for (size_t i = 0; i < def.columns.size(); ++i) {
             ctx.col_index[def.columns[i].name] = static_cast<int>(i);
@@ -495,6 +548,7 @@ ResultSet Executor::exec_delete(const ast::DeleteStmt& s) {
     tbl->for_each_visible(dqscn, [&](int64_t rid, const storage::Row& row) {
         if (!s.where) { to_delete.push_back(rid); return true; }
         ExecContext ctx{ catalog_, s.table_name, {}, row };
+        ctx.exec = this;
         ctx.col_index.clear();
         for (size_t i = 0; i < def.columns.size(); ++i) {
             ctx.col_index[def.columns[i].name] = static_cast<int>(i);
@@ -550,14 +604,134 @@ ResultSet Executor::exec_delete(const ast::DeleteStmt& s) {
 }
 
 // ---------- SELECT ----------
-ResultSet Executor::exec_select(const ast::SelectStmt& s) {
+ResultSet Executor::execute_sub(const ast::Statement& stmt, const ExecContext* outer,
+                                bool* used, const CteMap* ctes) {
+    ResultSet r;
+    if (stmt.kind != ast::StmtKind::Select || !stmt.select_) {
+        r.ok = false; r.mysql_errno = 1064; r.sql_state = "42000";
+        r.error_message = "subquery must be a SELECT statement";
+        return r;
+    }
+    if (exec_depth_ >= 32) {
+        r.ok = false; r.mysql_errno = 1064; r.sql_state = "42000";
+        r.error_message = "subquery nesting too deep (limit 32)";
+        return r;
+    }
+    ++exec_depth_;
+    r = exec_select(*stmt.select_, outer, used, ctes);
+    --exec_depth_;
+    return r;
+}
+
+const std::vector<storage::Row>* Executor::subquery_rows(const ast::Expression& e,
+                                                         const ExecContext& ctx) const {
+    auto it = sq_cache_.find(&e);
+    if (it != sq_cache_.end()) return &it->second.rows;   // 非相关:只执行一次
+    bool used = false;
+    ResultSet rs = const_cast<Executor*>(this)->execute_sub(*e.subquery_stmt, &ctx, &used, ctx.ctes);
+    if (!rs.ok) {
+        eval_error_ = rs.error_message;
+        return nullptr;
+    }
+    if (!used) {
+        auto& ent = sq_cache_[&e];
+        ent.rows = std::move(rs.rows);
+        return &ent.rows;
+    }
+    // 相关子查询:结果依赖外层当前行,不缓存
+    sq_scratch_ = std::move(rs.rows);
+    return &sq_scratch_;
+}
+
+ResultSet Executor::materialize_ctes(const std::vector<ast::SelectStmt::CteDef>& defs,
+                                     CteMap& ctes) {
+    ResultSet ok_r;
+    for (auto& cd : defs) {
+        if (!cd.query || cd.query->kind != ast::StmtKind::Select || !cd.query->select_) {
+            ResultSet e;
+            e.ok = false; e.mysql_errno = 1064; e.sql_state = "42000";
+            e.error_message = fmt::format("CTE '{}' must be a SELECT statement", cd.name);
+            return e;
+        }
+        std::string key = ci_lower(cd.name);
+        if (!cd.recursive) {
+            ResultSet rs = exec_select(*cd.query->select_, nullptr, nullptr, &ctes);
+            if (!rs.ok) return rs;
+            ctes[key] = table_from_result(cd.name, rs, cd.column_names);
+            continue;
+        }
+        // 递归 CTE:anchor UNION [ALL] 递归项,迭代到不动点
+        const auto& q = *cd.query->select_;
+        if (q.set_op == ast::SelectSetOp::None || !q.set_right ||
+            q.set_right->kind != ast::StmtKind::Select) {
+            ResultSet e;
+            e.ok = false; e.mysql_errno = 1064; e.sql_state = "42000";
+            e.error_message = fmt::format("recursive CTE '{}' requires UNION [ALL]", cd.name);
+            return e;
+        }
+        auto anchor_stmt = ast::clone_stmt(*cd.query);
+        anchor_stmt->select_->set_op = ast::SelectSetOp::None;
+        anchor_stmt->select_->set_right.reset();
+        ResultSet anchor = exec_select(*anchor_stmt->select_, nullptr, nullptr, &ctes);
+        if (!anchor.ok) return anchor;
+        auto tbl = table_from_result(cd.name, anchor, cd.column_names);
+        const ast::SelectStmt* rec = q.set_right->select_.get();
+        bool dedup = (q.set_op == ast::SelectSetOp::Union);
+        std::unordered_set<std::string> seen;
+        if (dedup) {
+            tbl->for_each_visible(0, [&](int64_t, const storage::Row& row) {
+                seen.insert(row_dedup_key(row)); return true;
+            });
+        }
+        // working set = 上一轮新增行(首轮为 anchor)。不能用「累积全集」:
+        // UNION ALL 下递归项会对历史行反复生成,行数指数增长(seq 1..100 直接跑飞)。
+        auto work = std::make_shared<storage::Table>(tbl->def());
+        tbl->for_each_visible(0, [&](int64_t, const storage::Row& row) {
+            work->insert(row); return true;
+        });
+        for (int iter = 0; iter < 10000; ++iter) {
+            sq_cache_.clear();   // CTE 内容逐轮变化,子查询缓存必须失效
+            CteMap iter_ctes = ctes;
+            iter_ctes[key] = work;   // 递归项只看到上一轮结果
+            ResultSet delta = exec_select(*rec, nullptr, nullptr, &iter_ctes);
+            if (!delta.ok) return delta;
+            if (delta.rows.empty()) break;
+            auto next_work = std::make_shared<storage::Table>(tbl->def());
+            bool added = false;
+            for (auto& row : delta.rows) {
+                storage::Row r2 = row;
+                r2.resize(tbl->def().columns.size(), types::Value::make_null());
+                if (dedup && !seen.insert(row_dedup_key(r2)).second) continue;
+                tbl->insert(r2);        // 累积最终结果
+                next_work->insert(r2);  // 下一轮输入
+                added = true;
+            }
+            if (!added) break;
+            work = std::move(next_work);
+        }
+        ctes[key] = std::move(tbl);
+    }
+    return ok_r;
+}
+
+ResultSet Executor::exec_select(const ast::SelectStmt& s, const ExecContext* outer,
+                                bool* outer_used, const CteMap* outer_ctes) {
+    // WITH 子句:按声明顺序物化,后面的 CTE 可引用前面的
+    CteMap local_ctes;
+    const CteMap* ctes = outer_ctes;
+    if (!s.ctes.empty()) {
+        if (outer_ctes) local_ctes = *outer_ctes;
+        ResultSet mr = materialize_ctes(s.ctes, local_ctes);
+        if (!mr.ok) return mr;
+        ctes = &local_ctes;
+    }
     if (s.set_op == ast::SelectSetOp::None || !s.set_right ||
         s.set_right->kind != ast::StmtKind::Select) {
-        return exec_select_body(s);
+        return exec_select_body(s, outer, outer_used, ctes);
     }
-    ResultSet left = exec_select_body(s);
+    ResultSet left = exec_select_body(s, outer, outer_used, ctes);
     if (!left.ok) return left;
-    ResultSet right = exec_select(*s.set_right->select_);
+    ResultSet right = exec_select(*s.set_right->select_, outer, outer_used, ctes);
     if (!right.ok) return right;
 
     ResultSet r;
@@ -628,8 +802,16 @@ ResultSet Executor::exec_select(const ast::SelectStmt& s) {
     return r;
 }
 
-ResultSet Executor::exec_select_body(const ast::SelectStmt& s) {
+ResultSet Executor::exec_select_body(const ast::SelectStmt& s, const ExecContext* outer,
+                                     bool* outer_used, const CteMap* ctes) {
     ResultSet r;
+    auto take_eval_error = [&]() -> ResultSet {
+        ResultSet er;
+        er.ok = false; er.mysql_errno = 1064; er.sql_state = "42000";
+        er.error_message = eval_error_;
+        eval_error_.clear();
+        return er;
+    };
 
     // 推断表达式静态类型 — 供 wire 协议 field_type 用
     struct _SlotRef {
@@ -640,6 +822,7 @@ ResultSet Executor::exec_select_body(const ast::SelectStmt& s) {
     std::function<types::SqlType(const ast::Expression&, const std::vector<_SlotRef>*)> infer_type =
         [&](const ast::Expression& e, const std::vector<_SlotRef>* slots) -> types::SqlType {
         using namespace types;
+        if (e.is_window) return SqlType::BigInt;   // ROW_NUMBER() 返回 BIGINT
         if (e.kind == ast::ExprKind::Column && slots) {
             for (auto& sl : *slots) {
                 for (auto& col : sl.def->columns) {
@@ -730,6 +913,10 @@ ResultSet Executor::exec_select_body(const ast::SelectStmt& s) {
             return r;
         }
         ExecContext ctx{ catalog_, "", {}, {} };
+        ctx.exec = this;
+        ctx.outer = outer;
+        ctx.outer_used = outer_used;
+        ctx.ctes = ctes;
         storage::Row row;
         ctx.col_index.clear();
         r.column_names.clear();
@@ -741,14 +928,43 @@ ResultSet Executor::exec_select_body(const ast::SelectStmt& s) {
             r.column_types.push_back(infer_type(*expr, nullptr));
             row.push_back(eval(*expr, ctx));
         }
+        if (!eval_error_.empty()) return take_eval_error();
         r.rows.push_back(row);
         return r;
     }
 
-    // FROM 首表 —— information_schema.TABLES / COLUMNS 走虚拟表 (元数据客户端常用)
+    // 派生表物化:FROM (SELECT ...) / JOIN (SELECT ...) → 临时表
+    std::vector<std::shared_ptr<storage::Table>> virtual_tables;   // 保活虚拟表
+    std::map<std::string, storage::Table*> derived_map;
+    auto add_derived = [&](const std::string& name, const ast::Statement& d) -> bool {
+        ResultSet drs = exec_select(*d.select_, outer, outer_used, ctes);
+        if (!drs.ok) { r = std::move(drs); return false; }
+        auto tbl = table_from_result(name, drs, {});
+        derived_map[ci_lower(name)] = tbl.get();
+        virtual_tables.push_back(std::move(tbl));
+        return true;
+    };
+    for (size_t i = 0; i < s.from_tables.size(); ++i) {
+        if (i < s.from_derived.size() && s.from_derived[i] &&
+            s.from_derived[i]->kind == ast::StmtKind::Select) {
+            if (!add_derived(s.from_tables[i], *s.from_derived[i])) return r;
+        }
+    }
+    for (auto& jc : s.joins) {
+        if (jc.derived && jc.derived->kind == ast::StmtKind::Select) {
+            if (!add_derived(jc.table_name, *jc.derived)) return r;
+        }
+    }
+
+    // FROM 首表 —— 派生表 / CTE / information_schema 虚拟表 / 普通表
     std::string primary_table = s.from_tables[0];
-    std::vector<std::unique_ptr<storage::Table>> virtual_tables;   // 保活虚拟表
     auto resolve_table = [&](const std::string& name) -> storage::Table* {
+        auto dit = derived_map.find(ci_lower(name));
+        if (dit != derived_map.end()) return dit->second;
+        if (ctes) {
+            auto cit = ctes->find(ci_lower(name));
+            if (cit != ctes->end()) return cit->second.get();
+        }
         if (is_information_schema_name(name)) {
             auto dot = name.find('.');
             virtual_tables.push_back(build_information_schema_table(
@@ -828,6 +1044,9 @@ ResultSet Executor::exec_select_body(const ast::SelectStmt& s) {
         ctx.exec = this;   // 子查询递归求值需要
         ctx.row_ref = &flat_row;
         ctx.idx_ref = &base_col_index;
+        ctx.outer = outer;
+        ctx.outer_used = outer_used;
+        ctx.ctes = ctes;
         return ctx;
     };
 
@@ -986,6 +1205,14 @@ ResultSet Executor::exec_select_body(const ast::SelectStmt& s) {
                 if (is_agg_func(e.func_name)) return true;
                 for (auto& a : e.func_args) if (a && contains_agg(*a)) return true;
             }
+            if (e.kind == ast::ExprKind::Case) {
+                if (e.case_base && contains_agg(*e.case_base)) return true;
+                for (auto& [w, r] : e.case_whens) {
+                    if (w && contains_agg(*w)) return true;
+                    if (r && contains_agg(*r)) return true;
+                }
+                if (e.case_else && contains_agg(*e.case_else)) return true;
+            }
             if (e.lhs && contains_agg(*e.lhs)) return true;
             if (e.rhs && contains_agg(*e.rhs)) return true;
             if (e.operand && contains_agg(*e.operand)) return true;
@@ -1017,6 +1244,47 @@ ResultSet Executor::exec_select_body(const ast::SelectStmt& s) {
             r.column_types.push_back(infer_type(*e, &slot_refs));
         }
     }
+
+    // GROUP BY 别名/位置解析 (D1):GROUP BY select_alias / GROUP BY 1 → 对应 SELECT 表达式。
+    // 裸列名能命中 FROM 列时保持原义(MySQL 优先 FROM 列,其次才是别名)。
+    std::vector<const ast::Expression*> group_exprs;
+    for (auto& [ge, asc] : s.group_by) {
+        const ast::Expression* re = ge.get();
+        if (ge->kind == ast::ExprKind::Literal && ge->literal.is_int()) {
+            int idx = static_cast<int>(ge->literal.v_int) - 1;
+            if (idx >= 0 && idx < static_cast<int>(s.columns.size()))
+                re = s.columns[idx].first.get();
+        } else if (ge->kind == ast::ExprKind::Column && ge->table_name.empty() &&
+                   base_col_index.find(ge->column_name) == base_col_index.end()) {
+            for (auto& [ce, alias] : s.columns) {
+                if (!alias.empty() && _stricmp(alias.c_str(), ge->column_name.c_str()) == 0) {
+                    re = ce.get();
+                    break;
+                }
+            }
+        }
+        group_exprs.push_back(re);
+    }
+
+    // ORDER BY 输出列位置/别名 → 输出列下标;未命中返回 -1
+    auto order_output_index = [&](const ast::Expression& oe) -> int {
+        if (oe.kind == ast::ExprKind::Literal && oe.literal.is_int()) {
+            int idx = static_cast<int>(oe.literal.v_int) - 1;
+            if (idx >= 0 && idx < static_cast<int>(r.column_names.size())) return idx;
+            return -1;
+        }
+        if (oe.kind == ast::ExprKind::Column && oe.table_name.empty()) {
+            for (size_t i = 0; i < r.column_names.size(); ++i) {
+                const std::string& nm = r.column_names[i];
+                auto dot = nm.rfind('.');
+                std::string bare = (dot == std::string::npos) ? nm : nm.substr(dot + 1);
+                if (_stricmp(nm.c_str(), oe.column_name.c_str()) == 0 ||
+                    _stricmp(bare.c_str(), oe.column_name.c_str()) == 0)
+                    return static_cast<int>(i);
+            }
+        }
+        return -1;
+    };
 
     // ---- 聚合下推到 PK 前缀探测 JOIN ----
     // 判据(保守): 最后一个 JOIN 为纯等值 PK 前缀探测;有 GROUP BY,无 HAVING/DISTINCT;
@@ -1070,7 +1338,7 @@ ResultSet Executor::exec_select_body(const ast::SelectStmt& s) {
                 if (!rslot.alias.empty()) right_col_index[rslot.alias + "." + bare] = i;
             }
             bool ok = true;
-            for (auto& [ge, _] : s.group_by)
+            for (auto* ge : group_exprs)
                 if (!cols_in_range(*ge, 0, fused_right_offset)) { ok = false; break; }
             if (ok && s.where) {
                 // WHERE 按 AND 拆分: 只引用左表列的在扫描阶段预过滤,只引用右表列的在探测时过滤;
@@ -1094,6 +1362,7 @@ ResultSet Executor::exec_select_body(const ast::SelectStmt& s) {
                     FusedCol fc;
                     if (e->kind == ast::ExprKind::Star) { ok = false; break; }  // SELECT * 不走下推
                     if (e->kind == ast::ExprKind::FunctionCall && is_agg_func(e->func_name)) {
+                        if (e->func_distinct) { ok = false; break; }   // DISTINCT 聚合不下推
                         std::string low = e->func_name;
                         std::transform(low.begin(), low.end(), low.begin(),
                                        [](unsigned char c) { return std::tolower(c); });
@@ -1116,6 +1385,15 @@ ResultSet Executor::exec_select_body(const ast::SelectStmt& s) {
                     fused_cols.push_back(fc);
                 }
             }
+            // ORDER BY:输出列别名/位置可直接排序；其余表达式必须只引用左表列且不含聚合
+            if (ok) {
+                for (auto& [oe, asc] : s.order_by) {
+                    if (order_output_index(*oe) >= 0) continue;
+                    if (contains_agg(*oe) || !cols_in_range(*oe, 0, fused_right_offset)) {
+                        ok = false; break;
+                    }
+                }
+            }
             fuse_agg = ok;
         }
     }
@@ -1125,6 +1403,9 @@ ResultSet Executor::exec_select_body(const ast::SelectStmt& s) {
         ctx.exec = this;
         ctx.row_ref = &r;
         ctx.idx_ref = &right_col_index;
+        ctx.outer = outer;
+        ctx.outer_used = outer_used;
+        ctx.ctes = ctes;
         return ctx;
     };
 
@@ -1143,6 +1424,7 @@ ResultSet Executor::exec_select_body(const ast::SelectStmt& s) {
     // 只认「PK 首列 = 同类型家族字面量」:索引按键存储类型严格比较,而 WHERE 求值允许
     // 隐式转换,跨类型下推会漏行,故此处置信域保守。
     const types::Value* pk_eq_lit = nullptr;
+    types::Value pk_lit_storage;   // 外层列求值结果的存放处(相关子查询去相关用)
     if (s.where && !tbl->def().primary_key_cols.empty() &&
         !tbl->def().primary_key_cols.front().empty()) {
         int pk_off = tbl->def().column_index(tbl->def().primary_key_cols.front().front());
@@ -1159,25 +1441,42 @@ ResultSet Executor::exec_select_body(const ast::SelectStmt& s) {
             for (auto* c : eq_conj) {
                 if (c->kind != ast::ExprKind::BinaryOp || c->binop != ast::BinOp::Eq) continue;
                 const ast::Expression* col = nullptr;
-                const ast::Expression* lit = nullptr;
-                if (c->lhs && c->lhs->kind == ast::ExprKind::Column &&
-                    c->rhs && c->rhs->kind == ast::ExprKind::Literal) {
-                    col = c->lhs.get(); lit = c->rhs.get();
-                } else if (c->rhs && c->rhs->kind == ast::ExprKind::Column &&
-                           c->lhs && c->lhs->kind == ast::ExprKind::Literal) {
-                    col = c->rhs.get(); lit = c->lhs.get();
+                const ast::Expression* other = nullptr;
+                if (c->lhs && c->lhs->kind == ast::ExprKind::Column && c->rhs) {
+                    col = c->lhs.get(); other = c->rhs.get();
+                } else if (c->rhs && c->rhs->kind == ast::ExprKind::Column && c->lhs) {
+                    col = c->rhs.get(); other = c->lhs.get();
                 }
-                if (!col || !lit || lit->literal.is_null()) continue;
+                if (!col || !other) continue;
                 std::string ck = col->table_name.empty()
                     ? col->column_name : (col->table_name + "." + col->column_name);
                 auto it = base_col_index.find(ck);
                 if (it == base_col_index.end() || it->second != pk_off) continue;
-                bool same_family = (types::is_integer(pk_type) && lit->literal.is_int()) ||
-                                   (types::is_numeric(pk_type) && lit->literal.is_numeric()) ||
-                                   (types::is_string(pk_type) && lit->literal.is_string()) ||
-                                   (types::is_datetime(pk_type) && lit->literal.is_string());
+                // 等值右侧:字面量,或**外层列引用**(相关子查询去相关 ——
+                // 外层列在一次子查询执行内是常量,可当字面量做 PK 前缀探测)。
+                types::Value lit_val;
+                if (other->kind == ast::ExprKind::Literal) {
+                    lit_val = other->literal;
+                } else if (other->kind == ast::ExprKind::Column && outer) {
+                    // 带限定名且不在本查询列索引里 → 外层列;裸名可能撞本地列,保守跳过
+                    std::string ok = other->table_name.empty()
+                        ? other->column_name
+                        : (other->table_name + "." + other->column_name);
+                    if (base_col_index.find(ok) != base_col_index.end()) continue;
+                    // 相关子查询:必须标记,否则结果会被当"非相关"缓存,只算第一行
+                    if (outer_used) *outer_used = true;
+                    lit_val = eval(*other, *outer);
+                } else {
+                    continue;
+                }
+                if (lit_val.is_null()) continue;
+                bool same_family = (types::is_integer(pk_type) && lit_val.is_int()) ||
+                                   (types::is_numeric(pk_type) && lit_val.is_numeric()) ||
+                                   (types::is_string(pk_type) && lit_val.is_string()) ||
+                                   (types::is_datetime(pk_type) && lit_val.is_string());
                 if (!same_family) continue;
-                pk_eq_lit = &lit->literal;
+                pk_lit_storage = std::move(lit_val);
+                pk_eq_lit = &pk_lit_storage;
                 break;
             }
         }
@@ -1198,7 +1497,7 @@ ResultSet Executor::exec_select_body(const ast::SelectStmt& s) {
                     !s.having && !s.distinct && s.order_by.empty() &&
                     !s.offset && !s.limit && !pk_probe_ok;
     struct FastAcc {
-        int kind = 0;   // 0=COUNT(*) 1=COUNT(col) 2=SUM/AVG 3=MIN 4=MAX
+        int kind = 0;   // 0=COUNT(*) 1=COUNT(col) 2=SUM/AVG 3=MIN 4=MAX 5=常量
         bool avg = false;
         int off = -1;
         int64_t cnt = 0;
@@ -1219,7 +1518,17 @@ ResultSet Executor::exec_select_body(const ast::SelectStmt& s) {
     if (fast_agg) {
         faccs.reserve(s.columns.size());
         for (auto& [e, _] : s.columns) {
-            if (!e || e->kind != ast::ExprKind::FunctionCall) { fast_agg = false; break; }
+            if (!e) { fast_agg = false; break; }
+            // 常量投影列(SELECT 'x', COUNT(*) ...):UNION ALL 分支常见,直接输出
+            if (e->kind == ast::ExprKind::Literal) {
+                FastAcc a;
+                a.kind = 5;
+                a.best = e->literal;
+                faccs.push_back(std::move(a));
+                continue;
+            }
+            if (e->kind != ast::ExprKind::FunctionCall) { fast_agg = false; break; }
+            if (e->func_distinct) { fast_agg = false; break; }   // DISTINCT 聚合走通用路径
             std::string low = e->func_name;
             std::transform(low.begin(), low.end(), low.begin(),
                            [](unsigned char c) { return std::tolower(c); });
@@ -1321,12 +1630,14 @@ ResultSet Executor::exec_select_body(const ast::SelectStmt& s) {
             }
             for (auto& a : faccs) {
                 const types::Value* v = nullptr;
-                if (a.kind != 0) {
+                if (a.kind != 0 && a.kind != 5) {
                     if (a.off >= static_cast<int>(row.size())) continue;
                     v = &row[a.off];
                     if (v->is_null()) continue;
                 }
                 switch (a.kind) {
+                    case 5:
+                        break;   // 常量列无需累加
                     case 0: case 1:
                         ++a.cnt;
                         break;
@@ -1356,6 +1667,7 @@ ResultSet Executor::exec_select_body(const ast::SelectStmt& s) {
         storage::Row out;
         out.reserve(faccs.size());
         for (auto& a : faccs) {
+            if (a.kind == 5) { out.push_back(a.best); continue; }
             if (a.kind == 0 || a.kind == 1) out.push_back(types::Value::make_int(a.cnt));
             else if (a.kind == 2) {
                 if (a.cnt == 0) out.push_back(types::Value::make_null());
@@ -1446,7 +1758,7 @@ ResultSet Executor::exec_select_body(const ast::SelectStmt& s) {
                 std::string key;
                 {
                     auto kctx = build_ctx(l);
-                    for (auto& [ge, _] : s.group_by) key += eval(*ge, kctx).to_string() + "\x01";
+                    for (auto* ge : group_exprs) key += eval(*ge, kctx).to_string() + "\x01";
                 }
                 FGrp* gp = nullptr;
                 auto git = gmap.find(key);
@@ -1652,14 +1964,33 @@ ResultSet Executor::exec_select_body(const ast::SelectStmt& s) {
     // 聚合下推路径:结果已产出,补齐 ORDER BY / LIMIT 后直接返回
     if (fused_done) {
         if (!s.order_by.empty() && fused_agg_rows.size() > 1) {
+            struct FTerm { int out_idx = -1; const ast::Expression* expr = nullptr; bool asc = true; };
+            std::vector<FTerm> fterms;
+            for (auto& [oe, asc] : s.order_by) {
+                FTerm t;
+                t.asc = asc;
+                t.out_idx = order_output_index(*oe);
+                if (t.out_idx < 0) t.expr = oe.get();
+                fterms.push_back(t);
+            }
             std::vector<size_t> ord(fused_agg_rows.size());
             for (size_t i = 0; i < ord.size(); ++i) ord[i] = i;
             std::stable_sort(ord.begin(), ord.end(), [&](size_t ia, size_t ib) {
-                auto ca = build_ctx(fused_reps[ia]);
-                auto cb = build_ctx(fused_reps[ib]);
-                for (auto& [oe, asc] : s.order_by) {
-                    int c = eval(*oe, ca).compare(eval(*oe, cb));
-                    if (c != 0) return asc ? c < 0 : c > 0;
+                for (auto& t : fterms) {
+                    types::Value va, vb;
+                    if (t.out_idx >= 0) {
+                        va = t.out_idx < static_cast<int>(fused_agg_rows[ia].size())
+                           ? fused_agg_rows[ia][t.out_idx] : types::Value::make_null();
+                        vb = t.out_idx < static_cast<int>(fused_agg_rows[ib].size())
+                           ? fused_agg_rows[ib][t.out_idx] : types::Value::make_null();
+                    } else {
+                        auto ca = build_ctx(fused_reps[ia]);
+                        auto cb = build_ctx(fused_reps[ib]);
+                        va = eval(*t.expr, ca);
+                        vb = eval(*t.expr, cb);
+                    }
+                    int c = va.compare(vb);
+                    if (c != 0) return t.asc ? c < 0 : c > 0;
                 }
                 return false;
             });
@@ -1701,6 +2032,7 @@ ResultSet Executor::exec_select_body(const ast::SelectStmt& s) {
         }
         if (match) after_where.push_back(std::move(row));
     }
+    if (!eval_error_.empty()) return take_eval_error();
 
     auto compute_row = [&](storage::Row& flat_row) -> storage::Row {
         storage::Row out;
@@ -1712,6 +2044,8 @@ ResultSet Executor::exec_select_body(const ast::SelectStmt& s) {
                         out.push_back(flat_row[slot.col_offset + static_cast<int>(i)]);
                     }
                 }
+            } else if (e->is_window) {
+                out.push_back(types::Value::make_null());   // 占位,投影后统一计算
             } else {
                 out.push_back(eval(*e, ctx));
             }
@@ -1725,15 +2059,17 @@ ResultSet Executor::exec_select_body(const ast::SelectStmt& s) {
             std::vector<storage::Row> rows;   // flat rows
         };
         std::vector<Bucket> buckets;
-        std::vector<std::string> bucket_keys;   // 并行存分桶 key,保持输入顺序
+        // key -> bucket 下标。旧实现线性扫描 bucket_keys,GROUP BY 高基数时是 O(组数²):
+        // salaries GROUP BY emp_no(30 万组 / 280 万行)因此跑到 100s 以上。
+        std::unordered_map<std::string, size_t> bucket_index;
 
-        // 生成每个 flat row 的分组 key (vector<Value>)
+        // 生成每个 flat row 的分组 key (使用别名/位置解析后的分组表达式)
         auto group_key_str = [&](const storage::Row& flat) -> std::string {
-            if (s.group_by.empty()) return "";   // 空 group_by = 单组 (MySQL 允许,等效全表一组)
+            if (group_exprs.empty()) return "";   // 空 group_by = 单组 (MySQL 允许,等效全表一组)
             auto ctx = build_ctx(flat);
             std::string k;
-            for (auto& [e, _] : s.group_by) {
-                auto v = eval(*e, ctx);
+            for (auto* ge : group_exprs) {
+                auto v = eval(*ge, ctx);
                 k += v.to_string() + "\x01";
             }
             return k;
@@ -1742,311 +2078,332 @@ ResultSet Executor::exec_select_body(const ast::SelectStmt& s) {
         // 按 key 分桶 (保持输入顺序,稳定)
         for (auto& flat : after_where) {
             std::string key = group_key_str(flat);
-            size_t bi = 0;
-            bool found = false;
-            for (size_t i = 0; i < bucket_keys.size(); ++i) {
-                if (bucket_keys[i] == key) { bi = i; found = true; break; }
+            auto it = bucket_index.find(key);
+            size_t bi;
+            if (it == bucket_index.end()) {
+                bi = buckets.size();
+                buckets.push_back({});
+                bucket_index.emplace(std::move(key), bi);
+            } else {
+                bi = it->second;
             }
-            if (!found) { bucket_keys.push_back(key); buckets.push_back({}); bi = buckets.size() - 1; }
             buckets[bi].rows.push_back(std::move(flat));
         }
         // 空表 + 无 group_by — 生成一个空桶(对应 SELECT COUNT(*) FROM empty_t)
         if (buckets.empty()) buckets.push_back({});
 
-        // 对每个桶算聚合行 (抽 lambda,可复用)
+        // 聚合计算(流式累加,支持 DISTINCT):对整桶求值
+        auto compute_agg = [&](const ast::Expression& fe,
+                               const std::vector<storage::Row>& brows) -> types::Value {
+            std::string low = ci_lower(fe.func_name);
+            if (low == "count" && fe.func_star_arg)
+                return types::Value::make_int(static_cast<int64_t>(brows.size()));
+            if (fe.func_args.empty() || !fe.func_args[0]) return types::Value::make_null();
+            double acc = 0; int64_t iacc = 0; int64_t c = 0;
+            bool all_int = true, first = true;
+            types::Value best;
+            std::unordered_set<std::string> dseen;
+            for (auto& row : brows) {
+                auto v = eval(*fe.func_args[0], build_ctx(row));
+                if (v.is_null()) continue;
+                if (fe.func_distinct && !dseen.insert(v.to_string()).second) continue;
+                if (low == "count") { ++c; continue; }
+                if (low == "min" || low == "max") {
+                    if (first) { best = v; first = false; }
+                    else {
+                        int cv = v.compare(best);
+                        if ((low == "min" && cv < 0) || (low == "max" && cv > 0)) best = v;
+                    }
+                } else if (v.is_int()) {
+                    iacc += v.v_int; acc += static_cast<double>(v.v_int);
+                } else {
+                    all_int = false;
+                    double d; if (v.try_to_double(d)) acc += d;
+                }
+                ++c;
+            }
+            if (low == "count") return types::Value::make_int(c);
+            // SQL 标准:空集 SUM / AVG 返回 NULL (只有 COUNT 返回 0)
+            if (c == 0) return types::Value::make_null();
+            if (low == "avg") return types::Value::make_double(acc / static_cast<double>(c));
+            if (low == "sum") return all_int ? types::Value::make_int(iacc)
+                                             : types::Value::make_double(acc);
+            return first ? types::Value::make_null() : best;
+        };
+
+        // 聚合上下文统一求值器 (D2):
+        // 聚合对整桶计算；标量函数/算术先递归求值参数再套用函数本身(ROUND(AVG(x),2) 等);
+        // 别名解析到 SELECT 表达式;普通列取桶内第一行(ANY_VALUE 语义)。
+        std::function<types::Value(const ast::Expression&, const std::vector<storage::Row>&)> eval_agg;
+        eval_agg = [&](const ast::Expression& expr,
+                       const std::vector<storage::Row>& brows) -> types::Value {
+            auto scalar_ctx = [&]() {
+                ExecContext ctx0{ catalog_, "", {}, {} };
+                ctx0.exec = this;
+                ctx0.outer = outer;
+                ctx0.outer_used = outer_used;
+                ctx0.ctes = ctes;
+                if (!brows.empty()) {
+                    ctx0.row_ref = &brows.front();
+                    ctx0.idx_ref = &base_col_index;
+                }
+                return ctx0;
+            };
+            switch (expr.kind) {
+                case ast::ExprKind::Literal:
+                    return expr.literal;
+                case ast::ExprKind::Column: {
+                    if (expr.table_name.empty()) {
+                        for (auto& [ce, alias] : s.columns)
+                            if (!alias.empty() &&
+                                _stricmp(alias.c_str(), expr.column_name.c_str()) == 0)
+                                return eval_agg(*ce, brows);
+                    }
+                    if (brows.empty()) return types::Value::make_null();
+                    return eval(expr, build_ctx(brows.front()));
+                }
+                case ast::ExprKind::BinaryOp: {
+                    auto l = eval_agg(*expr.lhs, brows);
+                    if (expr.binop == ast::BinOp::And || expr.binop == ast::BinOp::Or) {
+                        bool is_and = (expr.binop == ast::BinOp::And);
+                        if (!l.is_null() && to_bool(l) != is_and)
+                            return types::Value::make_bool(!is_and);
+                        auto rr = eval_agg(*expr.rhs, brows);
+                        auto decisive = [&](const types::Value& v) {
+                            return !v.is_null() && (to_bool(v) != is_and);
+                        };
+                        if (decisive(l) || decisive(rr)) return types::Value::make_bool(!is_and);
+                        if (l.is_null() || rr.is_null()) return types::Value::make_null();
+                        return types::Value::make_bool(is_and);
+                    }
+                    auto rr = eval_agg(*expr.rhs, brows);
+                    // 用字面量临时节点复用 eval 的运算/NULL 语义
+                    ast::Expression tmp;
+                    tmp.kind = ast::ExprKind::BinaryOp;
+                    tmp.binop = expr.binop;
+                    tmp.lhs = ast::Expression::make_literal(std::move(l));
+                    tmp.rhs = ast::Expression::make_literal(std::move(rr));
+                    auto ctx0 = scalar_ctx();
+                    return eval(tmp, ctx0);
+                }
+                case ast::ExprKind::UnaryOp: {
+                    auto v = eval_agg(*expr.operand, brows);
+                    ast::Expression tmp;
+                    tmp.kind = ast::ExprKind::UnaryOp;
+                    tmp.unary = expr.unary;
+                    tmp.operand = ast::Expression::make_literal(std::move(v));
+                    auto ctx0 = scalar_ctx();
+                    return eval(tmp, ctx0);
+                }
+                case ast::ExprKind::FunctionCall: {
+                    std::string low = ci_lower(expr.func_name);
+                    if (is_agg_func(low)) return compute_agg(expr, brows);
+                    // 标量函数:参数先按聚合上下文求值,再套函数本身
+                    std::vector<ast::ExprPtr> tmp_args;
+                    tmp_args.reserve(expr.func_args.size());
+                    for (auto& a : expr.func_args)
+                        tmp_args.push_back(ast::Expression::make_literal(eval_agg(*a, brows)));
+                    auto ctx0 = scalar_ctx();
+                    return eval_function(expr.func_name, tmp_args, expr.func_star_arg, ctx0);
+                }
+                case ast::ExprKind::Case: {
+                    if (expr.case_base) {
+                        auto bv = eval_agg(*expr.case_base, brows);
+                        for (auto& [w, rr] : expr.case_whens) {
+                            auto wv = eval_agg(*w, brows);
+                            if (!bv.is_null() && !wv.is_null() && bv.compare(wv) == 0)
+                                return eval_agg(*rr, brows);
+                        }
+                    } else {
+                        for (auto& [cnd, rr] : expr.case_whens)
+                            if (to_bool(eval_agg(*cnd, brows))) return eval_agg(*rr, brows);
+                    }
+                    return expr.case_else ? eval_agg(*expr.case_else, brows)
+                                          : types::Value::make_null();
+                }
+                case ast::ExprKind::Subquery: {
+                    auto ctx0 = scalar_ctx();
+                    return eval(expr, ctx0);
+                }
+                default:
+                    return types::Value::make_null();
+            }
+        };
+
+        // 对每个桶算聚合行
         auto agg_one_bucket = [&](const std::vector<storage::Row>& flat_rows) -> storage::Row {
             storage::Row agg_row;
-            int64_t total = static_cast<int64_t>(flat_rows.size());
-
-            for (auto& [e, _] : s.columns) {
-                if (e->kind != ast::ExprKind::FunctionCall) {
-                    // 非聚合列
-                    if (flat_rows.empty()) { agg_row.push_back(types::Value::make_null()); continue; }
-                    // GROUP BY 列:取桶内第一行的值 (MySQL 默认 ANY_VALUE 语义)
-                    auto ctx0 = build_ctx(flat_rows.front());
-                    agg_row.push_back(eval(*e, ctx0));
-                    continue;
-                }
-                std::string lower; lower.resize(e->func_name.size());
-                std::transform(e->func_name.begin(), e->func_name.end(), lower.begin(),
-                               [](unsigned char c) { return std::tolower(c); });
-
-                if (lower == "count") {
-                    if (e->func_star_arg) { agg_row.push_back(types::Value::make_int(total)); continue; }
-                    int64_t c = 0;
-                    for (auto& row : flat_rows) {
-                        auto ctx = build_ctx(row);
-                        auto v = eval(*e->func_args[0], ctx);
-                        if (!v.is_null()) c++;
-                    }
-                    agg_row.push_back(types::Value::make_int(c));
-                } else if (lower == "sum" || lower == "avg") {
-                    // 整型列用 int64 累加,避免大整数 SUM 经 double 以字符串回包
-                    double acc = 0; int64_t iacc = 0; int64_t c = 0; bool all_int = true;
-                    for (auto& row : flat_rows) {
-                        auto ctx = build_ctx(row);
-                        auto v = eval(*e->func_args[0], ctx);
-                        if (v.is_null()) continue;
-                        if (v.is_int()) { iacc += v.v_int; acc += static_cast<double>(v.v_int); }
-                        else {
-                            all_int = false;
-                            double d; if (v.try_to_double(d)) acc += d;
-                        }
-                        c++;
-                    }
-                    // SQL 标准: 空集 SUM / AVG 返回 NULL (只有 COUNT 返回 0)
-                    if (c == 0) agg_row.push_back(types::Value::make_null());
-                    else if (lower == "avg") agg_row.push_back(types::Value::make_double(acc / c));
-                    else if (all_int) agg_row.push_back(types::Value::make_int(iacc));
-                    else agg_row.push_back(types::Value::make_double(acc));
-                } else if (lower == "min" || lower == "max") {
-                    // 保留原值类型(DATE/DATETIME/字符串),用 Value 原生比较 ——
-                    // 旧实现经 try_to_double 会把日期 '2019-12-31' 截成 2019
-                    types::Value best; bool first = true;
-                    for (auto& row : flat_rows) {
-                        auto ctx = build_ctx(row);
-                        auto v = eval(*e->func_args[0], ctx);
-                        if (v.is_null()) continue;
-                        if (first) { best = v; first = false; continue; }
-                        int cv = v.compare(best);
-                        if ((lower == "min" && cv < 0) || (lower == "max" && cv > 0)) best = v;
-                    }
-                    agg_row.push_back(first ? types::Value::make_null() : best);
-                } else if (contains_agg(*e)) {
-                    // 标量函数嵌套聚合 (COALESCE(SUM(x),0)): 纯值递归,不构造临时 AST
-                    std::function<types::Value(const ast::Expression&)> eval_nested =
-                        [&](const ast::Expression& src) -> types::Value {
-                            if (src.kind == ast::ExprKind::Literal) return src.literal;
-                            if (src.kind == ast::ExprKind::FunctionCall) {
-                                std::string low = src.func_name;
-                                std::transform(low.begin(), low.end(), low.begin(),
-                                               [](unsigned char c) { return std::tolower(c); });
-                                if (is_agg_func(low)) {
-                                    // 按当前桶重算该聚合 (与上面 sum/avg/min/max 分支同语义)
-                                    std::vector<types::Value> vals;
-                                    for (auto& row : flat_rows)
-                                        vals.push_back(eval(*src.func_args[0], build_ctx(row)));
-                                    if (low == "count") {
-                                        if (src.func_star_arg)
-                                            return types::Value::make_int(static_cast<int64_t>(flat_rows.size()));
-                                        int64_t n = 0;
-                                        for (auto& v : vals) if (!v.is_null()) ++n;
-                                        return types::Value::make_int(n);
-                                    }
-                                    double acc = 0; int64_t iacc = 0; int64_t n = 0;
-                                    bool all_int = true, first = true;
-                                    types::Value best;
-                                    for (auto& v : vals) {
-                                        if (v.is_null()) continue;
-                                        if (low == "min" || low == "max") {
-                                            if (first) { best = v; first = false; }
-                                            else {
-                                                int cv = v.compare(best);
-                                                if ((low == "min" && cv < 0) || (low == "max" && cv > 0))
-                                                    best = v;
-                                            }
-                                        } else if (v.is_int()) {
-                                            iacc += v.v_int; acc += static_cast<double>(v.v_int);
-                                        } else {
-                                            all_int = false;
-                                            double d; if (v.try_to_double(d)) acc += d;
-                                        }
-                                        ++n;
-                                    }
-                                    if (n == 0) return types::Value::make_null();
-                                    if (low == "avg") return types::Value::make_double(acc / n);
-                                    if (low == "sum") return all_int ? types::Value::make_int(iacc)
-                                                                     : types::Value::make_double(acc);
-                                    return first ? types::Value::make_null() : best;
-                                }
-                                if (low == "coalesce" || low == "ifnull") {
-                                    for (auto& a : src.func_args) {
-                                        auto v = eval_nested(*a);
-                                        if (!v.is_null()) return v;
-                                    }
-                                    return types::Value::make_null();
-                                }
-                            }
-                            if (flat_rows.empty()) return types::Value::make_null();
-                            return eval(src, build_ctx(flat_rows.front()));
-                        };
-                    agg_row.push_back(eval_nested(*e));
-                } else {
-                    // 普通函数在聚合上下文用桶内第一行
-                    if (!flat_rows.empty()) agg_row.push_back(eval(*e, build_ctx(flat_rows.front())));
-                    else agg_row.push_back(types::Value::make_null());
-                }
-            }
+            for (auto& [e, _] : s.columns) agg_row.push_back(eval_agg(*e, flat_rows));
             return agg_row;
         };
 
-        // 算每个桶
-        std::vector<storage::Row> agg_rows;
-        for (auto& b : buckets) agg_rows.push_back(agg_one_bucket(b.rows));
+        // 算每个桶(保留桶下标,供 HAVING / ORDER BY 回到原始行)
+        struct AggOut { storage::Row row; size_t bi; };
+        std::vector<AggOut> outs;
+        outs.reserve(buckets.size());
+        for (size_t bi = 0; bi < buckets.size(); ++bi)
+            outs.push_back({ agg_one_bucket(buckets[bi].rows), bi });
+        if (!eval_error_.empty()) return take_eval_error();
 
-        // HAVING 过滤 (M3)
+        // HAVING 过滤:聚合/别名/普通列统一走 eval_agg
         if (s.having) {
-            std::vector<storage::Row> filtered;
-            // HAVING 表达式里的聚合函数要对整个桶算(不是单行),需要专门的求值器
-            // std::function 解决递归 lambda 初始化问题
-            std::function<types::Value(const ast::Expression&, const std::vector<storage::Row>&)> eval_having;
-            eval_having = [&](const ast::Expression& expr, const std::vector<storage::Row>& bucket_rows) -> types::Value {
-                // 先判断 expr 类型
-                if (expr.kind == ast::ExprKind::Literal) return expr.literal;
-                if (expr.kind == ast::ExprKind::Column) {
-                    if (bucket_rows.empty()) return types::Value::make_null();
-                    // 列引用:取桶内第一行的值(MySQL 允许非聚合列出现在 HAVING,ANY_VALUE 语义)
-                    auto ctx0 = build_ctx(bucket_rows.front());
-                    return eval(expr, ctx0);
-                }
-                if (expr.kind == ast::ExprKind::BinaryOp) {
-                    auto l = eval_having(*expr.lhs, bucket_rows);
-                    auto r = eval_having(*expr.rhs, bucket_rows);
-                    switch (expr.binop) {
-                        case ast::BinOp::Eq:  return types::Value::make_bool(l.sql_equals(r));
-                        case ast::BinOp::Ne:  return types::Value::make_bool(!l.is_null() && !r.is_null() && l.compare(r) != 0);
-                        case ast::BinOp::Gt:  return types::Value::make_bool(!l.is_null() && !r.is_null() && l.compare(r) >  0);
-                        case ast::BinOp::Lt:  return types::Value::make_bool(!l.is_null() && !r.is_null() && l.compare(r) <  0);
-                        case ast::BinOp::Ge:  return types::Value::make_bool(!l.is_null() && !r.is_null() && l.compare(r) >= 0);
-                        case ast::BinOp::Le:  return types::Value::make_bool(!l.is_null() && !r.is_null() && l.compare(r) <= 0);
-                        case ast::BinOp::And: return types::Value::make_bool(to_bool(l) && to_bool(r));
-                        case ast::BinOp::Or:  return types::Value::make_bool(to_bool(l) || to_bool(r));
-                        default: { auto ctx0 = build_ctx(bucket_rows.front()); return eval(expr, ctx0); }
-                    }
-                }
-                if (expr.kind == ast::ExprKind::UnaryOp) {
-                    auto v = eval_having(*expr.operand, bucket_rows);
-                    if (expr.unary == ast::Expression::UnaryKind::Not) return types::Value::make_bool(!to_bool(v));
-                    return v;
-                }
-                if (expr.kind == ast::ExprKind::FunctionCall) {
-                    std::string lower; lower.resize(expr.func_name.size());
-                    std::transform(expr.func_name.begin(), expr.func_name.end(), lower.begin(),
-                                   [](unsigned char c) { return std::tolower(c); });
-                    if (lower == "count" || lower == "sum" || lower == "avg" || lower == "min" || lower == "max") {
-                        storage::Row fake_agg;   // 复用上面 agg_one_bucket 的逻辑?不行,会有递归
-                        // 直接内联实现
-                        if (lower == "count") {
-                            if (expr.func_star_arg) return types::Value::make_int(static_cast<int64_t>(bucket_rows.size()));
-                            int64_t c = 0;
-                            for (auto& row : bucket_rows) {
-                                auto ctx = build_ctx(row);
-                                auto v = eval(*expr.func_args[0], ctx);
-                                if (!v.is_null()) c++;
-                            }
-                            return types::Value::make_int(c);
-                        } else {
-                            double acc = 0; int64_t iacc = 0; int64_t c = 0;
-                            bool all_int = true, first = true;
-                            types::Value best;
-                            for (auto& row : bucket_rows) {
-                                auto ctx = build_ctx(row);
-                                auto v = eval(*expr.func_args[0], ctx);
-                                if (v.is_null()) continue;
-                                if (lower == "min" || lower == "max") {
-                                    if (first) { best = v; first = false; }
-                                    else {
-                                        int cv = v.compare(best);
-                                        if ((lower == "min" && cv < 0) || (lower == "max" && cv > 0))
-                                            best = v;
-                                    }
-                                } else if (v.is_int()) {
-                                    iacc += v.v_int; acc += static_cast<double>(v.v_int);
-                                } else {
-                                    all_int = false;
-                                    double d; if (v.try_to_double(d)) acc += d;
-                                }
-                                c++;
-                            }
-                            if (c == 0) return types::Value::make_null();
-                            if (lower == "avg") return types::Value::make_double(acc / c);
-                            if (lower == "sum") return all_int ? types::Value::make_int(iacc)
-                                                               : types::Value::make_double(acc);
-                            return first ? types::Value::make_null() : best;
-                        }
-                    }
-                    // 非聚合函数:用桶内第一行算
-                    if (!bucket_rows.empty()) {
-                        auto ctx0 = build_ctx(bucket_rows.front());
-                        return eval(expr, ctx0);
-                    }
-                    return types::Value::make_null();
-                }
-                // 其他:用第一行算
-                if (!bucket_rows.empty()) {
-                    auto ctx0 = build_ctx(bucket_rows.front());
-                    return eval(expr, ctx0);
-                }
-                return types::Value::make_null();
-            };
-            for (size_t bi = 0; bi < agg_rows.size(); ++bi) {
-                auto v = eval_having(*s.having, buckets[bi].rows);
-                if (to_bool(v)) filtered.push_back(std::move(agg_rows[bi]));
-            }
-            agg_rows = std::move(filtered);
+            std::vector<AggOut> filtered;
+            for (auto& o : outs)
+                if (to_bool(eval_agg(*s.having, buckets[o.bi].rows)))
+                    filtered.push_back(std::move(o));
+            outs = std::move(filtered);
+            if (!eval_error_.empty()) return take_eval_error();
         }
 
-        // ORDER BY 可作用于聚合结果行
-        if (!s.order_by.empty()) {
-            std::sort(agg_rows.begin(), agg_rows.end(), [&](const storage::Row& a, const storage::Row& b) {
-                for (auto& [expr, asc] : s.order_by) {
-                    // ORDER BY 表达式在聚合上下文 — 用桶内 flat row 做 ctx
-                    storage::Row flat_a = a.empty() ? storage::Row() : buckets[0].rows.front(); // 简化
-                    storage::Row flat_b = b.empty() ? storage::Row() : buckets[0].rows.front();
-                    auto ctx_a = build_ctx(flat_a);
-                    auto ctx_b = build_ctx(flat_b);
-                    int c = eval(*expr, ctx_a).compare(eval(*expr, ctx_b));
-                    if (c != 0) return asc ? c < 0 : c > 0;
+        // ORDER BY:输出列别名/位置直接取投影值;其余表达式按聚合上下文对桶求值
+        if (!s.order_by.empty() && outs.size() > 1) {
+            struct OTerm { int out_idx = -1; const ast::Expression* expr = nullptr; bool asc = true; };
+            std::vector<OTerm> terms;
+            for (auto& [oe, asc] : s.order_by) {
+                OTerm t;
+                t.asc = asc;
+                t.out_idx = order_output_index(*oe);
+                if (t.out_idx < 0) t.expr = oe.get();
+                terms.push_back(t);
+            }
+            // 排序键预计算一次,避免比较器里重复算聚合
+            std::vector<std::vector<types::Value>> keys(outs.size());
+            for (size_t i = 0; i < outs.size(); ++i) {
+                keys[i].reserve(terms.size());
+                for (auto& t : terms) {
+                    if (t.out_idx >= 0) {
+                        keys[i].push_back(t.out_idx < static_cast<int>(outs[i].row.size())
+                                          ? outs[i].row[t.out_idx] : types::Value::make_null());
+                    } else {
+                        keys[i].push_back(eval_agg(*t.expr, buckets[outs[i].bi].rows));
+                    }
+                }
+            }
+            if (!eval_error_.empty()) return take_eval_error();
+            std::vector<size_t> ord(outs.size());
+            for (size_t i = 0; i < ord.size(); ++i) ord[i] = i;
+            std::stable_sort(ord.begin(), ord.end(), [&](size_t ia, size_t ib) {
+                for (size_t ti = 0; ti < terms.size(); ++ti) {
+                    int c = keys[ia][ti].compare(keys[ib][ti]);
+                    if (c != 0) return terms[ti].asc ? c < 0 : c > 0;
                 }
                 return false;
             });
+            std::vector<AggOut> sorted;
+            sorted.reserve(outs.size());
+            for (size_t i : ord) sorted.push_back(std::move(outs[i]));
+            outs = std::move(sorted);
         }
 
-        r.rows = std::move(agg_rows);
+        for (auto& o : outs) r.rows.push_back(std::move(o.row));
         r.affected_rows = static_cast<int64_t>(r.rows.size());
         return r;
     }
-    // ORDER BY
-    if (!s.order_by.empty()) {
-        std::sort(after_where.begin(), after_where.end(), [&](const storage::Row& a, const storage::Row& b) {
-            for (auto& [expr, asc] : s.order_by) {
-                // MySQL 兼容:ORDER BY 1 按投影/展开列的 1-based 位置排序
-                if (expr->kind == ast::ExprKind::Literal && expr->literal.is_int()) {
-                    int idx = static_cast<int>(expr->literal.v_int) - 1;
-                    if (idx >= 0 && idx < static_cast<int>(total_cols) &&
-                        idx < static_cast<int>(a.size()) && idx < static_cast<int>(b.size())) {
-                        int c = a[idx].compare(b[idx]);
-                        if (c != 0) return asc ? c < 0 : c > 0;
+    // 先投影(ORDER BY 别名/位置需要投影值)
+    std::vector<storage::Row> projected;
+    projected.reserve(after_where.size());
+    for (auto& row : after_where) projected.push_back(compute_row(row));
+    if (!eval_error_.empty()) return take_eval_error();
+
+    // 窗口函数:PARTITION BY 分组 → 组内 ORDER BY 排序 → 填 ROW_NUMBER()
+    // (目前只实现 ROW_NUMBER();其他窗口函数保持 NULL)
+    {
+        std::vector<std::pair<size_t, const ast::Expression*>> win_cols;
+        size_t oi = 0;
+        for (auto& [e, _] : s.columns) {
+            if (e->kind == ast::ExprKind::Star) {
+                for (auto& slot : slots) oi += slot.def->columns.size();
+                continue;
+            }
+            if (e->is_window) win_cols.push_back({oi, e.get()});
+            ++oi;
+        }
+        for (auto& [ocol, we] : win_cols) {
+            std::string low = we->func_name;
+            std::transform(low.begin(), low.end(), low.begin(),
+                           [](unsigned char c) { return std::tolower(c); });
+            if (low != "row_number") continue;
+            std::vector<std::vector<types::Value>> okeys(projected.size());
+            std::unordered_map<std::string, std::vector<size_t>> groups;
+            std::vector<std::string> gorder;
+            for (size_t i = 0; i < projected.size(); ++i) {
+                auto ctx = build_ctx(after_where[i]);
+                std::string k;
+                for (auto& pe : we->win_partition) k += eval(*pe, ctx).to_string() + "\x01";
+                for (auto& [oe, asc] : we->win_order) okeys[i].push_back(eval(*oe, ctx));
+                auto it = groups.find(k);
+                if (it == groups.end()) { gorder.push_back(k); groups[k].push_back(i); }
+                else it->second.push_back(i);
+            }
+            if (!eval_error_.empty()) return take_eval_error();
+            for (auto& k : gorder) {
+                auto& idxs = groups[k];
+                std::stable_sort(idxs.begin(), idxs.end(), [&](size_t a, size_t b) {
+                    for (size_t t = 0; t < we->win_order.size(); ++t) {
+                        int c = okeys[a][t].compare(okeys[b][t]);
+                        if (c != 0) return we->win_order[t].second ? c < 0 : c > 0;
                     }
-                    continue;
+                    return false;
+                });
+                for (size_t r = 0; r < idxs.size(); ++r) {
+                    if (ocol < projected[idxs[r]].size())
+                        projected[idxs[r]][ocol] =
+                            types::Value::make_int(static_cast<int64_t>(r) + 1);
                 }
-                auto ctx_a = build_ctx(a);
-                auto ctx_b = build_ctx(b);
-                auto va = eval(*expr, ctx_a);
-                auto vb = eval(*expr, ctx_b);
+            }
+        }
+    }
+
+    // ORDER BY:输出列位置/别名取投影值,其余表达式在原始行上求值
+    if (!s.order_by.empty() && projected.size() > 1) {
+        struct OTerm { int out_idx = -1; const ast::Expression* expr = nullptr; bool asc = true; };
+        std::vector<OTerm> terms;
+        for (auto& [oe, asc] : s.order_by) {
+            OTerm t;
+            t.asc = asc;
+            t.out_idx = order_output_index(*oe);
+            if (t.out_idx < 0) t.expr = oe.get();
+            terms.push_back(t);
+        }
+        std::vector<size_t> ord(projected.size());
+        for (size_t i = 0; i < ord.size(); ++i) ord[i] = i;
+        std::stable_sort(ord.begin(), ord.end(), [&](size_t ia, size_t ib) {
+            for (auto& t : terms) {
+                types::Value va, vb;
+                if (t.out_idx >= 0) {
+                    va = t.out_idx < static_cast<int>(projected[ia].size())
+                       ? projected[ia][t.out_idx] : types::Value::make_null();
+                    vb = t.out_idx < static_cast<int>(projected[ib].size())
+                       ? projected[ib][t.out_idx] : types::Value::make_null();
+                } else {
+                    auto ca = build_ctx(after_where[ia]);
+                    auto cb = build_ctx(after_where[ib]);
+                    va = eval(*t.expr, ca);
+                    vb = eval(*t.expr, cb);
+                }
                 int c = va.compare(vb);
-                if (c != 0) return asc ? c < 0 : c > 0;
+                if (c != 0) return t.asc ? c < 0 : c > 0;
             }
             return false;
         });
+        if (!eval_error_.empty()) return take_eval_error();
+        std::vector<storage::Row> sorted;
+        sorted.reserve(projected.size());
+        for (size_t i : ord) sorted.push_back(std::move(projected[i]));
+        projected = std::move(sorted);
     }
 
-    // DISTINCT — 简化
+    // DISTINCT
     if (s.distinct) {
         std::vector<storage::Row> dedup;
-        std::set<std::string> seen;
-        for (auto& row : after_where) {
-            storage::Row out = compute_row(row);
-            std::string key;
-            for (auto& v : out) key += v.to_string() + "\x01";
-            if (seen.insert(key).second) dedup.push_back(std::move(out));
+        std::unordered_set<std::string> seen;
+        seen.reserve(projected.size());
+        for (auto& row : projected) {
+            if (seen.insert(row_dedup_key(row)).second) dedup.push_back(std::move(row));
         }
-        after_where = std::move(dedup);
-    } else {
-        std::vector<storage::Row> projected;
-        for (auto& row : after_where) projected.push_back(compute_row(row));
-        after_where = std::move(projected);
+        projected = std::move(dedup);
     }
+    after_where = std::move(projected);
 
     // LIMIT / OFFSET
     int64_t off = s.offset.value_or(0);

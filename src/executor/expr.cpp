@@ -6,6 +6,7 @@
 #include <regex>
 #include <sstream>
 #include <ctime>
+#include <cstdio>
 
 namespace sqltiny::executor {
 
@@ -62,30 +63,40 @@ types::Value Executor::eval(const ast::Expression& e, const ExecContext& ctx) co
                 if (it != vars.end()) return types::Value::make_string(it->second);
                 return types::Value::make_null();
             }
-            // 优先 alias.col, 其次裸 col
-            // 热路径(row_ref/idx_ref 已设置)零拷贝取行与列索引,避免每行深拷贝 map
-            const std::map<std::string, int>& col_index =
-                ctx.idx_ref ? *ctx.idx_ref : ctx.col_index;
-            const storage::Row& row = ctx.row_ref ? *ctx.row_ref : ctx.current_row;
-            std::string key = e.table_name.empty() ? e.column_name : (e.table_name + "." + e.column_name);
-            auto it = col_index.find(key);
-            if (it == col_index.end()) {
-                // 裸列尝试所有表
-                for (auto& [k, idx] : col_index) {
-                    // k 可能 "users.id" 或 "id";取点号后的部分
-                    auto dot = k.find('.');
-                    std::string bare = (dot == std::string::npos) ? k : k.substr(dot + 1);
-                    if (_stricmp(bare.c_str(), e.column_name.c_str()) == 0) {
-                        if (it == col_index.end() ||
-                            col_index.find(e.column_name) == col_index.end()) {
-                            it = col_index.find(k);
-                        }
+            // 列解析:先本层作用域,未命中沿 outer 链向上(相关子查询)。
+            // 限定名 t.col 只做精确匹配 —— 不再剥掉限定符退化成本层同名列,
+            // 否则子查询里 e.emp_no 会错误命中内层 de.emp_no,相关谓词退化为恒真。
+            const ExecContext* c = &ctx;
+            for (;;) {
+                // 热路径(row_ref/idx_ref 已设置)零拷贝取行与列索引
+                const std::map<std::string, int>& col_index =
+                    c->idx_ref ? *c->idx_ref : c->col_index;
+                const storage::Row& row = c->row_ref ? *c->row_ref : c->current_row;
+                std::string key = e.table_name.empty() ? e.column_name : (e.table_name + "." + e.column_name);
+                auto it = col_index.find(key);
+                if (it == col_index.end()) {
+                    // 大小写不敏感的全键匹配
+                    for (auto& [k, idx] : col_index) {
+                        if (_stricmp(k.c_str(), key.c_str()) == 0) { it = col_index.find(k); break; }
                     }
                 }
-            }
-            if (it != col_index.end() && it->second >= 0 &&
-                it->second < static_cast<int>(row.size())) {
-                return row[it->second];
+                if (it == col_index.end() && e.table_name.empty()) {
+                    // 裸列:尝试所有表的裸列名(取最后一个匹配,与旧行为一致)
+                    for (auto& [k, idx] : col_index) {
+                        auto dot = k.find('.');
+                        std::string bare = (dot == std::string::npos) ? k : k.substr(dot + 1);
+                        if (_stricmp(bare.c_str(), e.column_name.c_str()) == 0)
+                            it = col_index.find(k);
+                    }
+                }
+                if (it != col_index.end() && it->second >= 0 &&
+                    it->second < static_cast<int>(row.size())) {
+                    return row[it->second];
+                }
+                if (!c->outer) break;
+                // 离开本层作用域 → 标记本层子查询引用了外部(相关性探测)
+                if (c->outer_used) *c->outer_used = true;
+                c = c->outer;
             }
             return types::Value::make_null();
         }
@@ -195,9 +206,11 @@ types::Value Executor::eval(const ast::Expression& e, const ExecContext& ctx) co
 
         case ast::ExprKind::Subquery: {
             if (!ctx.exec || !e.subquery_stmt) return types::Value::make_null();
-            auto result = ctx.exec->execute(*e.subquery_stmt);
-            if (result.rows.empty() || result.rows[0].empty()) return types::Value::make_null();
-            return result.rows[0][0];   // 标量子查询:取第一行第一列
+            const auto* rows = ctx.exec->subquery_rows(e, ctx);
+            if (!rows) return types::Value::make_null();
+            if (e.subquery_exists) return types::Value::make_bool(!rows->empty());
+            if (rows->empty() || (*rows)[0].empty()) return types::Value::make_null();
+            return (*rows)[0][0];   // 标量子查询:取第一行第一列
         }
 
         case ast::ExprKind::Case: {
@@ -288,11 +301,12 @@ types::Value Executor::eval_function(
     if (lower == "__in") {
         if (args.size() < 2) return types::Value::make_bool(false);
         auto left = eval(*args[0], ctx);
-        // 右值是 SELECT 子查询:取所有行当候选值
+        // 右值是 SELECT 子查询:非相关只物化一次(缓存),相关则逐行重算
         if (args[1] && args[1]->kind == ast::ExprKind::Subquery && args[1]->subquery_stmt) {
             if (!ctx.exec) return types::Value::make_bool(false);
-            auto result = ctx.exec->execute(*args[1]->subquery_stmt);
-            for (auto& row : result.rows) {
+            const auto* rows = ctx.exec->subquery_rows(*args[1], ctx);
+            if (!rows) return types::Value::make_bool(false);
+            for (auto& row : *rows) {
                 if (row.empty()) continue;
                 if (!left.is_null() && !row[0].is_null() && left.compare(row[0]) == 0)
                     return types::Value::make_bool(true);
@@ -408,6 +422,55 @@ types::Value Executor::eval_function(
     }
     if (lower == "user") {
         return types::Value::make_string("root@localhost");
+    }
+    // 日期/时间提取:YEAR / MONTH / DAY / HOUR / MINUTE / SECOND / CURDATE / DATE
+    if (lower == "year" || lower == "month" || lower == "day" || lower == "dayofmonth" ||
+        lower == "hour" || lower == "minute" || lower == "second" ||
+        lower == "curdate" || lower == "current_date" || lower == "date") {
+        types::DateTimeValue dt{};
+        bool have = false;
+        if (lower == "curdate" || lower == "current_date") {
+            std::time_t t = std::time(nullptr);
+            std::tm tm{}; localtime_s(&tm, &t);
+            dt.year = tm.tm_year + 1900; dt.month = tm.tm_mon + 1; dt.day = tm.tm_mday;
+            have = true;
+        } else if (!args.empty()) {
+            auto v = eval(*args[0], ctx);
+            if (v.kind == types::Value::Kind::DateTime) { dt = v.v_dt; have = true; }
+            else if (v.kind == types::Value::Kind::Date) {
+                dt.year = v.v_date.year; dt.month = v.v_date.month; dt.day = v.v_date.day;
+                have = true;
+            } else if (v.kind == types::Value::Kind::Time) {
+                dt.hour = v.v_time.hour; dt.minute = v.v_time.minute; dt.second = v.v_time.second;
+                have = true;
+            } else if (!v.is_null()) {
+                // 字符串/数字形式 'YYYY-MM-DD [HH:MM:SS]'
+                std::string s = v.is_string() ? v.v_str : v.to_string();
+                if (s.size() >= 2 && s.front() == '\'' && s.back() == '\'')
+                    s = s.substr(1, s.size() - 2);
+                int y = 0, mo = 0, d = 0, h = 0, mi = 0, se = 0;
+                int n = std::sscanf(s.c_str(), "%d-%d-%d %d:%d:%d", &y, &mo, &d, &h, &mi, &se);
+                if (n >= 3) {
+                    dt.year = y; dt.month = mo; dt.day = d;
+                    dt.hour = h; dt.minute = mi; dt.second = se;
+                    have = true;
+                }
+            }
+        }
+        if (!have) return types::Value::make_null();
+        if (lower == "year")  return types::Value::make_int(dt.year);
+        if (lower == "month") return types::Value::make_int(dt.month);
+        if (lower == "day" || lower == "dayofmonth") return types::Value::make_int(dt.day);
+        if (lower == "hour")   return types::Value::make_int(dt.hour);
+        if (lower == "minute") return types::Value::make_int(dt.minute);
+        if (lower == "second") return types::Value::make_int(dt.second);
+        if (lower == "date") {
+            types::DateValue d; d.year = dt.year; d.month = dt.month; d.day = dt.day;
+            return types::Value::make_date(d);
+        }
+        // curdate / current_date
+        types::DateValue d; d.year = dt.year; d.month = dt.month; d.day = dt.day;
+        return types::Value::make_date(d);
     }
     // 未知函数 —— NULL
     return types::Value::make_null();

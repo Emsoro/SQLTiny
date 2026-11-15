@@ -7,7 +7,7 @@ if(WIN32 AND CMAKE_TOOLCHAIN_FILE AND NOT DEFINED VCPKG_TARGET_TRIPLET)
   set(VCPKG_TARGET_TRIPLET "x64-windows-static" CACHE STRING "vcpkg target triplet")
 endif()
 
-project(SQLTiny VERSION 2.0.4 LANGUAGES CXX)
+project(SQLTiny VERSION 2.0.5 LANGUAGES CXX)
 
 # MSVC 静态 CRT: 与 x64-windows-static 的 VCPKG_CRT_LINKAGE=static 保持一致,
 # 避免 CMake 默认 /MD 与 toolchain 的 /MT 冲突 (LNK2038 / D9025)。
@@ -83,6 +83,8 @@ add_smoke_test(smoke_m5_wal   tests/smoke_m5_wal.cpp)
 add_smoke_test(smoke_m6_isolation tests/smoke_m6_isolation.cpp)
 add_smoke_test(smoke_m6_hsqldb_matrix tests/smoke_m6_hsqldb_matrix.cpp)
 add_smoke_test(smoke_m6_session_db tests/smoke_m6_session_db.cpp)
+add_smoke_test(smoke_sql_keywords tests/smoke_sql_keywords.cpp)
+add_smoke_test(smoke_sql_syntax   tests/smoke_sql_syntax.cpp)
 add_smoke_test(dbx_probe     tests/dbx_probe.cpp)
 
 # 索引微基准(AVL vs B+ 树 A/B 对比,不进 ctest)

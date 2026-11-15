@@ -25,7 +25,7 @@
 <text x="48" y="77" font-size="13.5" fill="#5B6B8C">C++20 embedded database · MySQL wire protocol · 4 isolation levels · MVCC transactions</text>
 <rect x="1240" y="32" width="330" height="36" rx="18" fill="#E7EDFF" stroke="#3D63D8"/>
 <circle cx="1262" cy="50" r="5" fill="#0E8F7E"/>
-<text x="1278" y="55" font-size="12.5" font-weight="bold" fill="#2546B0">v2.0.4 · 4 ISOLATION LEVELS · MVCC</text>
+<text x="1278" y="55" font-size="12.5" font-weight="bold" fill="#2546B0">v2.0.5 · 4 ISOLATION LEVELS · MVCC</text>
 
 <!-- ========== PANEL A: REQUEST FLOW ========== -->
 <rect x="30" y="100" width="520" height="1120" rx="14" fill="#FFFFFF" stroke="#CBD8EC"/>

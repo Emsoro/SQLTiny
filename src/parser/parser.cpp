@@ -39,6 +39,18 @@ bool is_bare_alias_keyword(TokenKind k) {
         case TokenKind::KwDateTime: case TokenKind::KwTimestamp:
         case TokenKind::KwBoolean: case TokenKind::KwJson:
         case TokenKind::KwUnsigned: case TokenKind::KwSigned: case TokenKind::KwZerofill:
+        // 新增的非结构性关键词同样要能作裸别名。典型场景:DBeaver 的元数据查询
+        // `SELECT \`ENGINE\` engine FROM information_schema.TABLES ...`;
+        // 不登记的话 ENGINE 会被 parse_all() 当成下一条语句的开头而报 1064。
+        // 注意:子句边界词(FROM/WHERE/GROUP/ORDER/LIMIT/UNION/JOIN/ON 等)绝不能加进来。
+        case TokenKind::KwEngine: case TokenKind::KwCollate: case TokenKind::KwValue:
+        case TokenKind::KwIgnore: case TokenKind::KwDuplicate:
+        case TokenKind::KwNames: case TokenKind::KwLevel: case TokenKind::KwIsolation:
+        case TokenKind::KwRead: case TokenKind::KwWrite: case TokenKind::KwAutocommit:
+        case TokenKind::KwCommitted: case TokenKind::KwUncommitted:
+        case TokenKind::KwRepeatable: case TokenKind::KwSerializable:
+        case TokenKind::KwCascade: case TokenKind::KwRestrict: case TokenKind::KwAction:
+        case TokenKind::KwLock: case TokenKind::KwUnlock:
             return true;
         default: return false;
     }
@@ -190,6 +202,7 @@ ast::StmtPtr Parser::parse_top() {
     Token t = peek();
     switch (t.kind) {
         case TokenKind::KwSelect: case TokenKind::KwAll: case TokenKind::KwDistinct:
+        case TokenKind::KwWith:
             return parse_select();
         case TokenKind::KwExplain: {
             consume();  // EXPLAIN
@@ -342,6 +355,15 @@ ast::ExprPtr Parser::parse_comparison() {
         auto right = parse_additive();
         return ast::Expression::make_binary(token_to_binop(t.kind), std::move(left), std::move(right));
     }
+    // BETWEEN lo AND hi → (left >= lo) AND (left <= hi)
+    if (match_consume(TokenKind::KwBetween)) {
+        auto lo = parse_additive();
+        expect(TokenKind::KwAnd, "AND");
+        auto hi = parse_additive();
+        auto ge = ast::Expression::make_binary(ast::BinOp::Ge, left->clone(), std::move(lo));
+        auto le = ast::Expression::make_binary(ast::BinOp::Le, std::move(left), std::move(hi));
+        return ast::Expression::make_binary(ast::BinOp::And, std::move(ge), std::move(le));
+    }
     // IS [NOT] NULL
     if (match_consume(TokenKind::KwIs)) {
         bool negate = match_consume(TokenKind::KwNot);
@@ -353,7 +375,9 @@ ast::ExprPtr Parser::parse_comparison() {
         e->operand = std::move(left);
         return e;
     }
-    // [NOT] IN (...)
+    // [NOT] IN / [NOT] LIKE —— NOT 必须和它后面的谓词一起消费。
+    // 旧实现先在「NOT IN」分支吞掉 NOT,若后面跟的是 LIKE 则会继续落到普通 LIKE,
+    // 使 `a NOT LIKE 'x'` 退化成 `a LIKE 'x'`(由 smoke_sql_syntax 发现)。
     if (match_consume(TokenKind::KwNot)) {
         // NOT IN (...)
         if (match_consume(TokenKind::KwIn)) {
@@ -380,6 +404,33 @@ ast::ExprPtr Parser::parse_comparison() {
             e->operand = std::move(in_expr);
             return e;
         }
+        // NOT LIKE 'pattern'
+        if (match_consume(TokenKind::KwLike)) {
+            auto e = std::make_unique<ast::Expression>();
+            auto like = std::make_unique<ast::Expression>();
+            like->kind = ast::ExprKind::FunctionCall;
+            like->func_name = "__like";
+            like->func_args.push_back(std::move(left));
+            like->func_args.push_back(parse_expr());
+            e->kind = ast::ExprKind::UnaryOp;
+            e->unary = ast::Expression::UnaryKind::Not;
+            e->operand = std::move(like);
+            return e;
+        }
+        // NOT BETWEEN lo AND hi
+        if (match_consume(TokenKind::KwBetween)) {
+            auto lo = parse_additive();
+            expect(TokenKind::KwAnd, "AND");
+            auto hi = parse_additive();
+            auto ge = ast::Expression::make_binary(ast::BinOp::Ge, left->clone(), std::move(lo));
+            auto le = ast::Expression::make_binary(ast::BinOp::Le, std::move(left), std::move(hi));
+            auto e = std::make_unique<ast::Expression>();
+            e->kind = ast::ExprKind::UnaryOp;
+            e->unary = ast::Expression::UnaryKind::Not;
+            e->operand = ast::Expression::make_binary(ast::BinOp::And, std::move(ge), std::move(le));
+            return e;
+        }
+        throw ParseError(t.line, t.col, "expected IN, LIKE or BETWEEN after NOT");
     }
     if (match_consume(TokenKind::KwIn)) {
         auto e = std::make_unique<ast::Expression>();
@@ -400,21 +451,7 @@ ast::ExprPtr Parser::parse_comparison() {
         consume();
         return e;
     }
-    // [NOT] LIKE
-    if (match_consume(TokenKind::KwNot)) {
-        if (match_consume(TokenKind::KwLike)) {
-            auto e = std::make_unique<ast::Expression>();
-            auto like = std::make_unique<ast::Expression>();
-            like->kind = ast::ExprKind::FunctionCall;
-            like->func_name = "__like";
-            like->func_args.push_back(std::move(left));
-            like->func_args.push_back(parse_expr());
-            e->kind = ast::ExprKind::UnaryOp;
-            e->unary = ast::Expression::UnaryKind::Not;
-            e->operand = std::move(like);
-            return e;
-        }
-    }
+    // LIKE( NOT 形式已与 NOT IN 合并到上面的 NOT 前缀分支)
     if (match_consume(TokenKind::KwLike)) {
         auto e = std::make_unique<ast::Expression>();
         e->kind = ast::ExprKind::FunctionCall;
@@ -504,10 +541,24 @@ ast::ExprPtr Parser::parse_primary() {
     if (match_consume(TokenKind::KwFalse)) {
         return ast::Expression::make_literal(types::Value::make_bool(false));
     }
-    // 括号
+    // 括号:标量子查询 (SELECT ...) 或普通分组表达式
     if (match_consume(TokenKind::LParen)) {
+        if (match(TokenKind::KwSelect)) {
+            auto sub = parse_select();
+            expect(TokenKind::RParen, ")");
+            return ast::Expression::make_subquery(std::move(sub));
+        }
         auto e = parse_expr();
         expect(TokenKind::RParen, ")");
+        return e;
+    }
+    // EXISTS (SELECT ...)
+    if (match_consume(TokenKind::KwExists)) {
+        expect(TokenKind::LParen, "(");
+        auto sub = parse_select();
+        expect(TokenKind::RParen, ")");
+        auto e = ast::Expression::make_subquery(std::move(sub));
+        e->subquery_exists = true;
         return e;
     }
     // * (单独的 Star)
@@ -624,25 +675,71 @@ ast::ExprPtr Parser::parse_function_call(std::string name, int line, int col) {
         expect(TokenKind::RParen, ")");
         return e;
     }
+    // COUNT(DISTINCT x) / SUM(DISTINCT x) / AVG(DISTINCT x)
+    if (match_consume(TokenKind::KwDistinct)) e->func_distinct = true;
     if (match(TokenKind::RParen)) {
-        // NOW(), CURRENT_TIMESTAMP
+        // NOW(), CURRENT_TIMESTAMP, ROW_NUMBER() —— 不能直接 return,后面还要看 OVER (...)
         consume();
-        return e;
-    }
-    e->func_args.push_back(parse_expr());
-    while (match_consume(TokenKind::Comma)) {
+    } else {
         e->func_args.push_back(parse_expr());
+        while (match_consume(TokenKind::Comma)) {
+            e->func_args.push_back(parse_expr());
+        }
+        expect(TokenKind::RParen, ")");
     }
-    expect(TokenKind::RParen, ")");
+    // 窗口函数:ROW_NUMBER() OVER (PARTITION BY a ORDER BY b DESC)
+    if (match_consume(TokenKind::KwOver)) {
+        expect(TokenKind::LParen, "(");
+        if (match_consume(TokenKind::KwPartition)) {
+            expect(TokenKind::KwBy, "BY");
+            e->win_partition.push_back(parse_expr());
+            while (match_consume(TokenKind::Comma)) {
+                e->win_partition.push_back(parse_expr());
+            }
+        }
+        if (match_consume(TokenKind::KwOrder)) {
+            expect(TokenKind::KwBy, "BY");
+            do {
+                auto oe = parse_expr();
+                bool asc = true;
+                if (match_consume(TokenKind::KwDesc)) asc = false;
+                else match_consume(TokenKind::KwAsc);
+                e->win_order.emplace_back(std::move(oe), asc);
+            } while (match_consume(TokenKind::Comma));
+        }
+        expect(TokenKind::RParen, ")");
+        e->is_window = true;
+    }
     return e;
 }
 
 // ========== SELECT ==========
 
 ast::StmtPtr Parser::parse_select() {
+    auto stmt = std::make_unique<ast::SelectStmt>();
+    // WITH [RECURSIVE] name [(cols)] AS (SELECT ...), ... SELECT ...
+    if (match_consume(TokenKind::KwWith)) {
+        bool recursive = match_consume(TokenKind::KwRecursive);
+        do {
+            ast::SelectStmt::CteDef cte;
+            cte.name = kw_or_ident();
+            cte.recursive = recursive;
+            if (match_consume(TokenKind::LParen)) {
+                do {
+                    cte.column_names.push_back(kw_or_ident());
+                } while (match_consume(TokenKind::Comma));
+                expect(TokenKind::RParen, ")");
+            }
+            expect(TokenKind::KwAs, "AS");
+            expect(TokenKind::LParen, "(");
+            cte.query = parse_select();
+            expect(TokenKind::RParen, ")");
+            stmt->ctes.push_back(std::move(cte));
+        } while (match_consume(TokenKind::Comma));
+    }
     // [SELECT] [DISTINCT | ALL]
     Token t = consume();
-    auto stmt = std::make_unique<ast::SelectStmt>();
+    (void)t;
     if (match_consume(TokenKind::KwDistinct)) stmt->distinct = true;
     if (match_consume(TokenKind::KwAll)) { /* default, no-op */ }
 
@@ -733,9 +830,31 @@ ast::StmtPtr Parser::parse_select() {
 
 void Parser::parse_from(ast::SelectStmt& s) {
     do {
-        auto t_alias = parse_table_ref_alias();
-        s.from_tables.push_back(t_alias.first);
-        s.from_aliases.push_back(t_alias);
+        if (match(TokenKind::LParen)) {
+            // FROM (SELECT ...) [AS] alias —— 派生表
+            consume();
+            if (!match(TokenKind::KwSelect)) {
+                auto t = peek();
+                throw ParseError(t.line, t.col, "expected SELECT after '(' in FROM");
+            }
+            auto sub = parse_select();
+            expect(TokenKind::RParen, ")");
+            std::string alias;
+            if (match_consume(TokenKind::KwAs))
+                alias = match(TokenKind::String) ? consume().text : kw_or_ident();
+            else if (match(TokenKind::Ident) || match(TokenKind::QuotedIdent) ||
+                     is_bare_alias_keyword(peek().kind))
+                alias = kw_or_ident();
+            if (alias.empty()) alias = "__derived" + std::to_string(s.from_tables.size());
+            s.from_tables.push_back(alias);
+            s.from_aliases.push_back({ alias, alias });
+            s.from_derived.push_back(std::move(sub));
+        } else {
+            auto t_alias = parse_table_ref_alias();
+            s.from_tables.push_back(t_alias.first);
+            s.from_aliases.push_back(t_alias);
+            s.from_derived.push_back(nullptr);
+        }
     } while (match_consume(TokenKind::Comma));
 }
 
@@ -789,9 +908,30 @@ void Parser::parse_joins(ast::SelectStmt& s) {
         } else {
             break;
         }
-        auto ref = parse_table_ref_alias();
-        jc.table_name = ref.first;
-        jc.alias = ref.second;
+        if (match(TokenKind::LParen)) {
+            // JOIN (SELECT ...) alias —— 派生表
+            consume();
+            if (!match(TokenKind::KwSelect)) {
+                auto t = peek();
+                throw ParseError(t.line, t.col, "expected SELECT after '(' in JOIN");
+            }
+            auto sub = parse_select();
+            expect(TokenKind::RParen, ")");
+            std::string alias;
+            if (match_consume(TokenKind::KwAs))
+                alias = match(TokenKind::String) ? consume().text : kw_or_ident();
+            else if (match(TokenKind::Ident) || match(TokenKind::QuotedIdent) ||
+                     is_bare_alias_keyword(peek().kind))
+                alias = kw_or_ident();
+            if (alias.empty()) alias = "__join_derived" + std::to_string(s.joins.size());
+            jc.table_name = alias;
+            jc.alias = alias;
+            jc.derived = std::move(sub);
+        } else {
+            auto ref = parse_table_ref_alias();
+            jc.table_name = ref.first;
+            jc.alias = ref.second;
+        }
         if (match_consume(TokenKind::KwOn)) jc.on = parse_expr();
         s.joins.push_back(std::move(jc));
     }

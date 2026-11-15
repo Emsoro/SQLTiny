@@ -81,10 +81,24 @@ enum class TokenKind : uint16_t {
     KwElse, KwEnd, KwCast, KwConvert, KwIntoKw, KwOut, KwEscape,
     KwCurrentTimestamp, KwNow, KwCurrentDate, KwCurrentTime,
     KwUser, KwDatabaseKw, KwCount, KwSum, KwAvg, KwMin, KwMax,
+    KwOver, KwPartition,
     KwConcat, KwCoalesce, KwIfnull, KwRound, KwAbs, KwLength,
     KwSchemas, KwFields, KwStatus, KwVariables, KwGlobal, KwSession,
     KwEngines, KwPlugins, KwCharset, KwCharacter, KwCollation, KwKeys,
     KwDual, KwProcesslist, KwWarnings, KwErrors,
+
+    // 补充的常用 SQL92 / MySQL 关键词(词法可识别;执行层是否实现由 parser 决定)
+    // DDL / DML 修饰
+    KwCollate, KwEngine, KwValue, KwIgnore, KwDuplicate, KwUsing,
+    // 运算符类关键字
+    KwRegexp, KwRlike, KwXor, KwDiv, KwMod,
+    // 查询结构 / 对象
+    KwWith, KwRecursive, KwView, KwTrigger,
+    // 事务 / 会话
+    KwIsolation, KwLevel, KwRead, KwWrite, KwCommitted, KwUncommitted,
+    KwRepeatable, KwSerializable, KwAutocommit, KwNames,
+    // 约束动作 / 锁
+    KwCascade, KwRestrict, KwAction, KwLock, KwUnlock,
 
     Kw_END,  // 哨兵
 

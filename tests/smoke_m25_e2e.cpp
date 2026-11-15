@@ -1,5 +1,5 @@
 // M2.5 E2E: MySQL wire protocol 客户端测试 ( Winsock )
-// 先启动: sqltiny_server.exe --port 3306 --user root
+// 先启动: sqltiny_server.exe --port 3307 --user root
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <cstdio>
@@ -47,7 +47,7 @@ int main() {
     WSADATA wsa; WSAStartup(MAKEWORD(2, 2), &wsa);
     SOCKET s = socket(AF_INET, SOCK_STREAM, 0);
     sockaddr_in addr{};
-    addr.sin_family = AF_INET; addr.sin_port = htons(3306);
+    addr.sin_family = AF_INET; addr.sin_port = htons(3307);
     inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
 
     printf("=== SQLTiny M2.5 E2E (mysql wire protocol) ===\n");

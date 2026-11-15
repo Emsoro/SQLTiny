@@ -73,8 +73,14 @@ struct Expression {
     std::string func_name;
     std::vector<ExprPtr> func_args;
     bool func_star_arg = false;  // COUNT(*)
+    bool func_distinct = false;  // COUNT(DISTINCT x) / SUM(DISTINCT x) / AVG(DISTINCT x)
+    // --- 窗口函数:func OVER (PARTITION BY ... ORDER BY ...) ---
+    bool is_window = false;
+    std::vector<ExprPtr> win_partition;
+    std::vector<std::pair<ExprPtr, bool>> win_order;   // (表达式, 是否升序)
     // --- Subquery ---
     StmtPtr subquery_stmt;       // Subquery 用:持有完整 SELECT Statement
+    bool subquery_exists = false; // EXISTS (SELECT ...):只判存在性
 
     // --- Case ---
     ExprPtr case_base;                                     // 简单 CASE 的比较对象,可空(搜索 CASE)
@@ -89,6 +95,9 @@ struct Expression {
     static ExprPtr make_star(std::string table = "");
     static ExprPtr make_function(std::string name, std::vector<ExprPtr> args, bool star = false);
     static ExprPtr make_subquery(StmtPtr stmt);
+
+    /// 深拷贝(BETWEEN 展开等需要复用同一子表达式两处)
+    ExprPtr clone() const;
 };
 
 // ---------- JOIN ----------
@@ -98,18 +107,29 @@ struct JoinClause {
     std::string table_name;
     std::string alias;           // 可选
     ExprPtr on;                  // ON 条件, CROSS / NATURAL 时可空
+    StmtPtr derived;             // JOIN (SELECT ...) alias:派生表,非空时 table_name 是别名
 };
 
 // ---------- SELECT ----------
 enum class SelectSetOp { None, Union, UnionAll };
 
 struct SelectStmt {
+    // WITH 子句(CTE):按声明顺序物化,后面的可引用前面的
+    struct CteDef {
+        std::string name;
+        std::vector<std::string> column_names;  // 可选显式列名 seq(n)
+        StmtPtr query;
+        bool recursive = false;
+    };
+    std::vector<CteDef> ctes;
+
     // SELECT 体
     bool distinct = false;
     bool explain = false;        // EXPLAIN SELECT ... : 只输出执行计划,不执行查询
     std::vector<std::pair<ExprPtr, std::string>> columns;  // (expr, alias)
     std::vector<std::string> from_tables;                  // FROM t1, t2
     std::vector<std::pair<std::string, std::string>> from_aliases;  // (table, alias) — 简单形式,后面可能再拆
+    std::vector<StmtPtr> from_derived;   // 与 from_tables 平行:FROM (SELECT ...) 派生表,普通表为 nullptr
     std::vector<JoinClause> joins;
     ExprPtr where;
     std::vector<std::pair<ExprPtr, bool>> group_by;  // (expr, asc)
@@ -258,5 +278,8 @@ struct Statement {
     CreateTableStmt* as_create_table() { return create_table_.get(); }
     DropTableStmt*   as_drop_table()   { return drop_table_.get(); }
 };
+
+/// 深拷贝语句(当前仅 SELECT 会被克隆:子查询/CTE/派生表);其它类型返回 nullptr
+StmtPtr clone_stmt(const Statement& st);
 
 } // namespace sqltiny::ast

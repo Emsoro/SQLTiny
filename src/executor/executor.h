@@ -8,6 +8,7 @@
 #include <vector>
 #include <memory>
 #include <map>
+#include <unordered_map>
 
 // M6 前向声明: Session 在 sqltiny::core 里, 我们只需要指针
 namespace sqltiny { namespace core { class Session; } }
@@ -19,6 +20,9 @@ class Executor;
 
 // 表达式层 free function(跨 cpp 可见,定义在 expr.cpp)
 bool to_bool(const types::Value& v);
+
+// CTE / 派生表物化结果:name → 临时表(shared_ptr 便于跨作用域共享视图)
+using CteMap = std::map<std::string, std::shared_ptr<storage::Table>>;
 
 /// 执行上下文:提供行上下文 + 列查找 + 表查找
 struct ExecContext {
@@ -36,6 +40,13 @@ struct ExecContext {
 
     // 子查询求值时递归调 exec_select 需要 executor 指针
     Executor* exec = nullptr;
+
+    // 相关子查询:外层作用域链。列在本层解析不到时沿 outer 向上找;
+    // 离开某层作用域时置位该层的 outer_used,供子查询缓存判定是否相关。
+    const ExecContext* outer = nullptr;
+    bool* outer_used = nullptr;
+    // 当前可见的 CTE 物化表
+    const CteMap* ctes = nullptr;
 
     // 聚合状态(SELECT 执行时临时填充)
     struct AggState {
@@ -105,8 +116,18 @@ private:
     ResultSet exec_insert(const ast::InsertStmt& s);
     ResultSet exec_update(const ast::UpdateStmt& s);
     ResultSet exec_delete(const ast::DeleteStmt& s);
-    ResultSet exec_select(const ast::SelectStmt& s);
-    ResultSet exec_select_body(const ast::SelectStmt& s);
+    ResultSet exec_select(const ast::SelectStmt& s, const ExecContext* outer = nullptr,
+                          bool* outer_used = nullptr, const CteMap* outer_ctes = nullptr);
+    ResultSet exec_select_body(const ast::SelectStmt& s, const ExecContext* outer = nullptr,
+                               bool* outer_used = nullptr, const CteMap* outer_ctes = nullptr);
+    // 子查询入口:带外部作用域与相关性探测
+    ResultSet execute_sub(const ast::Statement& stmt, const ExecContext* outer,
+                          bool* used, const CteMap* ctes);
+    // 子查询结果行(非相关则按 AST 节点缓存;相关则每次重算)
+    const std::vector<storage::Row>* subquery_rows(const ast::Expression& e,
+                                                   const ExecContext& ctx) const;
+    // WITH 子句物化(含递归 CTE 不动点迭代),失败返回 ok=false
+    ResultSet materialize_ctes(const std::vector<ast::SelectStmt::CteDef>& defs, CteMap& ctes);
     ResultSet exec_show_tables(bool full = false, const std::string& db_name = "",
                                const std::string& filter_pattern = "");
     ResultSet exec_show_columns(const std::string& db_name, const std::string& table_name);
@@ -133,6 +154,17 @@ private:
     types::Value eval_like(const types::Value& v, const types::Value& pattern) const;
     types::Value eval_function(const std::string& name, const std::vector<ast::ExprPtr>& args,
                                bool star, const ExecContext& ctx) const;
+
+    // 子查询缓存:按 Subquery 表达式节点指针键控,每条顶层语句开始时清空。
+    // 非相关子查询只执行一次(P1:IN 子查询逐行重算 → 物化)。
+    struct SqEntry {
+        bool correlated = false;
+        std::vector<storage::Row> rows;
+    };
+    mutable std::unordered_map<const void*, SqEntry> sq_cache_;
+    mutable std::vector<storage::Row> sq_scratch_;   // 相关子查询的临时结果
+    mutable std::string eval_error_;                 // 子查询执行错误向上传播
+    mutable int exec_depth_ = 0;
 };
 
 } // namespace sqltiny::executor

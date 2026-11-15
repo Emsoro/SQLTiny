@@ -2,7 +2,7 @@
 
 > 🌐 语言: [English](./README.en.md) · **简体中文**
 
-> **当前版本 `v2.0.4`(2026-11-15)** · 版本号统一维护在 `CMakeLists.txt`(`project(SQLTiny VERSION 2.0.4)`)、`vcpkg.json`(`version-string`)与 `src/main.cpp` 启动横幅。协议层对外仍伪装为 `5.7.0-SQLTiny` 以兼容 MySQL 客户端,与产品版本无关。
+> **当前版本 `v2.0.5`(2026-11-16)** · 版本号统一维护在 `CMakeLists.txt`(`project(SQLTiny VERSION 2.0.5)`)、`vcpkg.json`(`version-string`)与 `src/main.cpp` 启动横幅。协议层对外仍伪装为 `5.7.0-SQLTiny` 以兼容 MySQL 客户端,与产品版本无关。
 
 **SQLTiny** 是用现代 C++20 从零重写的轻量级关系型数据库,核心设计灵感来自 [HSQLDB](http://hsqldb.org/),额外暴露 **MySQL Wire Protocol**——标准 MySQL 客户端(`mysql` CLI、Navicat、DBeaver、Connector/J、PyMySQL、DBX/dbExpress)直接连接。
 
@@ -34,6 +34,50 @@
 > 🔒 **锁分层**: Catalog.mu_(DDL) → Table.mu_ shared_lock(SELECT 多读者并行) / unique_lock(DML 独占) → RowLockMap(行级冲突检测) → TransactionManager.writeLock_(提交边界) → WalManager.mu_(WAL 文件读写)
 >
 > 🧊 **MVCC**: SELECT 完全不加锁,`for_each_visible(querySCN, readerTxn)` 按 `createSCN/deleteSCN` 与 `pendingTxn` 过滤;未提交行只对所属事务可见,commit 才 `finalize_commit` 对外发布
+
+---
+
+## 🆕 v2.0.5 更新内容
+
+`tests/compare_employees.py` 从 14 条扩到 **39 条**(基础 14 / 嵌套子查询 10 / WITH·CTE 4 / 复杂查询 11),以 MySQL 3306 同库双端对照,暴露出 3 类问题并全部修复。
+
+### 1. 静默正确性缺陷(不报错、结果错)
+
+| 缺陷 | 现象 | 修复 |
+|---|---|---|
+| GROUP BY 别名失效 | `GROUP BY g`(别名)按未知列求值 NULL,全表塌成一组 | 分组键回查 SELECT 表达式 |
+| 函数内嵌聚合 | `ROUND(AVG(salary),2)` 返回 `0` | 聚合上下文内递归求值 |
+| 日期函数缺失 | `YEAR(hire_date)` 静默 NULL,按年分组全落一组 | 补齐 YEAR/MONTH/DAY 等 |
+
+### 2. 语法补全
+
+WITH / CTE(含多 CTE)、`WITH RECURSIVE` 递归 CTE、标量子查询(WHERE 比较与 SELECT 列,含相关)、`EXISTS`、FROM 派生表、`COUNT(DISTINCT)`、`BETWEEN`、**窗口函数 `ROW_NUMBER() OVER (PARTITION BY … ORDER BY …)`**。
+
+### 3. 性能修复
+
+| 问题 | 修复前 | 修复后 |
+|---|---|---|
+| 高基数 GROUP BY 分桶线性查找 O(组数²) | salaries 30 万组 **超时 100s** | **3.80s**(改 `unordered_map`) |
+| 相关 `IN` 子查询逐行全扫内表 | **超时 100s** | **0.096s**(外层列等值走 PK 前缀探测) |
+| 递归 CTE 用累积全集迭代(UNION ALL 指数膨胀) | **超时 100s** | **0.001s**(改上一轮增量工作集) |
+| 相关子查询结果被误缓存 | 只返回第一行(2 条 MISMATCH) | 去相关求值时置 `outer_used` |
+
+### 4. 最终结果(39 条,MySQL vs SQLTiny)
+
+| 类别 | 条数 | 结果 | MySQL | SQLTiny |
+|---|---|---|---|---|
+| 基础 | 14 | 14 MATCH | 14.00s | **5.45s** |
+| 嵌套 | 10 | 10 MATCH | 3.26s | 5.84s |
+| WITH | 4 | 4 MATCH | 1.42s | 4.13s |
+| 复杂 | 11 | 11 MATCH | 9.82s | 12.73s |
+
+`SUMMARY: fails = 0`。对比脚本同时改为**每条查询独立连接 + 100s 超时**,避免某条超时后连接失效、后续查询连锁误报 `(0,'')`——首轮的 11 条 ST-ERR 大部分是这种假象。
+
+### 5. 测试
+
+- 新增 `smoke_sql_keywords`(**649 PASS**,180 个关键词 + 词法/Parser 基础)、`smoke_sql_syntax`(**160 PASS / 15 GAP**,常用语法端到端矩阵),CTest 增至 **12 个目标**
+- `smoke_m25_e2e` 端口统一为 **3307**,不再因 3306 是需密码的 MySQL 而 auth 失败
+- CTest **12/12** 全通过
 
 ---
 
@@ -354,6 +398,7 @@ SQL 语法:`SET SESSION TRANSACTION ISOLATION LEVEL <级别>`(会话默认)、`S
 | **下推覆盖面扩展 (v2.0.2)** | ✅ | WHERE 按表侧拆分 + 哈希等值 JOIN 也下推 + 子查询/CASE 不下推加固;高薪员工数 2.76s→0.94s · 2 表哈希计行 0.37s→0.13s |
 | **主键点查索引探测 (v2.0.3)** | ✅ | `WHERE PK首列=常量` 走 `for_each_by_pk_prefix`,不再全表扫描;逻辑删除历史自动回退全扫保证 MVCC 可见性;`employees` 点查 74ms→**0.13ms** · `salaries` 678ms→**0.17ms** |
 | **融合聚合 + UNION ALL (v2.0.4)** | ✅ | 单表聚合单遍扫描快路径:`SUM(salary)` 2.97s→**0.35s**、`WHERE salary>100000` 计行 0.774s→**0.248s**;UNION/UNION ALL(含去重、链式、尾部 ORDER BY/LIMIT)+ `ORDER BY 1` 位置序号;三端结果与 MySQL 对比验证 |
+| **复杂查询正确性 + 语法补全 (v2.0.5)** | ✅ | WITH/递归 CTE、标量子查询、EXISTS、FROM 派生表、COUNT(DISTINCT)、BETWEEN、`ROW_NUMBER() OVER`、日期函数;GROUP BY 别名与内嵌聚合修复;高基数分桶 O(n²)→O(1)、相关子查询去相关;`compare_employees.py` 39 条 **39/39 MATCH** |
 | **后续** | 📋 | 等待队列/死锁检测 → 存储过程 · caching_sha2_password / SSL · 复制 |
 
 ---
@@ -410,10 +455,10 @@ FROM users u INNER JOIN orders o ON o.user_id = u.id;
 | 产物 | 类型 | 说明 |
 |---|---|---|
 | `build/Debug/sqltiny.lib` | 静态库 | 引擎核心,嵌入式进程内调用 |
-| `build/Debug/sqltiny_server.exe` | 可执行 | MySQL 协议 TCP 服务器(v2.0.4) |
+| `build/Debug/sqltiny_server.exe` | 可执行 | MySQL 协议 TCP 服务器(v2.0.5) |
 | `build/Release/sqltiny_server.exe` | 可执行(发布版) | 同上,Release 版约 **0.9 MB** 单文件(静态 CRT + fmt 静态链接,无 dll 依赖,可直接拷贝部署);Debug 版约 4.8 MB |
 
-**`sqltiny_server.exe` 文件信息(v2.0.4)**:
+**`sqltiny_server.exe` 文件信息(v2.0.5)**:
 
 | 属性 | 值 |
 |---|---|
@@ -432,6 +477,8 @@ FROM users u INNER JOIN orders o ON o.user_id = u.id;
 | `build/Debug/smoke_m6_isolation.exe` | 隔离级别测试 | 四级别 + 事务/保存点/冲突 — **451/451 PASS** |
 | `build/Debug/smoke_m6_hsqldb_matrix.exe` | HSQLDB 语义矩阵 + JOIN 优化回归 | NULL 三值 / 空集聚合 / JOIN 基数(Hash Join、EXPLAIN) / 语句原子性 / 多库隔离 — **73 PASS / 0 GAP** |
 | `build/Debug/smoke_m6_session_db.exe` | 多库会话隔离 | 每连接 `USE` / 握手 database 互不干扰 — **PASS** |
+| `build/Debug/smoke_sql_keywords.exe` | 关键词 / 词法基础用例 | 180 个常用关键词 × 大小写不敏感、运算符、字面量、注释、行列号、词法错误、Parser 分发 — **649 PASS / 0 FAIL** |
+| `build/Debug/smoke_sql_syntax.exe` | 常用 SQL 语法端到端矩阵 | DDL/DML/SELECT 子句/谓词/函数/聚合分组排序分页/UNION/JOIN/事务/系统语句/错误码,未实现语法记 GAP — **160 PASS / 0 FAIL / 15 GAP** |
 | `build/Debug/dbx_probe.exe` | 客户端兼容性探针 | 进程内逐条跑 DBX/dbExpress 连接/元数据/事务阶段的典型 SQL — **58/58 PASS** |
 | `tests/test_txn_vs_sqlite.py` | 事务行为对比 | SQLTiny vs SQLite 四级别 + WAL 重启 — **70/70 一致** |
 | `tests/test_full_flow.py` | PyMySQL 全链路(双连接) | DDL/INSERT→SELECT*含NULL→WHERE/ORDER/聚合/HAVING→JOIN→UPDATE/DELETE→约束与错误码→事务/SAVEPOINT/autocommit→四隔离级别/40001→多库→清理 — **48 PASS / 0 GAP** |
@@ -448,7 +495,7 @@ cmake --build build --config Debug
 
 # 另开一个终端启动 server(smoke_m25_e2e 与部分 Python 脚本需要)
 .\build\Debug\sqltiny_server.exe --port 3306 --user root
-# 然后一键跑完 10 个 CTest 目标(未启动 server 时为 9/10)
+# 然后一键跑完 12 个 CTest 目标(未启动 server 时为 11/12)
 ctest --test-dir build -C Debug --output-on-failure
 
 # 也可逐个运行(以下无需 server,纯进程内)
@@ -460,6 +507,8 @@ ctest --test-dir build -C Debug --output-on-failure
 .\build\Debug\smoke_m6_isolation.exe
 .\build\Debug\smoke_m6_hsqldb_matrix.exe
 .\build\Debug\smoke_m6_session_db.exe
+.\build\Debug\smoke_sql_keywords.exe
+.\build\Debug\smoke_sql_syntax.exe
 .\build\Debug\dbx_probe.exe
 
 # MySQL 协议端到端(复用上面已启动的 server)
@@ -478,9 +527,9 @@ python tests\test_stmt_prepare.py    # COM_STMT_* 预编译协议(需 server)
 python tests\stress_stability.py --self-server --phase all   # 稳定性压测(自带 server)
 ```
 
-### 测试总览 (CTest 10/10 · Python 8 scripts)
+### 测试总览 (CTest 12/12 · Python 8 scripts)
 
-> `smoke_m25_e2e` 通过 TCP 连接 3306,需先启动 server;未启动 server 时 CTest 为 9/10。
+> `smoke_m25_e2e` 通过 TCP 连接 **3307**,需先启动 server;未启动 server 时 CTest 为 11/12。
 ```
 smoke_m1              3/3   PASS  Value / AVL / Lexer
 smoke_m2              5/5   PASS  CRUD / 聚合 / 表达式 / DDL edge / IS NULL
@@ -491,6 +540,8 @@ smoke_m25_e2e        13/13  PASS  MySQL wire C++ client E2E
 smoke_m6_isolation  451/451 PASS  四隔离级别 + 事务 / 保存点 / 冲突
 smoke_m6_hsqldb_matrix 73 PASS / 0 GAP   HSQLDB 语义矩阵 + JOIN 优化/EXPLAIN 回归
 smoke_m6_session_db  PASS        多库会话级隔离(每连接 USE/握手 db 互不干扰)
+smoke_sql_keywords   649 PASS / 0 FAIL  常用关键词 + 词法/Parser 基础用例(180 词)
+smoke_sql_syntax     160 PASS / 0 FAIL / 15 GAP  常用 SQL 语法端到端矩阵(含待补语法 GAP 清单)
 test_full_flow       48 PASS / 0 GAP    PyMySQL 全链路(双连接):DDL→DML→聚合→JOIN→事务→四隔离级别→多库→清理
 test_txn_vs_sqlite   70/70 对比        四隔离级别 + WAL 重启与 SQLite 逐项比对
 test_sqlalchemy      33 PASS / 0 FAIL / 0 GAP  15 组:Engine/Core/ORM/2.0 表达式/绑定/事务/relationship/类型映射/Inspector
