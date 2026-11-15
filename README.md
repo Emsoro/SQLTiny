@@ -1,5 +1,7 @@
 # SQLTiny — 轻量级嵌入式数据库 · MySQL 协议兼容
 
+> 🌐 语言: [English](./README.en.md) · **简体中文**
+
 > **当前版本 `v2.0.3`(2026-11-15)** · 版本号统一维护在 `CMakeLists.txt`(`project(SQLTiny VERSION 2.0.3)`)、`vcpkg.json`(`version-string`)与 `src/main.cpp` 启动横幅。协议层对外仍伪装为 `5.7.0-SQLTiny` 以兼容 MySQL 客户端,与产品版本无关。
 
 **SQLTiny** 是用现代 C++20 从零重写的轻量级关系型数据库,核心设计灵感来自 [HSQLDB](http://hsqldb.org/),额外暴露 **MySQL Wire Protocol**——标准 MySQL 客户端(`mysql` CLI、Navicat、DBeaver、Connector/J、PyMySQL、DBX/dbExpress)直接连接。
@@ -595,7 +597,8 @@ SQLTiny/
 ├── CMakeLists.txt             顶层构建
 ├── CODEPLAN.md                完整项目规划(架构映射 + 里程碑)
 ├── architecture.svg           系统架构图(四隔离级别 + 事务数据流)
-├── README.md                  本文件
+├── README.md                  中文 README(本文件)
+├── README.en.md               英文 README
 ├── vcpkg.json                 vcpkg manifest(仅依赖 fmt)
 ├── src/
 │   ├── types/                 SqlType + Value 运行时值 + MySQL 协议类型映射
