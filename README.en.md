@@ -1,6 +1,6 @@
 # SQLTiny — Lightweight Embedded Database · MySQL Protocol Compatible
 
-> **Current version `v2.0.3` (2026-11-15)** · The version number is maintained in `CMakeLists.txt` (`project(SQLTiny VERSION 2.0.3)`), `vcpkg.json` (`version-string`) and the startup banner in `src/main.cpp`. The wire protocol still reports `5.7.0-SQLTiny` for MySQL client compatibility — that string is unrelated to the product version.
+> **Current version `v2.0.4` (2026-11-15)** · The version number is maintained in `CMakeLists.txt` (`project(SQLTiny VERSION 2.0.4)`), `vcpkg.json` (`version-string`) and the startup banner in `src/main.cpp`. The wire protocol still reports `5.7.0-SQLTiny` for MySQL client compatibility — that string is unrelated to the product version.
 
 **SQLTiny** is a lightweight relational database written from scratch in modern C++20, with its core design inspired by [HSQLDB](http://hsqldb.org/). It additionally exposes the **MySQL Wire Protocol**, so standard MySQL clients (`mysql` CLI, Navicat, DBeaver, Connector/J, PyMySQL, DBX/dbExpress) can connect directly.
 
@@ -34,6 +34,51 @@
 > 🔒 **Lock hierarchy**: Catalog.mu_ (DDL) → Table.mu_ shared_lock (concurrent SELECT readers) / unique_lock (exclusive DML) → RowLockMap (row-level conflict detection) → TransactionManager.writeLock_ (commit boundary) → WalManager.mu_ (WAL file I/O)
 >
 > 🧊 **MVCC**: SELECT takes no locks at all; `for_each_visible(querySCN, readerTxn)` filters by `createSCN/deleteSCN` and `pendingTxn`. Uncommitted rows are visible only to their owning transaction; `finalize_commit` publishes them at commit.
+
+---
+
+## 🆕 What's new in v2.0.4
+
+This release brings two improvements: a **single-pass fused aggregate path** and **UNION / UNION ALL support**.
+
+### 1. Fused aggregate fast path (one scan)
+
+Previously `SUM(salary)` went through the generic aggregate path: 2.8M rows were copied three times (`left_rows` / `candidate_rows` / `buckets`), `build_ctx` + `eval(column)` ran once per row during scanning and again during aggregation — **2.97s**. `WHERE salary>100000` did the same with a per-row `eval` predicate and then materialized 94,696 rows — **0.774s**.
+
+The new path resolves column offsets and predicate operands once before scanning, then filters and accumulates directly inside the `for_each_visible` callback — no intermediate rows. The trigger is deliberately narrow: single table, no JOIN/GROUP BY/HAVING/DISTINCT/ORDER BY/LIMIT, projections limited to simple aggregates (`COUNT(*)` / `COUNT|SUM|AVG|MIN|MAX(column)`), and a WHERE clause decomposable by AND into `column op literal` comparisons. A PK equality eligible for index probing still takes priority. Integer comparisons use direct `int64` compare within the lossless 2^53 range, avoiding a `try_to_double` per operand.
+
+| Query (employees, 3.92M rows, Release, mean of 5 runs) | v2.0.3 | v2.0.4 | MySQL 3306 |
+|---|---|---|---|
+| `SELECT SUM(salary) FROM salaries` | 2.969s | **0.352s** (~8.4x) | 0.33s |
+| `SELECT COUNT(*) FROM salaries WHERE salary>100000` | 0.774s | **0.248s** (~3.1x) | 0.28s |
+| `COUNT + SUM + AVG + MIN + MAX` combined | — | 0.422s | — |
+| `SUM(salary) WHERE emp_no=10001` (PK probe) | 0.000s | 0.000s (path unchanged) | — |
+
+Empty-set NULL semantics (`SUM/AVG/MIN/MAX → NULL`, `COUNT → 0`), string MIN/MAX, qualified column names, literal-on-left (`100000<salary`), and multiple AND predicates were all checked against MySQL. Cross-type string literals (`salary>'100000'`) retain the pre-existing behavior.
+
+### 2. UNION / UNION ALL
+
+The AST already had `set_op` / `set_right` fields, but the parser and executor never wired them up. This release completes the path:
+
+- `parser.cpp`: parses `UNION [ALL | DISTINCT] SELECT ...`; the right branch is recursive, so chained UNIONs work
+- `executor.cpp/.h`: `exec_select` is split into a UNION wrapper plus `exec_select_body`; UNION ALL concatenates, UNION deduplicates; trailing ORDER BY/LIMIT on the right branch applies to the whole UNION; ragged rows are padded with NULLs
+- Bonus: `ORDER BY 1` numeric positional references (common MySQL syntax, previously missing)
+
+Three-way comparison (employees dataset, mean of 3 runs):
+
+| Query | MySQL 3306 | tcdb 3308 | SQLTiny 3307 |
+|---|---|---|---|
+| `COUNT(employees) UNION ALL COUNT(salaries)` | 0.03s | 0.00s* | 0.26s |
+| `salaries>100000 UNION ALL salaries<=100000` | 0.38s | 0.00s* | 0.58s |
+| 20K-row employee result set UNION ALL | 0.02s | 0.02s | 0.26s |
+| GROUP BY results UNION ALL | 0.10s | 0.00s* | 0.64s |
+| UNION dedupe / chaining / ORDER BY+LIMIT | — | 16384-row limit error | matches MySQL |
+
+\* tcdb's plain `COUNT(*)` queries appear to hit a result cache; do not read them as real scan times. SQLTiny executes branches sequentially; simple aggregate branches use the new fast path, while GROUP BY branches still use the generic path — the main source of the remaining gap.
+
+### Regression
+
+`ctest` 9/10 (`smoke_m25_e2e` hardcodes port 3306, which is now a password-protected MySQL — environmental auth failure); `test_full_flow` 48/48, `test_vs_sqlite` all scenarios consistent, `test_stmt_prepare` 7/7 — all pointed at 3307 and passing.
 
 ---
 
@@ -308,6 +353,7 @@ SQL syntax: `SET SESSION TRANSACTION ISOLATION LEVEL <level>` (session default),
 | **3-table JOIN execution optimization (v2.0.1)** | ✅ | Zero-copy ExecContext + idx_probe skips right-table materialization + **aggregate pushdown into the PK prefix probe**; employees 3-table JOIN **18.25s→1.97s** (9.3x), gap to MySQL 11.7x→1.25x |
 | **Wider pushdown coverage (v2.0.2)** | ✅ | WHERE split by table side + hash equi-join pushdown + subquery/CASE hardening; high earners 2.76s→0.94s · 2-table hash row count 0.37s→0.13s |
 | **PK point-lookup index probe (v2.0.3)** | ✅ | `WHERE leading PK column = constant` uses `for_each_by_pk_prefix` instead of a full scan; logical-delete history falls back to a full scan to preserve MVCC visibility; `employees` point lookup 74ms→**0.13ms** · `salaries` 678ms→**0.17ms** |
+| **Fused aggregates + UNION ALL (v2.0.4)** | ✅ | Single-pass aggregate path: `SUM(salary)` 2.97s→**0.35s**, `WHERE salary>100000` count 0.774s→**0.248s**; UNION/UNION ALL (dedupe, chaining, trailing ORDER BY/LIMIT) + `ORDER BY 1` positional references; verified against MySQL across three endpoints |
 | **Upcoming** | 📋 | Wait queue / deadlock detection → stored procedures · caching_sha2_password / SSL · replication |
 
 ---
@@ -362,10 +408,10 @@ FROM users u INNER JOIN orders o ON o.user_id = u.id;
 | Artifact | Type | Description |
 |---|---|---|
 | `build/Debug/sqltiny.lib` | static library | Engine core, for in-process embedding |
-| `build/Debug/sqltiny_server.exe` | executable | MySQL protocol TCP server (v2.0.3) |
+| `build/Debug/sqltiny_server.exe` | executable | MySQL protocol TCP server (v2.0.4) |
 | `build/Release/sqltiny_server.exe` | executable (release) | Same, Release build is about **0.9 MB** in a single file (static CRT + static fmt, no DLL dependencies, copy-and-run); Debug build is about 4.8 MB |
 
-**`sqltiny_server.exe` file info (v2.0.3)**:
+**`sqltiny_server.exe` file info (v2.0.4)**:
 
 | Property | Value |
 |---|---|

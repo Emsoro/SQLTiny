@@ -106,6 +106,7 @@ private:
     ResultSet exec_update(const ast::UpdateStmt& s);
     ResultSet exec_delete(const ast::DeleteStmt& s);
     ResultSet exec_select(const ast::SelectStmt& s);
+    ResultSet exec_select_body(const ast::SelectStmt& s);
     ResultSet exec_show_tables(bool full = false, const std::string& db_name = "",
                                const std::string& filter_pattern = "");
     ResultSet exec_show_columns(const std::string& db_name, const std::string& table_name);

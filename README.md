@@ -2,7 +2,7 @@
 
 > 🌐 语言: [English](./README.en.md) · **简体中文**
 
-> **当前版本 `v2.0.3`(2026-11-15)** · 版本号统一维护在 `CMakeLists.txt`(`project(SQLTiny VERSION 2.0.3)`)、`vcpkg.json`(`version-string`)与 `src/main.cpp` 启动横幅。协议层对外仍伪装为 `5.7.0-SQLTiny` 以兼容 MySQL 客户端,与产品版本无关。
+> **当前版本 `v2.0.4`(2026-11-15)** · 版本号统一维护在 `CMakeLists.txt`(`project(SQLTiny VERSION 2.0.4)`)、`vcpkg.json`(`version-string`)与 `src/main.cpp` 启动横幅。协议层对外仍伪装为 `5.7.0-SQLTiny` 以兼容 MySQL 客户端,与产品版本无关。
 
 **SQLTiny** 是用现代 C++20 从零重写的轻量级关系型数据库,核心设计灵感来自 [HSQLDB](http://hsqldb.org/),额外暴露 **MySQL Wire Protocol**——标准 MySQL 客户端(`mysql` CLI、Navicat、DBeaver、Connector/J、PyMySQL、DBX/dbExpress)直接连接。
 
@@ -34,6 +34,51 @@
 > 🔒 **锁分层**: Catalog.mu_(DDL) → Table.mu_ shared_lock(SELECT 多读者并行) / unique_lock(DML 独占) → RowLockMap(行级冲突检测) → TransactionManager.writeLock_(提交边界) → WalManager.mu_(WAL 文件读写)
 >
 > 🧊 **MVCC**: SELECT 完全不加锁,`for_each_visible(querySCN, readerTxn)` 按 `createSCN/deleteSCN` 与 `pendingTxn` 过滤;未提交行只对所属事务可见,commit 才 `finalize_commit` 对外发布
+
+---
+
+## 🆕 v2.0.4 更新内容
+
+本版本包含两类改进:**单表聚合的单遍扫描快路径**,以及 **UNION / UNION ALL 支持**。
+
+### 1. 融合聚合快路径(单遍扫描)
+
+此前 `SUM(salary)` 走通用聚合路径:280 万行要做 `left_rows` / `candidate_rows` / `buckets` 三次全表行拷贝,扫描阶段逐行 `build_ctx` + `eval(列)`,聚合阶段再来一遍,耗时 **2.97s**。`WHERE salary>100000` 同理:谓词逐行 `eval` 后再物化 9.4 万行,耗时 **0.774s**。
+
+新路径在扫描前解析列偏移和谓词操作数,在 `for_each_visible` 回调里直接过滤 + 累加,不物化任何中间行。触发条件保守:单表、无 JOIN/GROUP BY/HAVING/DISTINCT/ORDER BY/LIMIT,投影列全是简单聚合(`COUNT(*)` / `COUNT|SUM|AVG|MIN|MAX(列)`),WHERE 可拆成 AND 连接的「列 op 字面量」比较;存在可走索引探测的 PK 等值时仍让位给索引探测。整数比较在 2^53 无损范围内直比 `int64`,避免每次 `try_to_double`。
+
+| 查询(employees 392 万行,Release,5 次均值) | v2.0.3 | v2.0.4 | MySQL 3306 |
+|---|---|---|---|
+| `SELECT SUM(salary) FROM salaries` | 2.969s | **0.352s** (~8.4x) | 0.33s |
+| `SELECT COUNT(*) FROM salaries WHERE salary>100000` | 0.774s | **0.248s** (~3.1x) | 0.28s |
+| `COUNT + SUM + AVG + MIN + MAX` 五合一 | — | 0.422s | — |
+| `SUM(salary) WHERE emp_no=10001`(PK 探测) | 0.000s | 0.000s(路径未变) | — |
+
+NULL 空集(`SUM/AVG/MIN/MAX → NULL`、`COUNT → 0`)、字符串 MIN/MAX、合格列名、字面量在左(`100000<salary`)、多 AND 谓词均已与 MySQL 对比一致;跨类型字符串字面量(`salary>'100000'`)维持既有行为。
+
+### 2. UNION / UNION ALL
+
+AST 早有 `set_op` / `set_right` 字段,但 parser/executor 一直未接入。本版本补齐:
+
+- `parser.cpp`:解析 `UNION [ALL | DISTINCT] SELECT ...`,右分支递归,支持链式 UNION
+- `executor.cpp/.h`:`exec_select` 拆为 UNION 包装层 + `exec_select_body`;UNION ALL 直接拼接,UNION 去重;右分支末尾的 ORDER BY/LIMIT 作用于整个 UNION 结果;列数不齐按 NULL 补齐
+- 顺带支持 `ORDER BY 1` 数字位置序号(MySQL 常用写法,此前缺失)
+
+三端对比(employees 数据集,3 次均值):
+
+| 查询 | MySQL 3306 | tcdb 3308 | SQLTiny 3307 |
+|---|---|---|---|
+| `COUNT(employees) ∪ ALL COUNT(salaries)` | 0.03s | 0.00s* | 0.26s |
+| `salaries>100000 ∪ ALL salaries<=100000` | 0.38s | 0.00s* | 0.58s |
+| 2 万行员工结果集 UNION ALL | 0.02s | 0.02s | 0.26s |
+| GROUP BY 结果 UNION ALL | 0.10s | 0.00s* | 0.64s |
+| UNION 去重 / 链式 / ORDER BY+LIMIT | — | 16384 行上限报错 | 与 MySQL 一致 |
+
+\* tcdb 的纯 `COUNT(*)` 查询疑似命中结果缓存,不宜当作真实扫描速度。SQLTiny 各分支顺序执行,简单聚合分支走新快路径;GROUP BY 分支仍走通用路径,是主要差距来源。
+
+### 回归
+
+`ctest` 9/10(`smoke_m25_e2e` 硬编码连 3306,当前 3306 是需密码的 MySQL,环境性 auth 失败);`test_full_flow` 48/48、`test_vs_sqlite` 全场景一致、`test_stmt_prepare` 7/7 均指向 3307 通过。
 
 ---
 
@@ -308,6 +353,7 @@ SQL 语法:`SET SESSION TRANSACTION ISOLATION LEVEL <级别>`(会话默认)、`S
 | **3 表 JOIN 执行优化 (v2.0.1)** | ✅ | ExecContext 零拷贝 + idx_probe 跳过右表物化 + **聚合下推到 PK 前缀探测**;employees 3 表 JOIN **18.25s→1.97s**(9.3x),与 MySQL 差距 11.7x→1.25x |
 | **下推覆盖面扩展 (v2.0.2)** | ✅ | WHERE 按表侧拆分 + 哈希等值 JOIN 也下推 + 子查询/CASE 不下推加固;高薪员工数 2.76s→0.94s · 2 表哈希计行 0.37s→0.13s |
 | **主键点查索引探测 (v2.0.3)** | ✅ | `WHERE PK首列=常量` 走 `for_each_by_pk_prefix`,不再全表扫描;逻辑删除历史自动回退全扫保证 MVCC 可见性;`employees` 点查 74ms→**0.13ms** · `salaries` 678ms→**0.17ms** |
+| **融合聚合 + UNION ALL (v2.0.4)** | ✅ | 单表聚合单遍扫描快路径:`SUM(salary)` 2.97s→**0.35s**、`WHERE salary>100000` 计行 0.774s→**0.248s**;UNION/UNION ALL(含去重、链式、尾部 ORDER BY/LIMIT)+ `ORDER BY 1` 位置序号;三端结果与 MySQL 对比验证 |
 | **后续** | 📋 | 等待队列/死锁检测 → 存储过程 · caching_sha2_password / SSL · 复制 |
 
 ---
@@ -364,10 +410,10 @@ FROM users u INNER JOIN orders o ON o.user_id = u.id;
 | 产物 | 类型 | 说明 |
 |---|---|---|
 | `build/Debug/sqltiny.lib` | 静态库 | 引擎核心,嵌入式进程内调用 |
-| `build/Debug/sqltiny_server.exe` | 可执行 | MySQL 协议 TCP 服务器(v2.0.3) |
+| `build/Debug/sqltiny_server.exe` | 可执行 | MySQL 协议 TCP 服务器(v2.0.4) |
 | `build/Release/sqltiny_server.exe` | 可执行(发布版) | 同上,Release 版约 **0.9 MB** 单文件(静态 CRT + fmt 静态链接,无 dll 依赖,可直接拷贝部署);Debug 版约 4.8 MB |
 
-**`sqltiny_server.exe` 文件信息(v2.0.3)**:
+**`sqltiny_server.exe` 文件信息(v2.0.4)**:
 
 | 属性 | 值 |
 |---|---|

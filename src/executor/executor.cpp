@@ -10,6 +10,7 @@
 #include <map>
 #include <unordered_map>
 #include <unordered_set>
+#include <iterator>
 
 namespace sqltiny::executor {
 
@@ -550,6 +551,84 @@ ResultSet Executor::exec_delete(const ast::DeleteStmt& s) {
 
 // ---------- SELECT ----------
 ResultSet Executor::exec_select(const ast::SelectStmt& s) {
+    if (s.set_op == ast::SelectSetOp::None || !s.set_right ||
+        s.set_right->kind != ast::StmtKind::Select) {
+        return exec_select_body(s);
+    }
+    ResultSet left = exec_select_body(s);
+    if (!left.ok) return left;
+    ResultSet right = exec_select(*s.set_right->select_);
+    if (!right.ok) return right;
+
+    ResultSet r;
+    r.ok = true;
+    r.column_names = std::move(left.column_names);
+    r.column_types = std::move(left.column_types);
+    r.rows = std::move(left.rows);
+    size_t ncols = r.column_names.size();
+    if (!r.rows.empty()) ncols = std::max(ncols, r.rows[0].size());
+    if (!right.rows.empty()) ncols = std::max(ncols, right.rows[0].size());
+    while (r.column_names.size() < ncols) {
+        r.column_names.push_back(fmt::format("col{}", r.column_names.size() + 1));
+        r.column_types.push_back(types::SqlType::Varchar);
+    }
+    for (auto& row : r.rows) {
+        while (row.size() < ncols) row.push_back(types::Value::make_null());
+        if (row.size() > ncols) row.resize(ncols);
+    }
+    for (auto& row : right.rows) {
+        while (row.size() < ncols) row.push_back(types::Value::make_null());
+        if (row.size() > ncols) row.resize(ncols);
+    }
+
+    if (s.set_op == ast::SelectSetOp::UnionAll) {
+        r.rows.insert(r.rows.end(), std::make_move_iterator(right.rows.begin()),
+                      std::make_move_iterator(right.rows.end()));
+    } else {
+        std::unordered_set<std::string> seen;
+        seen.reserve(r.rows.size() + right.rows.size());
+        auto key_of = [](const storage::Row& row) {
+            std::string k;
+            for (auto& v : row) { k += v.to_string(); k.push_back('\x01'); }
+            return k;
+        };
+        for (auto& row : r.rows) seen.insert(key_of(row));
+        for (auto& row : right.rows) {
+            if (seen.insert(key_of(row)).second) r.rows.push_back(std::move(row));
+        }
+    }
+
+    // 无括号语法下,右分支末尾的 ORDER BY / LIMIT 作用于整个 UNION 结果
+    const auto& tail = *s.set_right->select_;
+    if (!tail.order_by.empty()) {
+        std::map<std::string, int> names;
+        for (size_t i = 0; i < r.column_names.size(); ++i) names[r.column_names[i]] = static_cast<int>(i);
+        std::stable_sort(r.rows.begin(), r.rows.end(), [&](const storage::Row& a, const storage::Row& b) {
+            for (auto& [oe, asc] : tail.order_by) {
+                int idx = -1;
+                if (oe->kind == ast::ExprKind::Literal && oe->literal.is_int())
+                    idx = static_cast<int>(oe->literal.v_int) - 1;
+                else if (oe->kind == ast::ExprKind::Column) {
+                    auto it = names.find(oe->column_name);
+                    if (it != names.end()) idx = it->second;
+                }
+                if (idx < 0 || static_cast<size_t>(idx) >= ncols) continue;
+                int c = a[idx].compare(b[idx]);
+                if (c != 0) return asc ? c < 0 : c > 0;
+            }
+            return false;
+        });
+    }
+    int64_t off = tail.offset.value_or(0);
+    if (off > 0 && static_cast<size_t>(off) < r.rows.size())
+        r.rows.erase(r.rows.begin(), r.rows.begin() + off);
+    if (tail.limit && *tail.limit >= 0 && static_cast<size_t>(*tail.limit) < r.rows.size())
+        r.rows.resize(static_cast<size_t>(*tail.limit));
+    r.affected_rows = static_cast<int64_t>(r.rows.size());
+    return r;
+}
+
+ResultSet Executor::exec_select_body(const ast::SelectStmt& s) {
     ResultSet r;
 
     // 推断表达式静态类型 — 供 wire 协议 field_type 用
@@ -1055,6 +1134,7 @@ ResultSet Executor::exec_select(const ast::SelectStmt& s) {
     // 先拿主表所有行 (MVCC:querySCN)
     uint64_t sqscn = query_scn(session_);
     uint64_t rtxn = reader_txn(session_);
+
     std::vector<storage::Row> left_rows;
 
     // ---- 主表 PK 首列等值 → 索引前缀探测,避免全表扫描 ----
@@ -1106,6 +1186,191 @@ ResultSet Executor::exec_select(const ast::SelectStmt& s) {
     // 存在逻辑删除历史时索引不再是全扫的超集(见 Table::has_dead_rows 说明),
     // 此时回退全表扫描以保证四个隔离级别下的可见性语义。
     const bool pk_probe_ok = pk_eq_lit && !tbl->has_dead_rows();
+
+    // ---- 单表聚合快路径:一次扫描直接过滤 + 累加,不物化中间行 ----
+    // 旧路径对 280 万行要做 left_rows / candidate_rows / buckets 三次全表行拷贝,
+    // 扫描阶段逐行 build_ctx + eval(列/谓词)(每行拼字符串查 map),聚合阶段再来一遍 ——
+    // SUM 约 2.9s、WHERE salary>100000 约 0.77s。
+    // 触发条件保守:单表、无 GROUP BY/HAVING/DISTINCT/ORDER BY/LIMIT,投影列全是简单聚合,
+    // WHERE 可拆成 AND 连接的「列 op 字面量」(op 仅比较符),且没有可走索引探测的 PK 等值。
+    // 列偏移与谓词操作数在扫描前解析一次,回调里直接读 row[off] 并复用 eval 的比较语义。
+    bool fast_agg = has_agg && s.joins.empty() && s.group_by.empty() &&
+                    !s.having && !s.distinct && s.order_by.empty() &&
+                    !s.offset && !s.limit && !pk_probe_ok;
+    struct FastAcc {
+        int kind = 0;   // 0=COUNT(*) 1=COUNT(col) 2=SUM/AVG 3=MIN 4=MAX
+        bool avg = false;
+        int off = -1;
+        int64_t cnt = 0;
+        int64_t iacc = 0;
+        double acc = 0;
+        bool all_int = true;
+        bool first = true;
+        types::Value best;
+    };
+    struct FastPred {
+        int off = -1;
+        types::Value lit;
+        ast::BinOp op = ast::BinOp::Eq;
+        bool lit_left = false;   // 保留原式操作数顺序,literal.compare(col) 与 col.compare(literal) 可能不同
+    };
+    std::vector<FastAcc> faccs;
+    std::vector<FastPred> fpreds;
+    if (fast_agg) {
+        faccs.reserve(s.columns.size());
+        for (auto& [e, _] : s.columns) {
+            if (!e || e->kind != ast::ExprKind::FunctionCall) { fast_agg = false; break; }
+            std::string low = e->func_name;
+            std::transform(low.begin(), low.end(), low.begin(),
+                           [](unsigned char c) { return std::tolower(c); });
+            FastAcc a;
+            if (low == "count" && e->func_star_arg) {
+                a.kind = 0;
+            } else if (low == "count" || low == "sum" || low == "avg" ||
+                       low == "min" || low == "max") {
+                if (e->func_args.size() != 1 || !e->func_args[0] ||
+                    e->func_args[0]->kind != ast::ExprKind::Column) { fast_agg = false; break; }
+                auto& c = *e->func_args[0];
+                std::string key = c.table_name.empty()
+                    ? c.column_name : (c.table_name + "." + c.column_name);
+                auto it = base_col_index.find(key);
+                if (it == base_col_index.end() ||
+                    (!c.table_name.empty() && ambiguous_cols.count(c.column_name)) ||
+                    it->second < 0 || it->second >= total_cols) { fast_agg = false; break; }
+                a.off = it->second;
+                a.kind = (low == "count") ? 1 : (low == "sum" || low == "avg") ? 2
+                       : (low == "min") ? 3 : 4;
+                a.avg = (low == "avg");
+            } else {
+                fast_agg = false; break;
+            }
+            faccs.push_back(std::move(a));
+        }
+    }
+    if (fast_agg && s.where) {
+        std::function<bool(const ast::Expression&)> add_pred =
+            [&](const ast::Expression& e) -> bool {
+                if (e.kind == ast::ExprKind::BinaryOp && e.binop == ast::BinOp::And &&
+                    e.lhs && e.rhs)
+                    return add_pred(*e.lhs) && add_pred(*e.rhs);
+                if (e.kind != ast::ExprKind::BinaryOp || !e.lhs || !e.rhs) return false;
+                switch (e.binop) {
+                    case ast::BinOp::Eq: case ast::BinOp::Ne: case ast::BinOp::Lt:
+                    case ast::BinOp::Gt: case ast::BinOp::Le: case ast::BinOp::Ge: break;
+                    default: return false;
+                }
+                const ast::Expression* col = nullptr;
+                const ast::Expression* lit = nullptr;
+                bool lit_left = false;
+                if (e.lhs->kind == ast::ExprKind::Column &&
+                    e.rhs->kind == ast::ExprKind::Literal) {
+                    col = e.lhs.get(); lit = e.rhs.get();
+                } else if (e.rhs->kind == ast::ExprKind::Column &&
+                           e.lhs->kind == ast::ExprKind::Literal) {
+                    col = e.rhs.get(); lit = e.lhs.get(); lit_left = true;
+                } else {
+                    return false;
+                }
+                // @@系统变量在 eval(Column) 里被特殊拦截,不能当普通列处理
+                if (col->column_name.size() >= 2 && col->column_name[0] == '@') return false;
+                std::string key = col->table_name.empty()
+                    ? col->column_name : (col->table_name + "." + col->column_name);
+                auto it = base_col_index.find(key);
+                if (it == base_col_index.end() || it->second < 0 ||
+                    it->second >= total_cols) return false;
+                fpreds.push_back({it->second, lit->literal, e.binop, lit_left});
+                return true;
+            };
+        if (!add_pred(*s.where)) fast_agg = false;
+    }
+    if (fast_agg) {
+        tbl->for_each_visible(sqscn, [&](int64_t, const storage::Row& row) {
+            for (auto& p : fpreds) {
+                if (p.off >= static_cast<int>(row.size())) return true;   // 缺列 → NULL → 不匹配
+                const types::Value& l = p.lit_left ? p.lit : row[p.off];
+                const types::Value& r = p.lit_left ? row[p.off] : p.lit;
+                if (l.is_null() || r.is_null()) return true;             // UNKNOWN → WHERE 不匹配
+                bool pass = false;
+                // Value::compare 对两个数值统一转 double;整数在 2^53 内转换无损,
+                // 这里直接比 int64(常见 salary>100000 热路径)可省两次 try_to_double。
+                constexpr int64_t kExactDoubleMax = int64_t{1} << 53;
+                if (l.is_int() && r.is_int() &&
+                    l.v_int >= -kExactDoubleMax && l.v_int <= kExactDoubleMax &&
+                    r.v_int >= -kExactDoubleMax && r.v_int <= kExactDoubleMax) {
+                    switch (p.op) {
+                        case ast::BinOp::Eq: pass = l.v_int == r.v_int; break;
+                        case ast::BinOp::Ne: pass = l.v_int != r.v_int; break;
+                        case ast::BinOp::Lt: pass = l.v_int <  r.v_int; break;
+                        case ast::BinOp::Gt: pass = l.v_int >  r.v_int; break;
+                        case ast::BinOp::Le: pass = l.v_int <= r.v_int; break;
+                        case ast::BinOp::Ge: pass = l.v_int >= r.v_int; break;
+                        default: break;
+                    }
+                } else {
+                    switch (p.op) {
+                        case ast::BinOp::Eq: pass = l.sql_equals(r); break;
+                        case ast::BinOp::Ne: pass = l.compare(r) != 0; break;
+                        case ast::BinOp::Lt: pass = l.compare(r) <  0; break;
+                        case ast::BinOp::Gt: pass = l.compare(r) >  0; break;
+                        case ast::BinOp::Le: pass = l.compare(r) <= 0; break;
+                        case ast::BinOp::Ge: pass = l.compare(r) >= 0; break;
+                        default: break;
+                    }
+                }
+                if (!pass) return true;
+            }
+            for (auto& a : faccs) {
+                const types::Value* v = nullptr;
+                if (a.kind != 0) {
+                    if (a.off >= static_cast<int>(row.size())) continue;
+                    v = &row[a.off];
+                    if (v->is_null()) continue;
+                }
+                switch (a.kind) {
+                    case 0: case 1:
+                        ++a.cnt;
+                        break;
+                    case 2:
+                        if (v->is_int()) {
+                            a.iacc += v->v_int;
+                            a.acc += static_cast<double>(v->v_int);
+                        } else {
+                            a.all_int = false;
+                            double d;
+                            if (v->try_to_double(d)) a.acc += d;
+                        }
+                        ++a.cnt;
+                        break;
+                    default:
+                        if (a.first) { a.best = *v; a.first = false; }
+                        else {
+                            int cv = v->compare(a.best);
+                            if ((a.kind == 3 && cv < 0) || (a.kind == 4 && cv > 0)) a.best = *v;
+                        }
+                        ++a.cnt;
+                        break;
+                }
+            }
+            return true;
+        }, rtxn);
+        storage::Row out;
+        out.reserve(faccs.size());
+        for (auto& a : faccs) {
+            if (a.kind == 0 || a.kind == 1) out.push_back(types::Value::make_int(a.cnt));
+            else if (a.kind == 2) {
+                if (a.cnt == 0) out.push_back(types::Value::make_null());
+                else if (a.avg) out.push_back(types::Value::make_double(a.acc / a.cnt));
+                else if (a.all_int) out.push_back(types::Value::make_int(a.iacc));
+                else out.push_back(types::Value::make_double(a.acc));
+            } else {
+                out.push_back(a.first ? types::Value::make_null() : a.best);
+            }
+        }
+        r.rows.push_back(std::move(out));
+        r.affected_rows = static_cast<int64_t>(r.rows.size());
+        return r;
+    }
+
     if (pk_probe_ok) {
         // 索引探测:只访问首列匹配的键(谓词仍逐行复核,保证与全扫语义一致)
         tbl->for_each_by_pk_prefix(*pk_eq_lit, sqscn, [&](int64_t, const storage::Row& row) {
@@ -1745,6 +2010,16 @@ ResultSet Executor::exec_select(const ast::SelectStmt& s) {
     if (!s.order_by.empty()) {
         std::sort(after_where.begin(), after_where.end(), [&](const storage::Row& a, const storage::Row& b) {
             for (auto& [expr, asc] : s.order_by) {
+                // MySQL 兼容:ORDER BY 1 按投影/展开列的 1-based 位置排序
+                if (expr->kind == ast::ExprKind::Literal && expr->literal.is_int()) {
+                    int idx = static_cast<int>(expr->literal.v_int) - 1;
+                    if (idx >= 0 && idx < static_cast<int>(total_cols) &&
+                        idx < static_cast<int>(a.size()) && idx < static_cast<int>(b.size())) {
+                        int c = a[idx].compare(b[idx]);
+                        if (c != 0) return asc ? c < 0 : c > 0;
+                    }
+                    continue;
+                }
                 auto ctx_a = build_ctx(a);
                 auto ctx_b = build_ctx(b);
                 auto va = eval(*expr, ctx_a);

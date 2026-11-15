@@ -716,6 +716,15 @@ ast::StmtPtr Parser::parse_select() {
             if (t3.kind == TokenKind::Number) stmt->offset = t3.int_value;
         }
     }
+    // UNION [ALL | DISTINCT] SELECT ... :AST 早有 set_op/set_right 字段,
+    // 这里补上解析(右分支递归,因此 A UNION ALL B UNION ALL C 也能解析)。
+    if (match_consume(TokenKind::KwUnion)) {
+        bool all = match_consume(TokenKind::KwAll);
+        if (!all) match_consume(TokenKind::KwDistinct);   // UNION DISTINCT 等价于 UNION
+        stmt->set_op = all ? ast::SelectSetOp::UnionAll : ast::SelectSetOp::Union;
+        stmt->set_right = parse_select();
+    }
+
     auto r = std::make_unique<ast::Statement>();
     r->kind = ast::StmtKind::Select;
     r->select_ = std::move(stmt);
