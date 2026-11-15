@@ -62,3 +62,6 @@ _navicat_debug/
 
 # employees 数据集验证现场(WAL 数据 + 加载/查询日志)
 _employees_test/
+
+# 测试代码目录(仅本地保留,不进版本控制)
+tests/
