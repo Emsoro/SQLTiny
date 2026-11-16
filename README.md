@@ -2,7 +2,7 @@
 
 > 🌐 语言: [English](./README.en.md) · **简体中文**
 
-> **当前版本 `v2.0.9`(2026-11-16)** · 版本号统一维护在 `CMakeLists.txt`(`project(SQLTiny VERSION 2.0.9)`)、`vcpkg.json`(`version-string`)与 `src/main.cpp` 启动横幅。协议层对外仍伪装为 `5.7.0-SQLTiny` 以兼容 MySQL 客户端,与产品版本无关。
+> **当前版本 `v2.1.0`(2026-11-16)** · 版本号统一维护在 `CMakeLists.txt`(`project(SQLTiny VERSION 2.1.0)`)、`vcpkg.json`(`version-string`)与 `src/main.cpp` 启动横幅。协议层对外仍伪装为 `5.7.0-SQLTiny` 以兼容 MySQL 客户端,与产品版本无关。
 >
 > v2.0.8 交付 **P1-b DML 方言 + DDL 核心**(由独立 sqllogictest 套件驱动,GAP 78→52),内容见下文「v2.0.8 更新内容」。
 
@@ -36,6 +36,25 @@
 > 🔒 **锁分层**: Catalog.mu_(DDL) → Table.mu_ shared_lock(SELECT 多读者并行) / unique_lock(DML 独占) → RowLockMap(行级冲突检测) → TransactionManager.writeLock_(提交边界) → WalManager.mu_(WAL 文件读写)
 >
 > 🧊 **MVCC**: SELECT 完全不加锁,`for_each_visible(querySCN, readerTxn)` 按 `createSCN/deleteSCN` 与 `pendingTxn` 过滤;未提交行只对所属事务可见,commit 才 `finalize_commit` 对外发布
+
+---
+
+## 🆕 v2.1.0 更新内容（benchmark TOP 查询优化，2026-11-16）
+
+按 `benchmark/employees_query_detail.csv` 的 TOP 瓶颈排名，优化前 3 项 + 一项高基数 GROUP BY，均未引入 FAIL。
+
+| 查询（优化前耗时） | 优化后 | 手段 |
+|---|---|---|
+| rank1 CTE `MAX(salary) GROUP BY emp_no`（10.3s） | **1.15s** | 单表 GROUP BY 流式聚合快路径 |
+| rank2 `COUNT(*) WHERE salary > (SELECT AVG(salary))`（8.17s） | **0.77s** | 非相关标量子查询常量折叠，恢复 fast_agg |
+| rank20 `COUNT(*) WHERE emp_no IN (SELECT ...)`（0.67s） | **0.43s** | IN 候选集 hash 索引 |
+
+- **非相关标量子查询常量折叠**：扫描前把 WHERE 里 `列 op (SELECT ...非相关单值)` 求值为字面量，让 `add_pred` 识别并恢复单表 fast_agg（原因 rhs 是 Subquery 而禁用，284 万行走通用路径）
+- **IN 候选集 hash 索引**：`SqEntry` 缓存单列结果时构建 `unordered_set`，`__in` 查找从 O(n) 线性扫描降到 O(1)，保留三值逻辑（NULL→UNKNOWN）
+- **单表 GROUP BY 流式聚合**：单表/简单分组列/简单聚合/无 HAVING-ORDER-LIMIT 时，边扫描边按 key 累加，不再物化 284 万整行到 30 万桶；支持 COUNT(*)/COUNT(col)/SUM/AVG/MIN/MAX/多分组列/常量列
+- 总体：`employees` 39 查询 SQLTiny 总耗时从 79s 降到 21.5s（基准对比见 `benchmark/history.csv` 三组演进）
+
+**验证**：SLT **1184 / PASS 1132 / GAP 52 / FAIL 0**（无回归）；compare_employees **39/39 MATCH**；GROUP BY 10 类边界（NULL/多分组列/多聚合/WHERE）全 MATCH。
 
 ---
 
@@ -527,6 +546,7 @@ SQL 语法:`SET SESSION TRANSACTION ISOLATION LEVEL <级别>`(会话默认)、`S
 | **P1-a 日期时间函数模块 (v2.0.7)** | ✅ | `DATEDIFF`/`DATE_ADD`/`DATE_SUB`/`LAST_DAY`/`DAYOFWEEK`/`WEEK`/`DATE_FORMAT`/`STR_TO_DATE`/`UNIX_TIMESTAMP`/`FROM_UNIXTIME`/`CURTIME`/无括号 `CURRENT_*`,`INTERVAL` 语法 + DATETIME 减法;SLT **PASS 1106 / GAP 78 / FAIL 0**,协议 42/42,持久化 15/15 |
 | **P1-b DML 方言 + DDL 核心 (v2.0.8)** | ✅ | INSERT 方言(VALUE/SET/IGNORE/REPLACE/ON DUPLICATE)、UPDATE/DELETE ORDER BY LIMIT、多表 UPDATE、TRUNCATE、AUTO_INCREMENT 起始值/非主键自增、CTAS/LIKE/TEMPORARY/VIEW/INDEX/ALTER/RENAME、DDL 隐式提交;SLT **PASS 1132 / GAP 52 / FAIL 0** |
 | **聚合下推增强 (v2.0.9)** | ✅ | 标量函数包裹聚合(ROUND(AVG))与 HAVING 下推;3 表 JOIN+聚合+HAVING 查询 18.7s→~5s;SLT **PASS 1132 / GAP 52 / FAIL 0** |
+| **benchmark TOP 查询优化 (v2.1.0)** | ✅ | 单表 GROUP BY 流式聚合、非相关标量子查询常量折叠、IN 候选集 hash 索引;rank1 10.3s→1.15s / rank2 8.17s→0.77s / rank20 0.67s→0.43s;SLT **PASS 1132 / GAP 52 / FAIL 0** |
 | **后续** | 📋 | 等待队列/死锁检测 → 存储过程 · caching_sha2_password / SSL · 复制 |
 
 ---
@@ -584,10 +604,10 @@ FROM users u INNER JOIN orders o ON o.user_id = u.id;
 | 产物 | 类型 | 说明 |
 |---|---|---|
 | `build/Debug/sqltiny.lib` | 静态库 | 引擎核心,嵌入式进程内调用 |
-| `build/Debug/sqltiny_server.exe` | 可执行 | MySQL 协议 TCP 服务器(v2.0.9) |
+| `build/Debug/sqltiny_server.exe` | 可执行 | MySQL 协议 TCP 服务器(v2.1.0) |
 | `build/Release/sqltiny_server.exe` | 可执行(发布版) | 同上,Release 版约 **0.9 MB** 单文件(静态 CRT + fmt 静态链接,无 dll 依赖,可直接拷贝部署);Debug 版约 4.8 MB |
 
-**`sqltiny_server.exe` 文件信息(v2.0.9)**:
+**`sqltiny_server.exe` 文件信息(v2.1.0)**:
 
 | 属性 | 值 |
 |---|---|

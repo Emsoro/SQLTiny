@@ -9,6 +9,7 @@
 #include <memory>
 #include <map>
 #include <unordered_map>
+#include <unordered_set>
 
 // M6 前向声明: Session 在 sqltiny::core 里, 我们只需要指针
 namespace sqltiny { namespace core { class Session; } }
@@ -162,6 +163,10 @@ private:
     types::Value eval_like(const types::Value& v, const types::Value& pattern) const;
     types::Value eval_function(const std::string& name, const std::vector<ast::ExprPtr>& args,
                                bool star, const ExecContext& ctx) const;
+    // P3: IN 子查询候选集 hash 加速。key 语义与 Value::compare 一致。
+    static std::string in_hash_key(const types::Value& v);
+    bool in_subquery_contains(const ast::Expression& sub, const ExecContext& ctx,
+                              const types::Value& left, bool& saw_null, bool& multi_col) const;
 
     /// 表达式层报错:写 eval_errno_/eval_sql_state_/eval_error_,由执行器转换为 ERR 包
     void raise_error(uint16_t errno_, const char* sql_state, std::string msg) const;
@@ -171,6 +176,10 @@ private:
     struct SqEntry {
         bool correlated = false;
         std::vector<storage::Row> rows;
+        // P3: IN 子查询候选集的 hash 索引(只在单列结果时构建),把逐行 O(n) 比较降到 O(1)
+        bool keys_built = false;
+        bool saw_null = false;
+        std::unordered_set<std::string> keys;
     };
     mutable std::unordered_map<const void*, SqEntry> sq_cache_;
     mutable std::vector<storage::Row> sq_scratch_;   // 相关子查询的临时结果

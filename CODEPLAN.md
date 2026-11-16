@@ -7,7 +7,7 @@
 
 ---
 
-## 0. 当前状态(2026-11-16,v2.0.9)
+## 0. 当前状态(2026-11-16,v2.1.0)
 
 > 下文 M1–M5 为原始规划、M6 各节含设计稿伪代码,均保留供追溯。**落地状态以本节与各节 ✅ 标记为准;实际目录与运行方式见 `README.md`,架构图见 `architecture.svg`。**
 
@@ -34,6 +34,7 @@
 | **P1-a 日期时间函数模块(v2.0.7)** | ✅ | `DATEDIFF`/`DATE_ADD`/`DATE_SUB`/`LAST_DAY`/`DAYOFWEEK`/`WEEK`/`DATE_FORMAT`/`STR_TO_DATE`/`UNIX_TIMESTAMP`/`FROM_UNIXTIME`/`CURTIME` + 无括号 `CURRENT_*` + INTERVAL 语法;SLT **1184 / PASS 1106 / GAP 78 / FAIL 0**,协议 42/42,持久化 15/15 |
 | **P1-b DML 方言 + DDL 核心(v2.0.8)** | ✅ | INSERT 方言(VALUE/SET/IGNORE/REPLACE/ON DUPLICATE)、UPDATE/DELETE ORDER BY LIMIT、多表 UPDATE、TRUNCATE、AUTO_INCREMENT 起始值/非主键自增、CTAS/LIKE/TEMPORARY/VIEW/INDEX/ALTER/RENAME、DDL 隐式提交;SLT **1184 / PASS 1132 / GAP 52 / FAIL 0** |
 | **聚合下推增强(v2.0.9)** | ✅ | 标量函数包裹聚合(ROUND(AVG))与 HAVING 下推;3 表 JOIN+聚合+HAVING 18.7s→~5s;SLT **1184 / PASS 1132 / GAP 52 / FAIL 0** |
+| **benchmark TOP 查询优化(v2.1.0)** | ✅ | 单表 GROUP BY 流式聚合、非相关标量子查询常量折叠、IN 候选集 hash 索引;rank1 10.3s→1.15s / rank2 8.17s→0.77s / rank20 0.67s→0.43s;SLT **1184 / PASS 1132 / GAP 52 / FAIL 0** |
 | M6 P4 | ⬜ | 复制与更大测试覆盖;认证(caching_sha2_password / SSL)仍未做 |
 
 ### 本轮交付(v1.1.0 客户端兼容性)
@@ -101,6 +102,16 @@
 - **顺带修复**:P0 引入的 1055 回归 —— `SELECT dept_name … GROUP BY d.dept_name` 的裸名/限定名现在视为同一列
 
 **验证**:SLT **1184 / PASS 1106 / GAP 78 / FAIL 0**(`03_datetime.slt` 45/45,14 条 `gap` 标记移除);协议 **42/42**;持久化 **15/15**;`compare_employees.py` **39/39 MATCH**。
+
+### 本轮交付(v2.1.0 benchmark TOP 查询优化,2026-11-16)
+
+由 `benchmark/employees_query_detail.csv` 的一级/二级对比驱动,按 `rank_by_delta` 优化 TOP 项(各查询单独拆解耗时定位根因)。
+
+- **rank2 `COUNT(*) WHERE salary > (SELECT AVG(salary))`(8.17s→0.77s)**:根因不是子查询重复执行(非相关子查询已按 AST 节点缓存),而是 WHERE 里 rhs 是 Subquery 使 `add_pred` 拒绝该谓词、`fast_agg` 失效,284 万行走通用路径。修复:扫描前 `fold` 递归把非相关标量子查询(用 `execute_sub` + `used==false` 判定)求值为 Literal,生成 `folded_where` 供 `add_pred` 使用,恢复 fast_agg
+- **rank20 `COUNT(*) WHERE emp_no IN (SELECT ...)`(0.67s→0.43s)**:根因是 `__in` 对缓存的候选集做逐行线性 compare。修复:`SqEntry` 新增 `keys_built`/`saw_null`/`unordered_set<string> keys`,`subquery_rows` 首建时按 `in_hash_key`(数值统一 double,与 `Value::compare` 语义一致)建索引;`in_subquery_contains` 用 hash 查找,保留 NULL→UNKNOWN 三值逻辑,相关子查询仍线性兜底
+- **rank1 CTE `MAX(salary) GROUP BY emp_no`(10.3s→1.15s)**:根因是单表高基数 GROUP BY 无流式路径,284 万整行物化进 30 万桶再逐桶 eval_agg。修复:`stream_group` 快路径(单表/简单分组列/简单聚合/无 HAVING-ORDER-LIMIT-WINDOW),`for_each_visible` 边扫描边按 group key 累加 `SAcc`(COUNT*/COUNT(col)/SUM/AVG/MIN/MAX/分组列/常量),不物化中间行;WHERE 用折叠后的 `fast_where` 拆简单谓词
+
+**验证**:SLT **1184 / PASS 1132 / GAP 52 / FAIL 0**(无回归);compare_employees **39/39 MATCH**;GROUP BY 10 类边界(NULL/多分组列/多聚合/COUNT(col)/常量列/WHERE)全 MATCH;IN 含 NULL 三值逻辑 MATCH。
 
 ### 本轮交付(v2.0.9 聚合下推增强,2026-11-16)
 
@@ -366,13 +377,13 @@ employees 标准数据集(392 万行)实测:3 表 JOIN 求均薪 77s vs MySQL 6.
 | `test_sqlalchemy.py` | 33 PASS / 0 FAIL / 0 GAP(原 #5–#8 与 DESCRIBE/SHOW FULL TABLES 反射限制均已修复) |
 | **实测客户端** | DBX/dbExpress(Delphi)连接 + 打开表 + 浏览索引/列正常;类 Navicat 图形工具浏览表/索引/列正常;PyMySQL / mysql CLI 正常 |
 
-### 版本标识(v2.0.9)
+### 版本标识(v2.1.0)
 
 | 位置 | 内容 |
 |---|---|
-| `CMakeLists.txt` | `project(SQLTiny VERSION 2.0.9 LANGUAGES CXX)` |
-| `vcpkg.json` | `"version-string": "2.0.9"` |
-| `src/main.cpp` | 启动横幅 `SQLTiny v2.0.9 — MySQL wire protocol server` |
+| `CMakeLists.txt` | `project(SQLTiny VERSION 2.1.0 LANGUAGES CXX)` |
+| `vcpkg.json` | `"version-string": "2.1.0"` |
+| `src/main.cpp` | 启动横幅 `SQLTiny v2.1.0 — MySQL wire protocol server` |
 | `src/version.rc.in` | exe Windows 版本资源(经 configure_file 注入 CMake 版本),右键属性页显示产品名 / 版本 / 版权 |
 | `README.md` / `CODEPLAN.md` | 本版本变更清单与验证基线 |
 | 协议层 `@@version` / `VERSION()` | 仍为 `5.7.0-SQLTiny` —— MySQL 客户端兼容用伪装版本,**不是**产品版本,不随产品版本改动 |

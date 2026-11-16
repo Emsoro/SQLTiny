@@ -1,6 +1,6 @@
 # SQLTiny — Lightweight Embedded Database · MySQL Protocol Compatible
 
-> **Current version `v2.0.9` (2026-11-16)** · The version number is maintained in `CMakeLists.txt` (`project(SQLTiny VERSION 2.0.9)`), `vcpkg.json` (`version-string`) and the startup banner in `src/main.cpp`. The wire protocol still reports `5.7.0-SQLTiny` for MySQL client compatibility — that string is unrelated to the product version.
+> **Current version `v2.1.0` (2026-11-16)** · The version number is maintained in `CMakeLists.txt` (`project(SQLTiny VERSION 2.1.0)`), `vcpkg.json` (`version-string`) and the startup banner in `src/main.cpp`. The wire protocol still reports `5.7.0-SQLTiny` for MySQL client compatibility — that string is unrelated to the product version.
 
 **SQLTiny** is a lightweight relational database written from scratch in modern C++20, with its core design inspired by [HSQLDB](http://hsqldb.org/). It additionally exposes the **MySQL Wire Protocol**, so standard MySQL clients (`mysql` CLI, Navicat, DBeaver, Connector/J, PyMySQL, DBX/dbExpress) can connect directly.
 
@@ -34,6 +34,17 @@
 > 🔒 **Lock hierarchy**: Catalog.mu_ (DDL) → Table.mu_ shared_lock (concurrent SELECT readers) / unique_lock (exclusive DML) → RowLockMap (row-level conflict detection) → TransactionManager.writeLock_ (commit boundary) → WalManager.mu_ (WAL file I/O)
 >
 > 🧊 **MVCC**: SELECT takes no locks at all; `for_each_visible(querySCN, readerTxn)` filters by `createSCN/deleteSCN` and `pendingTxn`. Uncommitted rows are visible only to their owning transaction; `finalize_commit` publishes them at commit.
+
+---
+
+## 🆕 What's new in v2.1.0 (benchmark top-query optimizations, 2026-11-16)
+
+Optimized the top bottlenecks from `benchmark/employees_query_detail.csv`, no FAIL introduced.
+
+- rank1 CTE `MAX(salary) GROUP BY emp_no`: 10.3s → **1.15s** (single-table GROUP BY streaming aggregation)
+- rank2 `COUNT(*) WHERE salary > (SELECT AVG(salary))`: 8.17s → **0.77s** (non-correlated scalar subquery constant folding restores fast_agg)
+- rank20 `COUNT(*) WHERE emp_no IN (SELECT ...)`: 0.67s → **0.43s** (IN candidate set hash index)
+- **Validation**: SLT **1184 / PASS 1132 / GAP 52 / FAIL 0** (no regression); compare_employees **39/39 MATCH**; 10 GROUP BY boundary cases all MATCH
 
 ---
 
@@ -446,6 +457,7 @@ SQL syntax: `SET SESSION TRANSACTION ISOLATION LEVEL <level>` (session default),
 | **P1-a date/time module (v2.0.7)** | ✅ | `DATEDIFF`, `DATE_ADD`/`DATE_SUB` with INTERVAL, `LAST_DAY`, `DAYOFWEEK`, `WEEK`, `DATE_FORMAT`, `STR_TO_DATE`, `UNIX_TIMESTAMP`, `FROM_UNIXTIME`, `CURTIME`, parenthesis-free `CURRENT_*`; SLT **PASS 1106 / GAP 78 / FAIL 0** |
 | **P1-b DML dialect + DDL core (v2.0.8)** | ✅ | INSERT dialect, UPDATE/DELETE ORDER BY LIMIT, multi-table UPDATE, TRUNCATE, AUTO_INCREMENT, CTAS/LIKE/TEMPORARY/VIEW/INDEX/ALTER/RENAME, DDL implicit commit; SLT **PASS 1132 / GAP 52 / FAIL 0** |
 | **Aggregate pushdown enhancement (v2.0.9)** | ✅ | Scalar-wrapped aggregates (ROUND(AVG)) + HAVING pushdown; 3-table JOIN+agg+HAVING 18.7s→~5s; SLT **PASS 1132 / GAP 52 / FAIL 0** |
+| **benchmark top-query optimizations (v2.1.0)** | ✅ | Single-table GROUP BY streaming aggregation, non-correlated scalar subquery constant folding, IN candidate hash index; rank1 10.3s→1.15s / rank2 8.17s→0.77s / rank20 0.67s→0.43s; SLT **PASS 1132 / GAP 52 / FAIL 0** |
 | **Upcoming** | 📋 | Wait queue / deadlock detection → stored procedures · caching_sha2_password / SSL · replication |
 
 ---
@@ -501,10 +513,10 @@ FROM users u INNER JOIN orders o ON o.user_id = u.id;
 | Artifact | Type | Description |
 |---|---|---|
 | `build/Debug/sqltiny.lib` | static library | Engine core, for in-process embedding |
-| `build/Debug/sqltiny_server.exe` | executable | MySQL protocol TCP server (v2.0.9) |
+| `build/Debug/sqltiny_server.exe` | executable | MySQL protocol TCP server (v2.1.0) |
 | `build/Release/sqltiny_server.exe` | executable (release) | Same, Release build is about **0.9 MB** in a single file (static CRT + static fmt, no DLL dependencies, copy-and-run); Debug build is about 4.8 MB |
 
-**`sqltiny_server.exe` file info (v2.0.9)**:
+**`sqltiny_server.exe` file info (v2.1.0)**:
 
 | Property | Value |
 |---|---|

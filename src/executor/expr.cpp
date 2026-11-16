@@ -438,21 +438,16 @@ types::Value Executor::eval_function(
         auto left = eval(*args[0], ctx);
         // SQL 三值逻辑:NULL IN (...) 恒为 UNKNOWN
         if (left.is_null()) return types::Value::make_null();
-        // 右值是 SELECT 子查询:非相关只物化一次(缓存),相关则逐行重算
+        // 右值是 SELECT 子查询:非相关只物化一次(缓存)+hash 索引,相关则逐行重算
         if (args[1] && args[1]->kind == ast::ExprKind::Subquery && args[1]->subquery_stmt) {
             if (!ctx.exec) return types::Value::make_bool(false);
-            const auto* rows = ctx.exec->subquery_rows(*args[1], ctx);
-            if (!rows) return types::Value::make_bool(false);
-            bool saw_null = false;
-            for (auto& row : *rows) {
-                if (row.empty()) continue;
-                if (row.size() > 1) {
-                    raise_error(1241, "21000", "Operand should contain 1 column(s)");
-                    return types::Value::make_null();
-                }
-                if (row[0].is_null()) { saw_null = true; continue; }
-                if (left.compare(row[0]) == 0) return types::Value::make_bool(true);
+            bool saw_null = false, multi_col = false;
+            bool found = ctx.exec->in_subquery_contains(*args[1], ctx, left, saw_null, multi_col);
+            if (multi_col) {
+                raise_error(1241, "21000", "Operand should contain 1 column(s)");
+                return types::Value::make_null();
             }
+            if (found) return types::Value::make_bool(true);
             // 未命中但候选集含 NULL → UNKNOWN
             return saw_null ? types::Value::make_null() : types::Value::make_bool(false);
         }
