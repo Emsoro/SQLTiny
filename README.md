@@ -430,7 +430,7 @@ Navicat 建连实测通过(连接测试 + 打开连接 + 元数据加载);PyMySQ
 - **`EXPLAIN` 最小版**:`EXPLAIN SELECT …` 只生成执行计划、不扫描数据,输出 MySQL 风格 8 列(`id / select_type / table / type / possible_keys / key / rows / Extra`);右表 join 列是单列主键时 `type=eq_ref`、`key=PRIMARY`,非等值 `ON` 显示 `Using nested loop (cost …)`
 - **成本估算**:按表 `row_count()` 估算 `nested loop = left×right` / `hash = left+right`,多表 JOIN 逐轮传递基数,写入 `EXPLAIN` 的 `rows` 与 `Extra`
 
-完整实现与回归说明见 `CODEPLAIN.md` §M6 P2。测评结果保存在 `benchmark/`：`employees_latest.json`（`tests/benchmark/compare_employees.py` 生成的 MySQL vs SQLTiny 39 条准确性/耗时明细）与 `perf_sqlite_latest.json`（`tests/benchmark/test_perf_vs_sqlite.py` 生成的 SQLite 性能对比），两类产物按前缀区分、互不覆盖。
+完整实现与回归说明见 `CODEPLAIN.md` §M6 P2。测评结果保存在 `benchmark/`：`employees_latest.json`（`tests/benchmark/compare_employees.py` 生成的 MySQL vs SQLTiny 39 条准确性/耗时明细）与 `perf_sqlite_latest.json`（`tests/benchmark/test_perf_vs_sqlite.py` 生成的 SQLite 性能对比），两类产物按前缀区分、互不覆盖。`employees_latest.json` 的 `comparison` 节点提供**一级（类别）**与**二级（单条查询）**对比详情——含耗时倍数、绝对差距、贡献占比、SQL 模式标签与优化优先级，并附 TOP 10 瓶颈清单（`employees_query_detail.csv` 为表格版），供下一轮性能优化定位。
 
 ### 回归
 

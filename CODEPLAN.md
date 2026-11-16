@@ -344,7 +344,7 @@ employees 标准数据集(392 万行)实测:3 表 JOIN 求均薪 77s vs MySQL 6.
 | `test_full_flow.py` / `test_vs_sqlite.py` | 48 PASS / 0 FAIL / 0 GAP / 全场景一致 |
 | `test_wal_recovery.py` / `test_concurrency.py` | 重启恢复全通过 / 5 线程 15s 无 crash |
 | `tests/benchmark/test_perf_vs_sqlite.py` | Release 版 server 单进程 / 多进程(`multiprocessing.Pool`)两种模式对比 SQLite,结果保存 `benchmark/perf_sqlite_*`(带时间戳 JSON + CSV、`perf_sqlite_history.csv` 追加、`perf_sqlite_latest.json`) |
-| `tests/benchmark/compare_employees.py` | employees 数据集 MySQL(3306) vs SQLTiny(3307) 39 条查询准确性+耗时测评,结果保存 `benchmark/employees_*`(`employees_latest.json` / `employees_history.csv`),当前 **39/39 MATCH** |
+| `tests/benchmark/compare_employees.py` | employees 数据集 MySQL(3306) vs SQLTiny(3307) 39 条查询准确性+耗时测评,结果保存 `benchmark/employees_*`(`employees_latest.json` 含一级类别/二级查询对比详情 + TOP10 瓶颈、`employees_query_detail.csv` 表格版、`employees_history.csv` 一级历史),当前 **39/39 MATCH** |
 | `tests/data/load_employees.py` | 从 test_db-master dump 灌入 employees 6 表约 392 万行到 SQLTiny |
 | `stress_stability.py` | 稳定性压测:复杂查询计时 / 并发 soak(ops·错误率·p50/p95/p99) / 事务冲突不变量 / `kill -9` 崩溃恢复(WAL replay 原子性) / RSS 内存稳定;`--self-server` 自动拉起实例 |
 | `load_employees.py` / `compare_employees.py` | employees 标准数据集(392 万行 / 6 表)灌入 + 与真实 MySQL 同库 14 条查询对比 —— 14/14 MATCH;WAL 548MB 重放完整恢复 |
