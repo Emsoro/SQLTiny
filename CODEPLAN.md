@@ -45,12 +45,12 @@
 - **SHOW 扩展**:`ENGINES` / `PLUGINS` / `CHARSET` / `CHARACTER SET` / `COLLATION` / `TABLE STATUS [LIKE]` / `INDEX|KEYS FROM [db.]t` / `[FULL] COLUMNS FROM [db.]t` / `PROCESSLIST` / `WARNINGS` / `TRIGGERS [WHERE]`;`` `db`.`tbl` `` 反引号限定名解析。
 - **表达式与词法**:`CASE [base] WHEN .. THEN .. [ELSE ..] END`(简单/搜索,解析 + 求值 + 类型推断);`AUTO_INCREMENT` 等关键字放开可用作列名。
 - **协议命令**:`COM_FIELD_LIST`(db 限定 + `\0` 截断)、`COM_STATISTICS`、`COM_PROCESS_INFO`、`COM_CHANGE_USER`;SSL 请求返回明确 ERR;`@@max_allowed_packet` / `@@net_write_timeout` / `@@net_read_timeout` / `@@sql_mode` / `@@lower_case_table_names` / `@@sql_auto_is_null`。
-- **调试设施**:`--query-log FILE`(逐条记录命令 0x?? + SQL + 执行结果);`tests/dbx_probe.cpp`(58 断言,进程内用 `Session::execute` 逐条跑 DBX 连接/元数据/事务阶段的典型 SQL)、`tests/test_stmt_prepare.py`(7 断言,裸 socket 走 `COM_STMT_*` 全流程)。
+- **调试设施**:`--query-log FILE`(逐条记录命令 0x?? + SQL + 执行结果);`tests/dbx_probe.cpp`(58 断言,进程内用 `Session::execute` 逐条跑 DBX 连接/元数据/事务阶段的典型 SQL)、`tests/functional/test_stmt_prepare.py`(7 断言,裸 socket 走 `COM_STMT_*` 全流程)。
 - **回归适配**:`tests/smoke_m25_e2e.cpp` 改为兼容经典 EOF 帧(列定义后的 `0xfe` 包,包长 < 9),否则老用例会把 EOF 误判为结果集结束;`ctest` 在启动 server 后恢复 10/10。
 
 ### 本轮交付(v2.0.5 复杂查询正确性修复 + 语法补全 + 子查询物化)
 
-**问题来源**:`tests/compare_employees.py` 由 14 条扩展至 **39 条**(基础 14 / 嵌套子查询 10 / WITH·CTE 4 / 常见复杂查询 11),与 MySQL 3306 同库双端执行、规范化比对。首轮结果:**25 MATCH / 3 MISMATCH / 11 ST-ERR**;分类耗时 MySQL 25.27s vs SQLTiny 265.07s(嵌套类 2.70s vs 202.48s,差距集中在子查询逐行重执行)。
+**问题来源**:`tests/benchmark/compare_employees.py` 由 14 条扩展至 **39 条**(基础 14 / 嵌套子查询 10 / WITH·CTE 4 / 常见复杂查询 11),与 MySQL 3306 同库双端执行、规范化比对。首轮结果:**25 MATCH / 3 MISMATCH / 11 ST-ERR**;分类耗时 MySQL 25.27s vs SQLTiny 265.07s(嵌套类 2.70s vs 202.48s,差距集中在子查询逐行重执行)。
 
 **最终结果(v2.0.5)**:`39/39 MATCH、0 MISMATCH、0 ST-ERR`;分类耗时 `基础 14.00s vs 5.45s / 嵌套 3.26s vs 5.84s / WITH 1.42s vs 4.13s / 复杂 9.82s vs 12.73s`(MySQL vs SQLTiny)。修完的 3 条超时项:高基数 GROUP BY(salaries 30 万组)100s→**3.80s**、相关 `IN` 子查询 100s→**0.096s**、递归 CTE 100s→**0.001s**。
 
@@ -307,21 +307,21 @@ employees 标准数据集(392 万行)实测:3 表 JOIN 求均薪 77s vs MySQL 6.
 - **执行器索引探测路径**(`executor.cpp`):`extract_equi` 识别 join 列 = 右表复合 PK 首列(`right_pk_first`);规划循环 `idx_probe = equi.valid && right_pk_first && left_rows <= right_rows`;执行时逐左行 `for_each_by_pk_prefix` 探测——纯等值直接拼 flat row,复合 ON 再 `eval` 兜底;`right_col` 越界与 NULL key 保护。右表零物化。EXPLAIN Extra 显示 `Using index probe; cost … vs hash join …`(兼容保留 "hash join" 字样供既有断言)。
 - **WHERE 谓词下推**:`split_and` 拆 AND 连接词,`primary_only` 递归判定(限定名精确命中 base_col_index、裸名查 `ambiguous_cols`,歧义/未知名/Subquery/Case/Star 保守不下推),主表扫描阶段逐行预过滤。
 - **SUM(DECIMAL) 列类型一致性修复**:`infer_type` 此前对 SUM(DECIMAL) 声明 LONGLONG,但聚合值经 double 路径返回 `'300.5'` → PyMySQL 按 LONGLONG 调 `int()` 抛 ValueError → 行读取中断、socket 残留包 → 下一条命令 `Packet sequence number wrong - got 6 expected 1`。现 DECIMAL/浮点输入声明 DOUBLE,与实际返回值一致;嵌套聚合(COALESCE(SUM(x),0))路径同语义。`tests/smoke_m3.cpp` 聚合断言改为类型无关 `num_eq`(解耦 SUM int/double 内部表示)。
-- **排查工具**:`tests/_repro_pkt.py`(裸 socket 逐包 dump,验证 server 帧连续性/seq 重置/无残留)、`tests/_trace_seq.py`(PyMySQL `_read_packet`/`_execute_command` 插桩,文件日志)、`tests/_bench_join.py`(employees JOIN 基准 + EXPLAIN)。
+- **排查工具**:`tests/debug/_repro_pkt.py`(裸 socket 逐包 dump,验证 server 帧连续性/seq 重置/无残留)、`tests/debug/_trace_seq.py`(PyMySQL `_read_packet`/`_execute_command` 插桩,文件日志)、`tests/debug/_bench_join.py`(employees JOIN 基准 + EXPLAIN)。
 
 ### 本轮交付(v1.2.2 稳定性与兼容性修复)
 
 以 employees 标准数据集(test_db-master,392 万行 / 6 表)与真实 MySQL 同库对比验证驱动,逐条修复:
 
-- **握手残留字节(Navicat 2013)**:`parse_handshake_response` 未消费 `CLIENT_CONNECT_ATTRS` 连接属性段——带完整能力位的 GUI 客户端握手后,残留属性字节被当成下一条命令读包,连接错位报 `2013 Lost connection during query`。现按 lenenc 长度跳过属性段;`mysql_proto.h` 新增 `CLIENT_CONNECT_ATTRS` 常量;`tests/_verify_fixes.py` 用裸 socket 模拟 Navicat 握手(caps=0x00ffa684 + 属性串)回归,握手 OK 且后续 COM_QUERY 正常。
+- **握手残留字节(Navicat 2013)**:`parse_handshake_response` 未消费 `CLIENT_CONNECT_ATTRS` 连接属性段——带完整能力位的 GUI 客户端握手后,残留属性字节被当成下一条命令读包,连接错位报 `2013 Lost connection during query`。现按 lenenc 长度跳过属性段;`mysql_proto.h` 新增 `CLIENT_CONNECT_ATTRS` 常量;`tests/debug/_verify_fixes.py` 用裸 socket 模拟 Navicat 握手(caps=0x00ffa684 + 属性串)回归,握手 OK 且后续 COM_QUERY 正常。
 - **DATE 聚合**:MIN/MAX 经 `try_to_double` 把 `'2019-12-31'` 截成 2019 只返回年份。现改用 `Value::compare` 原生比较并保留原值类型;`infer_type` 对 MIN/MAX 返回参数原类型(DATE/DATETIME/字符串)。`MIN/MAX(hire_date)` 返回完整日期。
 - **整型 SUM 以字符串回包**:聚合值统一走 double,列类型推断与值类型错位。现整型列用 int64 累加返回 `make_int`,SUM(int) 类型推断为 BigInt;分组桶 / 嵌套聚合(COALESCE(SUM(x),0)) / HAVING 内联三条路径同步修正;COALESCE/IFNULL 取第一个非 NULL 参数的类型。
 - **Windows 版本资源**:新增 `src/version.rc.in`(经 `configure_file(@ONLY)` 注入 CMake 项目版本)挂接到 `sqltiny_server` 目标,exe 属性页显示产品名 / 版本 / 版权;版本号只维护 CMakeLists 一处。
 
 ### employees 数据集对比验证
 
-- `tests/load_employees.py`:把 `test_db-master` 的 employees 数据集灌入 SQLTiny(默认 3307,WAL 模式),多行批插(~3.5 万行/s,392 万行约 50s);避开外键、ENUM→CHAR(1),保留复合主键与 DATE。
-- `tests/compare_employees.py`:同一组 14 条查询(过滤 / GROUP BY / 2 表&3 表 JOIN / SUM·AVG·COUNT / 定点)在 MySQL 与 SQLTiny 双端执行并规范化比对,修复后 **14/14 MATCH**。
+- `tests/data/load_employees.py`:把 `test_db-master` 的 employees 数据集灌入 SQLTiny(默认 3307,WAL 模式),多行批插(~3.5 万行/s,392 万行约 50s);避开外键、ENUM→CHAR(1),保留复合主键与 DATE。
+- `tests/benchmark/compare_employees.py`:同一组 14 条查询(过滤 / GROUP BY / 2 表&3 表 JOIN / SUM·AVG·COUNT / 定点)在 MySQL 与 SQLTiny 双端执行并规范化比对,修复后 **14/14 MATCH**。
 - 行数精确一致:employees 300024 / departments 9 / dept_manager 24 / dept_emp 331603 / titles 443308 / salaries 2844047;548MB WAL 重放 783 万条记录完整恢复 392 万行。
 - **已知差距(待办)**:PK 前缀索引探测(v1.2.5)、B+ 树主键索引(v2.0.0)、3 表 JOIN 执行优化 + 聚合下推(v2.0.1)、下推覆盖面扩展(v2.0.2)、主键点查索引探测(v2.0.3)、融合聚合 + UNION ALL(v2.0.4)、复杂查询正确性 + 语法补全(v2.0.5)、MySQL 语义兼容(v2.0.6)、P1-a 日期时间模块(v2.0.7)均已落地,Release 基线下 3 表 JOIN 2.05s vs MySQL 1.60s(约 **1.28x**),高薪员工数 / 2 表哈希计行约 2.5x;仍走物化路径的场景:带 HAVING / 嵌套聚合 / LEFT JOIN / DISTINCT、聚合参数跨表引用、WHERE 跨表连接词;融合聚合快路径未覆盖 WHERE 含 OR / 函数 / 子查询、GROUP BY 分支,UNION 去重按 `to_string` 键(未做表达式级等价);AVG 仍以 Decimal 字符串回包;结果集 >16MB 未分包;**v2.0.5 遗留待优化**:P3(HAVING 使 3 表 JOIN 聚合下推失效,19.77s vs 4.10s)、P4(`DISTINCT` 全量物化去重,2.79s vs 0.29s)、UNION 多分支 COUNT 仍未达 MySQL 水平(0.71s vs 0.09s);超长事务专项压测未做。
 
@@ -343,7 +343,9 @@ employees 标准数据集(392 万行)实测:3 表 JOIN 求均薪 77s vs MySQL 6.
 | `test_txn_vs_sqlite.py` | 70/70 与 SQLite 一致 + 2 项预期差异(RC 事务内语义、RU 提升 vs SQLite 脏读) |
 | `test_full_flow.py` / `test_vs_sqlite.py` | 48 PASS / 0 FAIL / 0 GAP / 全场景一致 |
 | `test_wal_recovery.py` / `test_concurrency.py` | 重启恢复全通过 / 5 线程 15s 无 crash |
-| `test_perf_vs_sqlite.py` | Release 版 server 单进程 / 多进程(`multiprocessing.Pool`)两种模式对比 SQLite,结果保存 `benchmark/`(带时间戳 JSON + CSV、`history.csv` 追加、`latest.json`) |
+| `tests/benchmark/test_perf_vs_sqlite.py` | Release 版 server 单进程 / 多进程(`multiprocessing.Pool`)两种模式对比 SQLite,结果保存 `benchmark/perf_sqlite_*`(带时间戳 JSON + CSV、`perf_sqlite_history.csv` 追加、`perf_sqlite_latest.json`) |
+| `tests/benchmark/compare_employees.py` | employees 数据集 MySQL(3306) vs SQLTiny(3307) 39 条查询准确性+耗时测评,结果保存 `benchmark/employees_*`(`employees_latest.json` / `employees_history.csv`),当前 **39/39 MATCH** |
+| `tests/data/load_employees.py` | 从 test_db-master dump 灌入 employees 6 表约 392 万行到 SQLTiny |
 | `stress_stability.py` | 稳定性压测:复杂查询计时 / 并发 soak(ops·错误率·p50/p95/p99) / 事务冲突不变量 / `kill -9` 崩溃恢复(WAL replay 原子性) / RSS 内存稳定;`--self-server` 自动拉起实例 |
 | `load_employees.py` / `compare_employees.py` | employees 标准数据集(392 万行 / 6 表)灌入 + 与真实 MySQL 同库 14 条查询对比 —— 14/14 MATCH;WAL 548MB 重放完整恢复 |
 | `_verify_fixes.py` | 裸 socket 模拟 Navicat 握手(CONNECT_ATTRS)+ DATE 聚合 / SUM / COALESCE 类型断言(回归防护) |
@@ -934,7 +936,7 @@ SQLTiny 第一版可以简化:
 | ✅ | **P1-09** DESCRIBE / SHOW FULL TABLES | 9e752ba 已补齐 server 端反射(§8.4 #5–#8 一并修复),`test_sqlalchemy.py` 33 PASS / 0 FAIL / 0 GAP | `test_sqlalchemy.py` |
 | ✅ | **P1-10** 重启不复活未提交数据 | 回滚/提交后重启,SQLTiny 与 SQLite 状态一致;WAL 事务缓冲 + 快照只写已提交可见行 | `test_txn_vs_sqlite.py` WAL 段、`smoke_m5_wal` |
 
-> 新增 `tests/smoke_m6_isolation.cpp`(451 项进程内断言)与 `tests/test_txn_vs_sqlite.py`(70 项 SQLTiny/SQLite 对比 + WAL 重启),覆盖上表绝大多数 ✅ 项;前者已注册 `CTest`。v1.1.0 另新增 `tests/dbx_probe.cpp`(58 断言)、`tests/test_stmt_prepare.py`(7 断言),见 §0 验证基线与 §8.2 C10。
+> 新增 `tests/smoke_m6_isolation.cpp`(451 项进程内断言)与 `tests/benchmark/test_txn_vs_sqlite.py`(70 项 SQLTiny/SQLite 对比 + WAL 重启),覆盖上表绝大多数 ✅ 项;前者已注册 `CTest`。v1.1.0 另新增 `tests/dbx_probe.cpp`(58 断言)、`tests/functional/test_stmt_prepare.py`(7 断言),见 §0 验证基线与 §8.2 C10。
 
 ---
 

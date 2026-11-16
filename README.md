@@ -148,7 +148,7 @@
 
 ## 🆕 v2.0.5 更新内容
 
-`tests/compare_employees.py` 从 14 条扩到 **39 条**(基础 14 / 嵌套子查询 10 / WITH·CTE 4 / 复杂查询 11),以 MySQL 3306 同库双端对照,暴露出 3 类问题并全部修复。
+`tests/benchmark/compare_employees.py` 从 14 条扩到 **39 条**(基础 14 / 嵌套子查询 10 / WITH·CTE 4 / 复杂查询 11),以 MySQL 3306 同库双端对照,暴露出 3 类问题并全部修复。
 
 ### 1. 静默正确性缺陷(不报错、结果错)
 
@@ -336,7 +336,7 @@ AST 早有 `set_op` / `set_right` 字段,但 parser/executor 一直未接入。�
 | 乱序插入 200 万 | 3787.8 ms | 3704.3 ms | 持平 |
 | 树高 | 22 层 | 4 层 | 扇出 64 |
 
-### 端到端(employees 数据集,Release 构建,`tests/_bench_join.py`)
+### 端到端(employees 数据集,Release 构建,`tests/debug/_bench_join.py`)
 
 | 查询 | AVL | B+ 树 | 变化 |
 |---|---|---|---|
@@ -384,7 +384,7 @@ AST 早有 `set_op` / `set_right` 字段,但 parser/executor 一直未接入。�
 - **执行器索引探测路径**:`extract_equi` 识别「join 列 = 右表复合 PK 首列」且左行数 ≤ 右行数时,逐左行构造 PK 首列 key 前缀探测右表,纯等值直接拼 flat row、复合 ON 再 `eval` 兜底,语义与 Hash Join 完全一致
 - **WHERE 谓词下推**:`AND` 连接词拆分,只引用主表列且无歧义的 conjunct 在主表扫描阶段预过滤(限定名精确命中 / 裸名查 `ambiguous_cols`,Subquery/Case/Star 保守不下推)
 - **SUM(DECIMAL) 列类型一致性修复**:`infer_type` 此前对 `SUM(DECIMAL)` 声明 LONGLONG,但聚合值经 double 路径返回 `'300.5'`,PyMySQL 按 LONGLONG 调 `int()` 崩溃并中断行读取,造成连接包序错位(`Packet sequence number wrong`)。现声明 DOUBLE 与实际返回值一致
-- **协议排查工具**:`tests/_repro_pkt.py`(裸 socket 逐包 dump,验证 server 帧连续性)、`tests/_trace_seq.py`(PyMySQL 包序插桩)、`tests/_bench_join.py`(employees JOIN 基准)
+- **协议排查工具**:`tests/debug/_repro_pkt.py`(裸 socket 逐包 dump,验证 server 帧连续性)、`tests/debug/_trace_seq.py`(PyMySQL 包序插桩)、`tests/debug/_bench_join.py`(employees JOIN 基准)
 
 ### 回归
 
@@ -430,7 +430,7 @@ Navicat 建连实测通过(连接测试 + 打开连接 + 元数据加载);PyMySQ
 - **`EXPLAIN` 最小版**:`EXPLAIN SELECT …` 只生成执行计划、不扫描数据,输出 MySQL 风格 8 列(`id / select_type / table / type / possible_keys / key / rows / Extra`);右表 join 列是单列主键时 `type=eq_ref`、`key=PRIMARY`,非等值 `ON` 显示 `Using nested loop (cost …)`
 - **成本估算**:按表 `row_count()` 估算 `nested loop = left×right` / `hash = left+right`,多表 JOIN 逐轮传递基数,写入 `EXPLAIN` 的 `rows` 与 `Extra`
 
-完整实现与回归说明见 `CODEPLAIN.md` §M6 P2。基准数据由 `tests/test_perf_vs_sqlite.py` 生成并保存在 `benchmark/`(`latest.json` 含各查询平均耗时与提速倍数)。
+完整实现与回归说明见 `CODEPLAIN.md` §M6 P2。测评结果保存在 `benchmark/`：`employees_latest.json`（`tests/benchmark/compare_employees.py` 生成的 MySQL vs SQLTiny 39 条准确性/耗时明细）与 `perf_sqlite_latest.json`（`tests/benchmark/test_perf_vs_sqlite.py` 生成的 SQLite 性能对比），两类产物按前缀区分、互不覆盖。
 
 ### 回归
 
@@ -467,7 +467,7 @@ Navicat 建连实测通过(连接测试 + 打开连接 + 元数据加载);PyMySQ
 | **表达式** | `CASE [base] WHEN .. THEN .. [ELSE ..] END`(简单/搜索两种形式);`AUTO_INCREMENT` 等关键字可用作列名 |
 | **协议命令** | `COM_FIELD_LIST`(db 限定 + `\0` 截断) / `COM_STATISTICS` / `COM_PROCESS_INFO` / `COM_CHANGE_USER`;SSL 请求返回明确 ERR |
 | **系统变量** | `@@max_allowed_packet` / `@@net_write_timeout` / `@@net_read_timeout` / `@@sql_mode` / `@@lower_case_table_names` / `@@sql_auto_is_null` |
-| **调试工具** | 新增 `--query-log FILE` 参数(逐条记录命令 + 握手 + 执行结果);`tests/dbx_probe.cpp`(58 断言,进程内逐条跑 DBX 典型 SQL) 与 `tests/test_stmt_prepare.py`(7 断言,裸 socket 预编译协议) 回归 |
+| **调试工具** | 新增 `--query-log FILE` 参数(逐条记录命令 + 握手 + 执行结果);`tests/dbx_probe.cpp`(58 断言,进程内逐条跑 DBX 典型 SQL) 与 `tests/functional/test_stmt_prepare.py`(7 断言,裸 socket 预编译协议) 回归 |
 | **回归适配** | `tests/smoke_m25_e2e.cpp` 改为兼容经典 EOF 帧(列定义后的 `0xfe` 包),CTest 恢复 10/10 |
 
 ---
@@ -532,7 +532,8 @@ cmake --build build --config Release
 > **排障**:若 Debug 版运行时报 `Debug Assertion Failed: __acrt_first_block == header`(`debug_heap.cpp:996`),说明 `build/` 缓存的 triplet/CRT 与配置不一致(两套 CRT 堆并存,跨堆 `free`)。删除 `build/` 后用上面的 preset 重新配置并全量重建即可,不要直接 `cmake -S . -B build`。
 
 ```powershell
-python tests\test_perf_vs_sqlite.py --mode both   # Release server 单/多进程对比,结果存 benchmark/
+python tests\benchmark\compare_employees.py        # employees MySQL vs SQLTiny 测评,结果存 benchmark/employees_*
+python tests\benchmark\test_perf_vs_sqlite.py --mode both   # SQLite 性能对比,结果存 benchmark/perf_sqlite_*
 ```
 
 ### 稳定性压测
@@ -540,7 +541,7 @@ python tests\test_perf_vs_sqlite.py --mode both   # Release server 单/多进程
 专为「本地数据库服务本地程序」场景设计的压力与稳定性套件(密码不测,专攻稳定性):
 
 ```powershell
-python tests\stress_stability.py --self-server --phase all --duration 30 --workers 16
+python tests\stability\stress_stability.py --self-server --phase all --duration 30 --workers 16
 ```
 
 `--self-server` 自动拉起/管理 server(内存或临时 `--data-dir`);`--phase` 可选 `complex`(复杂查询计时)/ `soak`(并发长时)/ `crash`(崩溃恢复)/ `all`。覆盖:10 条复杂查询(多表 JOIN+聚合 / 子查询 / GROUP BY+HAVING / CASE / 自连接 / NULL 聚合)、并发读写与事务冲突(40001 后无丢写/幻行不变量)、`kill -9` 后 WAL replay 原子性、soak 期间 RSS 内存稳定。详见脚本头部与 `CODEPLAN.md` §8.2 C09。
@@ -592,14 +593,16 @@ FROM users u INNER JOIN orders o ON o.user_id = u.id;
 | `build/Debug/smoke_sql_keywords.exe` | 关键词 / 词法基础用例 | 180 个常用关键词 × 大小写不敏感、运算符、字面量、注释、行列号、词法错误、Parser 分发 — **649 PASS / 0 FAIL** |
 | `build/Debug/smoke_sql_syntax.exe` | 常用 SQL 语法端到端矩阵 | DDL/DML/SELECT 子句/谓词/函数/聚合分组排序分页/UNION/JOIN/事务/系统语句/错误码,未实现语法记 GAP — **160 PASS / 0 FAIL / 15 GAP** |
 | `build/Debug/dbx_probe.exe` | 客户端兼容性探针 | 进程内逐条跑 DBX/dbExpress 连接/元数据/事务阶段的典型 SQL — **58/58 PASS** |
-| `tests/test_txn_vs_sqlite.py` | 事务行为对比 | SQLTiny vs SQLite 四级别 + WAL 重启 — **70/70 一致** |
-| `tests/test_full_flow.py` | PyMySQL 全链路(双连接) | DDL/INSERT→SELECT*含NULL→WHERE/ORDER/聚合/HAVING→JOIN→UPDATE/DELETE→约束与错误码→事务/SAVEPOINT/autocommit→四隔离级别/40001→多库→清理 — **48 PASS / 0 GAP** |
-| `tests/test_sqlalchemy.py` | SQLAlchemy 2.x | Engine/Core/ORM/2.0 风格表达式/`text():param`/rollback/relationship/`engine.begin()`/类型映射/Inspector — **33 PASS / 0 FAIL / 0 GAP**(`DESCRIBE`/`SHOW FULL TABLES` 已支持) |
-| `tests/test_vs_sqlite.py` | 行为对比 | 同一逻辑 SQLTiny vs SQLite 全场景 assert — **全绿** |
-| `tests/test_perf_vs_sqlite.py` | 性能对比 | Release 版 server,单进程 / 多进程两种模式对比 SQLite,结果保存 `benchmark/`(JSON + CSV + `latest.json`) — **跑通无 crash** |
-| `tests/test_concurrency.py` | 并发安全 | 5 线程(2W+2R+1D)15s 并发读写 — **通过** |
-| `tests/stress_stability.py` | 稳定性压测 | 自带 server 的并发/soak/崩溃恢复/内存稳定套件(`--self-server --phase all`) — **全 PASS** |
-| `tests/test_stmt_prepare.py` | 预编译语句协议 | 裸 socket 走 COM_STMT_PREPARE/EXECUTE/CLOSE 全流程(含 NULL/转义/语法错误) — **7/7 PASS** |
+| `tests/benchmark/test_txn_vs_sqlite.py` | 事务行为对比 | SQLTiny vs SQLite 四级别 + WAL 重启 — **70/70 一致** |
+| `tests/functional/test_full_flow.py` | PyMySQL 全链路(双连接) | DDL/INSERT→SELECT*含NULL→WHERE/ORDER/聚合/HAVING→JOIN→UPDATE/DELETE→约束与错误码→事务/SAVEPOINT/autocommit→四隔离级别/40001→多库→清理 — **48 PASS / 0 GAP** |
+| `tests/functional/test_sqlalchemy.py` | SQLAlchemy 2.x | Engine/Core/ORM/2.0 风格表达式/`text():param`/rollback/relationship/`engine.begin()`/类型映射/Inspector — **33 PASS / 0 FAIL / 0 GAP**(`DESCRIBE`/`SHOW FULL TABLES` 已支持) |
+| `tests/benchmark/test_vs_sqlite.py` | 行为对比 | 同一逻辑 SQLTiny vs SQLite 全场景 assert — **全绿** |
+| `tests/benchmark/test_perf_vs_sqlite.py` | 性能对比 | Release 版 server,单进程 / 多进程两种模式对比 SQLite,结果保存 `benchmark/perf_sqlite_*`(JSON + CSV + `perf_sqlite_latest.json`) — **跑通无 crash** |
+| `tests/benchmark/compare_employees.py` | employees 测评 | MySQL 3306 vs SQLTiny 3307,39 条查询准确性+耗时,结果写 `benchmark/employees_*` — **39/39 MATCH** |
+| `tests/data/load_employees.py` | 数据准备 | 从 test_db-master dump 灌入 employees 6 表 392 万行到 SQLTiny — **完成** |
+| `tests/functional/test_concurrency.py` | 并发安全 | 5 线程(2W+2R+1D)15s 并发读写 — **通过** |
+| `tests/stability/stress_stability.py` | 稳定性压测 | 自带 server 的并发/soak/崩溃恢复/内存稳定套件(`--self-server --phase all`) — **全 PASS** |
+| `tests/functional/test_stmt_prepare.py` | 预编译语句协议 | 裸 socket 走 COM_STMT_PREPARE/EXECUTE/CLOSE 全流程(含 NULL/转义/语法错误) — **7/7 PASS** |
 
 ### 一键跑全量测试
 ```powershell
@@ -628,15 +631,15 @@ ctest --test-dir build -C Debug --output-on-failure
 
 # Python 全场景(PyMySQL client,单一 connection)
 pip install pymysql sqlalchemy
-python tests\test_full_flow.py
-python tests\test_sqlalchemy.py
-python tests\test_vs_sqlite.py
-python tests\test_perf_vs_sqlite.py
-python tests\test_concurrency.py
-python tests\test_wal_recovery.py    # server 重启恢复(需 server)
-python tests\test_txn_vs_sqlite.py   # 自动起停 server,不占用 3306
-python tests\test_stmt_prepare.py    # COM_STMT_* 预编译协议(需 server)
-python tests\stress_stability.py --self-server --phase all   # 稳定性压测(自带 server)
+python tests\functional\test_full_flow.py
+python tests\functional\test_sqlalchemy.py
+python tests\benchmark\test_vs_sqlite.py
+python tests\benchmark\test_perf_vs_sqlite.py
+python tests\functional\test_concurrency.py
+python tests\functional\test_wal_recovery.py    # server 重启恢复(需 server)
+python tests\benchmark\test_txn_vs_sqlite.py   # 自动起停 server,不占用 3306
+python tests\functional\test_stmt_prepare.py    # COM_STMT_* 预编译协议(需 server)
+python tests\stability\stress_stability.py --self-server --phase all   # 稳定性压测(自带 server)
 ```
 
 ### 测试总览 (CTest 12/12 · Python 8 scripts)

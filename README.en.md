@@ -72,7 +72,7 @@ Driven by the same sqllogictest suite: **FAIL 67 → 0**, PASS 971 → 1092, GAP
 
 ## 🆕 What's new in v2.0.5
 
-`tests/compare_employees.py` grew from 14 to **39 queries** (basic 14 / nested subqueries 10 / WITH·CTE 4 / complex 11) executed against the same dataset on MySQL 3306 and SQLTiny. Three classes of problems surfaced and were all fixed.
+`tests/benchmark/compare_employees.py` grew from 14 to **39 queries** (basic 14 / nested subqueries 10 / WITH·CTE 4 / complex 11) executed against the same dataset on MySQL 3306 and SQLTiny. Three classes of problems surfaced and were all fixed.
 
 ### 1. Silent correctness bugs (wrong results, no error)
 
@@ -260,7 +260,7 @@ This release is a **storage-engine index upgrade**: the primary key index moved 
 | Random-order insert of 2M | 3787.8 ms | 3704.3 ms | on par |
 | Tree height | 22 levels | 4 levels | fanout 64 |
 
-### End to end (employees dataset, Release build, `tests/_bench_join.py`)
+### End to end (employees dataset, Release build, `tests/debug/_bench_join.py`)
 
 | Query | AVL | B+ tree | Change |
 |---|---|---|---|
@@ -308,7 +308,7 @@ This release focuses on **primary-key index usage in large-table JOINs** (CODEPL
 - **Executor index-probe path**: `extract_equi` recognizes "join column = leading column of the right table's composite PK"; when the left row count is ≤ the right row count, each left row probes the right table with a PK prefix key. Pure equality assembles the flat row directly, composite `ON` falls back to full `eval` — semantics identical to Hash Join
 - **WHERE predicate pushdown**: `AND` conjuncts are split; conjuncts that reference only base-table columns and are unambiguous pre-filter during the base scan (qualified names match exactly, bare names checked against `ambiguous_cols`, Subquery/Case/Star conservatively not pushed)
 - **SUM(DECIMAL) column type consistency fix**: `infer_type` declared `SUM(DECIMAL)` as LONGLONG while the aggregate returned `'300.5'` through the double path; PyMySQL called `int()` and crashed mid-row, desynchronizing the packet stream (`Packet sequence number wrong`). It is now declared DOUBLE, matching the returned value
-- **Protocol debugging tools**: `tests/_repro_pkt.py` (raw-socket packet dump to verify frame continuity), `tests/_trace_seq.py` (PyMySQL packet-sequence instrumentation), `tests/_bench_join.py` (employees JOIN benchmark)
+- **Protocol debugging tools**: `tests/debug/_repro_pkt.py` (raw-socket packet dump to verify frame continuity), `tests/debug/_trace_seq.py` (PyMySQL packet-sequence instrumentation), `tests/debug/_bench_join.py` (employees JOIN benchmark)
 
 ### Regression
 
@@ -354,7 +354,7 @@ This release focuses on **JOIN performance** (CODEPLAN §M6 P2): pure nested loo
 - **Minimal `EXPLAIN`**: `EXPLAIN SELECT …` builds the plan without scanning data and emits the MySQL-style 8 columns (`id / select_type / table / type / possible_keys / key / rows / Extra`); when the right join column is a single-column primary key it shows `type=eq_ref`, `key=PRIMARY`; non-equality `ON` shows `Using nested loop (cost …)`
 - **Cost estimation**: `nested loop = left×right` / `hash = left+right` from each table's `row_count()`, cardinalities propagated across join rounds and written into `EXPLAIN`'s `rows` and `Extra`
 
-Full implementation and regression notes are in `CODEPLAN.md` §M6 P2. Benchmark data is produced by `tests/test_perf_vs_sqlite.py` and stored in `benchmark/` (`latest.json` holds average times and speedups).
+Full implementation and regression notes are in `CODEPLAN.md` §M6 P2. Benchmark results live in `benchmark/`: `employees_latest.json` (MySQL vs SQLTiny accuracy/timing for 39 queries, from `tests/benchmark/compare_employees.py`) and `perf_sqlite_latest.json` (SQLite performance, from `tests/benchmark/test_perf_vs_sqlite.py`). The two product families use distinct prefixes and never overwrite each other.
 
 ### Regression
 
@@ -391,7 +391,7 @@ This release focuses on **third-party client compatibility** (driven by the Delp
 | **Expressions** | `CASE [base] WHEN .. THEN .. [ELSE ..] END` (simple and searched forms); keywords such as `AUTO_INCREMENT` usable as column names |
 | **Protocol commands** | `COM_FIELD_LIST` (db-qualified + `\0` truncation) / `COM_STATISTICS` / `COM_PROCESS_INFO` / `COM_CHANGE_USER`; SSL requests return an explicit ERR |
 | **System variables** | `@@max_allowed_packet` / `@@net_write_timeout` / `@@net_read_timeout` / `@@sql_mode` / `@@lower_case_table_names` / `@@sql_auto_is_null` |
-| **Debug tooling** | New `--query-log FILE` flag (per-statement command + handshake + result logging); `tests/dbx_probe.cpp` (58 assertions, runs typical DBX SQL in-process) and `tests/test_stmt_prepare.py` (7 assertions, raw-socket prepared protocol) |
+| **Debug tooling** | New `--query-log FILE` flag (per-statement command + handshake + result logging); `tests/dbx_probe.cpp` (58 assertions, runs typical DBX SQL in-process) and `tests/functional/test_stmt_prepare.py` (7 assertions, raw-socket prepared protocol) |
 | **Regression adaptation** | `tests/smoke_m25_e2e.cpp` now tolerates classic EOF frames (the `0xfe` packet after column definitions); CTest back to 10/10 |
 
 ---
@@ -456,7 +456,8 @@ cmake --build build --config Release
 > **Troubleshooting**: if the Debug build reports `Debug Assertion Failed: __acrt_first_block == header` (`debug_heap.cpp:996`), the cached triplet/CRT in `build/` does not match the configuration (two CRT heaps coexist, cross-heap `free`). Delete `build/`, reconfigure with the preset above and rebuild fully — do not run `cmake -S . -B build` directly.
 
 ```powershell
-python tests\test_perf_vs_sqlite.py --mode both   # Release server, single/multi-process comparison, results in benchmark/
+python tests\benchmark\compare_employees.py        # employees MySQL vs SQLTiny benchmark, results in benchmark/employees_*
+python tests\benchmark\test_perf_vs_sqlite.py --mode both   # SQLite performance, results in benchmark/perf_sqlite_*
 ```
 
 ### Stress & stability suite
@@ -464,7 +465,7 @@ python tests\test_perf_vs_sqlite.py --mode both   # Release server, single/multi
 Designed for the "local database serving local programs" scenario (no password checks — it targets stability):
 
 ```powershell
-python tests\stress_stability.py --self-server --phase all --duration 30 --workers 16
+python tests\stability\stress_stability.py --self-server --phase all --duration 30 --workers 16
 ```
 
 `--self-server` launches and manages the server itself (in-memory or a temporary `--data-dir`); `--phase` can be `complex` (timed complex queries) / `soak` (long concurrent load) / `crash` (crash recovery) / `all`. It covers 10 complex queries (multi-table JOIN+aggregate / subquery / GROUP BY+HAVING / CASE / self-join / NULL aggregates), concurrent read-write with transaction conflicts (no lost writes after 40001, phantom-row invariants), WAL replay atomicity after `kill -9`, and RSS stability during soak. See the script header and `CODEPLAN.md` §8.2 C09.
@@ -512,14 +513,16 @@ FROM users u INNER JOIN orders o ON o.user_id = u.id;
 | `build/Debug/smoke_m6_hsqldb_matrix.exe` | HSQLDB semantics matrix + JOIN optimization regression | NULL three-valued logic / empty-set aggregates / JOIN cardinality (Hash Join, EXPLAIN) / statement atomicity / multi-database isolation — **73 PASS / 0 GAP** |
 | `build/Debug/smoke_m6_session_db.exe` | multi-database session isolation | per-connection `USE` / handshake database do not interfere — **PASS** |
 | `build/Debug/dbx_probe.exe` | client compatibility probe | runs typical DBX/dbExpress connect/metadata/transaction SQL in-process — **58/58 PASS** |
-| `tests/test_txn_vs_sqlite.py` | transaction behavior comparison | SQLTiny vs SQLite across four levels + WAL restart — **70/70 consistent** |
-| `tests/test_full_flow.py` | PyMySQL full flow (two connections) | DDL/INSERT→SELECT* with NULL→WHERE/ORDER/aggregates/HAVING→JOIN→UPDATE/DELETE→constraints and error codes→transactions/SAVEPOINT/autocommit→isolation levels/40001→multi-database→cleanup — **48 PASS / 0 GAP** |
-| `tests/test_sqlalchemy.py` | SQLAlchemy 2.x | Engine/Core/ORM/2.0-style expressions/`text():param`/rollback/relationship/`engine.begin()`/type mapping/Inspector — **33 PASS / 0 FAIL / 0 GAP** (`DESCRIBE` / `SHOW FULL TABLES` supported) |
-| `tests/test_vs_sqlite.py` | behavior comparison | the same logical SQL asserted on SQLTiny vs SQLite — **all green** |
-| `tests/test_perf_vs_sqlite.py` | performance comparison | Release server, single/multi-process vs SQLite, results in `benchmark/` (JSON + CSV + `latest.json`) — **runs clean** |
-| `tests/test_concurrency.py` | concurrency safety | 5 threads (2 writers + 2 readers + 1 deleter) for 15s — **PASS** |
-| `tests/stress_stability.py` | stress suite | self-hosted concurrency/soak/crash-recovery/memory stability (`--self-server --phase all`) — **all PASS** |
-| `tests/test_stmt_prepare.py` | prepared statement protocol | raw socket through COM_STMT_PREPARE/EXECUTE/CLOSE (NULL/escaping/syntax error) — **7/7 PASS** |
+| `tests/benchmark/test_txn_vs_sqlite.py` | transaction behavior comparison | SQLTiny vs SQLite across four levels + WAL restart — **70/70 consistent** |
+| `tests/functional/test_full_flow.py` | PyMySQL full flow (two connections) | DDL/INSERT→SELECT* with NULL→WHERE/ORDER/aggregates/HAVING→JOIN→UPDATE/DELETE→constraints and error codes→transactions/SAVEPOINT/autocommit→isolation levels/40001→multi-database→cleanup — **48 PASS / 0 GAP** |
+| `tests/functional/test_sqlalchemy.py` | SQLAlchemy 2.x | Engine/Core/ORM/2.0-style expressions/`text():param`/rollback/relationship/`engine.begin()`/type mapping/Inspector — **33 PASS / 0 FAIL / 0 GAP** (`DESCRIBE` / `SHOW FULL TABLES` supported) |
+| `tests/benchmark/test_vs_sqlite.py` | behavior comparison | the same logical SQL asserted on SQLTiny vs SQLite — **all green** |
+| `tests/benchmark/test_perf_vs_sqlite.py` | performance comparison | Release server, single/multi-process vs SQLite, results in `benchmark/perf_sqlite_*` (JSON + CSV + `perf_sqlite_latest.json`) — **runs clean** |
+| `tests/benchmark/compare_employees.py` | employees benchmark | MySQL 3306 vs SQLTiny 3307, 39 queries accuracy + timing, results in `benchmark/employees_*` — **39/39 MATCH** |
+| `tests/data/load_employees.py` | data prep | Fill employees 6 tables (3.92M rows) into SQLTiny from test_db-master dumps — **done** |
+| `tests/functional/test_concurrency.py` | concurrency safety | 5 threads (2 writers + 2 readers + 1 deleter) for 15s — **PASS** |
+| `tests/stability/stress_stability.py` | stress suite | self-hosted concurrency/soak/crash-recovery/memory stability (`--self-server --phase all`) — **all PASS** |
+| `tests/functional/test_stmt_prepare.py` | prepared statement protocol | raw socket through COM_STMT_PREPARE/EXECUTE/CLOSE (NULL/escaping/syntax error) — **7/7 PASS** |
 
 ### Run everything in one go
 ```powershell
@@ -546,15 +549,15 @@ ctest --test-dir build -C Debug --output-on-failure
 
 # Python scenarios (PyMySQL client, single connection)
 pip install pymysql sqlalchemy
-python tests\test_full_flow.py
-python tests\test_sqlalchemy.py
-python tests\test_vs_sqlite.py
-python tests\test_perf_vs_sqlite.py
-python tests\test_concurrency.py
-python tests\test_wal_recovery.py    # server restart recovery (needs a server)
-python tests\test_txn_vs_sqlite.py   # starts/stops its own server, does not use 3306
-python tests\test_stmt_prepare.py    # COM_STMT_* prepared protocol (needs a server)
-python tests\stress_stability.py --self-server --phase all   # stress suite (self-hosted)
+python tests\functional\test_full_flow.py
+python tests\functional\test_sqlalchemy.py
+python tests\benchmark\test_vs_sqlite.py
+python tests\benchmark\test_perf_vs_sqlite.py
+python tests\functional\test_concurrency.py
+python tests\functional\test_wal_recovery.py    # server restart recovery (needs a server)
+python tests\benchmark\test_txn_vs_sqlite.py   # starts/stops its own server, does not use 3306
+python tests\functional\test_stmt_prepare.py    # COM_STMT_* prepared protocol (needs a server)
+python tests\stability\stress_stability.py --self-server --phase all   # stress suite (self-hosted)
 ```
 
 ### Test overview (CTest 10/10 · 8 Python scripts)
