@@ -44,6 +44,7 @@ static const KwEntry k_keywords[] = {
     {"UNION",      TokenKind::KwUnion},
     {"OVER",       TokenKind::KwOver},
     {"PARTITION",  TokenKind::KwPartition},
+    {"INTERVAL",   TokenKind::KwInterval},
     {"INSERT",     TokenKind::KwInsert},
     {"INTO",       TokenKind::KwInto},
     {"VALUES",     TokenKind::KwValues},

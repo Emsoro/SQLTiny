@@ -2,7 +2,7 @@
 
 > 🌐 语言: [English](./README.en.md) · **简体中文**
 
-> **当前版本 `v2.0.6`(2026-11-16)** · 版本号统一维护在 `CMakeLists.txt`(`project(SQLTiny VERSION 2.0.6)`)、`vcpkg.json`(`version-string`)与 `src/main.cpp` 启动横幅。协议层对外仍伪装为 `5.7.0-SQLTiny` 以兼容 MySQL 客户端,与产品版本无关。
+> **当前版本 `v2.0.7`(2026-11-16)** · 版本号统一维护在 `CMakeLists.txt`(`project(SQLTiny VERSION 2.0.7)`)、`vcpkg.json`(`version-string`)与 `src/main.cpp` 启动横幅。协议层对外仍伪装为 `5.7.0-SQLTiny` 以兼容 MySQL 客户端,与产品版本无关。
 >
 > v2.0.6 交付 **MySQL 语义 / 协议兼容修复**(由独立 sqllogictest 套件驱动,FAIL 67→0),内容见下文「v2.0.6 更新内容」。
 
@@ -36,6 +36,31 @@
 > 🔒 **锁分层**: Catalog.mu_(DDL) → Table.mu_ shared_lock(SELECT 多读者并行) / unique_lock(DML 独占) → RowLockMap(行级冲突检测) → TransactionManager.writeLock_(提交边界) → WalManager.mu_(WAL 文件读写)
 >
 > 🧊 **MVCC**: SELECT 完全不加锁,`for_each_visible(querySCN, readerTxn)` 按 `createSCN/deleteSCN` 与 `pendingTxn` 过滤;未提交行只对所属事务可见,commit 才 `finalize_commit` 对外发布
+
+---
+
+## 🆕 v2.0.7 更新内容（P1-a 日期时间函数模块，2026-11-16）
+
+由独立 sqllogictest 套件的 P1-a 批次驱动,补齐 **14 个日期时间 GAP**,GAP 从 **92 降到 78**,仍未引入 FAIL。
+
+**新增函数**
+
+| 类别 | 函数 |
+|---|---|
+| 日期运算 | `DATEDIFF` · `DATE_ADD(d, INTERVAL n UNIT)` · `DATE_SUB` · `LAST_DAY` |
+| 提取/格式化 | `DAYOFWEEK`(1=周日) · `WEEK` · `DATE_FORMAT`(`%Y/%m/%d/%H/%i/%s`) · `STR_TO_DATE` |
+| 时间戳 | `UNIX_TIMESTAMP` · `FROM_UNIXTIME` |
+| 当前时间 | `CURTIME` · 无括号 `CURRENT_DATE` / `CURRENT_TIMESTAMP` / `CURRENT_TIME` |
+
+**实现要点**
+- lexer 新增 `INTERVAL` token;parser 把 `INTERVAL n UNIT` 折为 `__interval(n, 'UNIT')` 参数,并把无括号的 `CURRENT_DATE` / `CURRENT_TIMESTAMP` / `CURRENT_TIME` 直接折成函数调用(否则会被当成列名求值 NULL)
+- `expr.cpp` 统一日期解析入口,采用 civil-days 算法(含 1970 epoch 偏移)做日期加减/差值,支持 YEAR/MONTH/QUARTER/DAY/WEEK/HOUR/MINUTE/SECOND;月末按当月天数收敛
+- `DATETIME - DATETIME` 返回秒差(`NOW() - NOW()` = 0)
+- 顺带修正 P0 引入的 1055 回归:`SELECT dept_name … GROUP BY d.dept_name` 中裸名与限定名现在视为同一列
+
+**验证**
+- SLT 全量 **1184 项 · PASS 1106 / GAP 78 / FAIL 0**(日期文件 `03_datetime.slt` 45/45,14 条 `gap` 标记已移除)
+- 协议 **42/42** · 持久化 **15/15** · `compare_employees.py` **39/39 MATCH**
 
 ---
 
@@ -454,7 +479,8 @@ SQL 语法:`SET SESSION TRANSACTION ISOLATION LEVEL <级别>`(会话默认)、`S
 | **融合聚合 + UNION ALL (v2.0.4)** | ✅ | 单表聚合单遍扫描快路径:`SUM(salary)` 2.97s→**0.35s**、`WHERE salary>100000` 计行 0.774s→**0.248s**;UNION/UNION ALL(含去重、链式、尾部 ORDER BY/LIMIT)+ `ORDER BY 1` 位置序号;三端结果与 MySQL 对比验证 |
 | **复杂查询正确性 + 语法补全 (v2.0.5)** | ✅ | WITH/递归 CTE、标量子查询、EXISTS、FROM 派生表、COUNT(DISTINCT)、BETWEEN、`ROW_NUMBER() OVER`、日期函数;GROUP BY 别名与内嵌聚合修复;高基数分桶 O(n²)→O(1)、相关子查询去相关;`compare_employees.py` 39 条 **39/39 MATCH** |
 | **MySQL 语义兼容修复 (v2.0.6, 2026-11-16)** | ✅ | sqllogictest 套件驱动 **FAIL 67→0**;NULL 排序/三值逻辑、LIKE 大小写、BIGINT/表达式列类型、SQL 校验(1048/1054/1136/1366/1406/1242/1241/1111/1055/1222/3593)、RIGHT JOIN/逗号连接、窗口聚合、information_schema 主键元数据、字符串与数值函数;SLT **PASS 1092 / GAP 92 / FAIL 0**,协议 **42/42** |
-| **后续** | 📋 | 日期函数与关键字同名函数 · 等待队列/死锁检测 → 存储过程 · caching_sha2_password / SSL · 复制 |
+| **P1-a 日期时间函数模块 (v2.0.7)** | ✅ | `DATEDIFF`/`DATE_ADD`/`DATE_SUB`/`LAST_DAY`/`DAYOFWEEK`/`WEEK`/`DATE_FORMAT`/`STR_TO_DATE`/`UNIX_TIMESTAMP`/`FROM_UNIXTIME`/`CURTIME`/无括号 `CURRENT_*`,`INTERVAL` 语法 + DATETIME 减法;SLT **PASS 1106 / GAP 78 / FAIL 0**,协议 42/42,持久化 15/15 |
+| **后续** | 📋 | 等待队列/死锁检测 → 存储过程 · caching_sha2_password / SSL · 复制 |
 
 ---
 
@@ -510,10 +536,10 @@ FROM users u INNER JOIN orders o ON o.user_id = u.id;
 | 产物 | 类型 | 说明 |
 |---|---|---|
 | `build/Debug/sqltiny.lib` | 静态库 | 引擎核心,嵌入式进程内调用 |
-| `build/Debug/sqltiny_server.exe` | 可执行 | MySQL 协议 TCP 服务器(v2.0.6) |
+| `build/Debug/sqltiny_server.exe` | 可执行 | MySQL 协议 TCP 服务器(v2.0.7) |
 | `build/Release/sqltiny_server.exe` | 可执行(发布版) | 同上,Release 版约 **0.9 MB** 单文件(静态 CRT + fmt 静态链接,无 dll 依赖,可直接拷贝部署);Debug 版约 4.8 MB |
 
-**`sqltiny_server.exe` 文件信息(v2.0.6)**:
+**`sqltiny_server.exe` 文件信息(v2.0.7)**:
 
 | 属性 | 值 |
 |---|---|

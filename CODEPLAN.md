@@ -7,7 +7,7 @@
 
 ---
 
-## 0. 当前状态(2026-11-16,v2.0.6)
+## 0. 当前状态(2026-11-16,v2.0.7)
 
 > 下文 M1–M5 为原始规划、M6 各节含设计稿伪代码,均保留供追溯。**落地状态以本节与各节 ✅ 标记为准;实际目录与运行方式见 `README.md`,架构图见 `architecture.svg`。**
 
@@ -31,6 +31,7 @@
 | **融合聚合 + UNION ALL(v2.0.4)** | ✅ | 单表聚合单遍扫描快路径(`SUM` 2.97s→**0.35s**、`WHERE salary>100000` 计行 0.774s→**0.248s**)+ UNION/UNION ALL(去重、链式、尾部 ORDER BY/LIMIT)+ `ORDER BY 1` 位置序号 |
 | **复杂查询正确性 + 语法补全(v2.0.5)** | ✅ | compare_employees 扩至 39 条;D1–D3 静默正确性缺陷、S1–S8 语法缺口(WITH/递归 CTE/标量子查询/EXISTS/派生表/COUNT(DISTINCT)/BETWEEN/窗口函数)、P1 子查询物化与去相关全部落地;**39/39 MATCH / 0 MISMATCH / 0 ST-ERR**,基础类 SQLTiny 5.45s vs MySQL 14.00s |
 | **MySQL 语义兼容修复(v2.0.6,2026-11-16)** | ✅ | 由独立 sqllogictest 套件(与本仓库同级的 `SQLTinyTest/testcase`)驱动:**FAIL 67→0**;SLT 1184 项 PASS 971→**1092** / GAP 146→**92** / FAIL **0**,协议套件 **42/42**,持久化 **15/15**。修复覆盖值语义、协议、SQL 校验、JOIN/窗口、元数据、内置函数六类,P0 语义批(`<=>`/CAST/CONVERT/会话函数/聚合扩展)已完成,详见下节 |
+| **P1-a 日期时间函数模块(v2.0.7)** | ✅ | `DATEDIFF`/`DATE_ADD`/`DATE_SUB`/`LAST_DAY`/`DAYOFWEEK`/`WEEK`/`DATE_FORMAT`/`STR_TO_DATE`/`UNIX_TIMESTAMP`/`FROM_UNIXTIME`/`CURTIME` + 无括号 `CURRENT_*` + INTERVAL 语法;SLT **1184 / PASS 1106 / GAP 78 / FAIL 0**,协议 42/42,持久化 15/15 |
 | M6 P4 | ⬜ | 复制与更大测试覆盖;认证(caching_sha2_password / SSL)仍未做 |
 
 ### 本轮交付(v1.1.0 客户端兼容性)
@@ -87,6 +88,17 @@
 **本轮修复范围**:D1–D3、S1–S8 全部落地;P1 已修复(非相关物化缓存 + 相关去相关),P2 已改善;P3(HAVING 使聚合下推失效)、P4(DISTINCT 全量物化)记录基线后**转待办**。
 
 **回归口径与结果**:`compare_employees.py` 39 条 → **39 MATCH / 0 MISMATCH / 0 ST-ERR**;`ctest` **12/12** 全通过(`smoke_m25_e2e` 端口统一为 3307,不再受 3306 MySQL 干扰);新增 `smoke_sql_keywords`(649 PASS)、`smoke_sql_syntax`(160 PASS / 15 GAP)随 CTest 一起跑。
+
+### 本轮交付(v2.0.7 P1-a 日期时间函数模块,2026-11-16)
+
+由 `SQLTinySLT/slt/05_function/03_datetime.slt` 的 14 条 GAP 驱动,一次补齐日期时间模块,GAP **92→78**、FAIL 保持 0。
+
+- **解析层**:lexer 新增 `INTERVAL`;parser 把 `INTERVAL n UNIT` 折为 `__interval(n,'UNIT')` 表达式供 `DATE_ADD`/`DATE_SUB` 消费;无括号 `CURRENT_DATE` / `CURRENT_TIMESTAMP` / `CURRENT_TIME` token 直接折成函数调用(此前落为列名 → NULL)
+- **求值层**(`src/executor/expr.cpp`):统一 `to_dt` 入口,civil-days 算法(含 719468 epoch 偏移)实现 `DATEDIFF` / `DATE_ADD` / `DATE_SUB` / `LAST_DAY` / `DAYOFWEEK`(1=周日)/ `WEEK`;`UNIX_TIMESTAMP` / `FROM_UNIXTIME` 用 `_mkgmtime`/`gmtime_s`;`DATE_FORMAT` / `STR_TO_DATE` 支持 `%Y %m %d %H %i %s`;月末按当月天数收敛;支持 YEAR/MONTH/QUARTER/DAY/WEEK/HOUR/MINUTE/SECOND 单位
+- **算术**:`DATETIME - DATETIME` 返回秒差(`NOW()-NOW()` = 0)
+- **顺带修复**:P0 引入的 1055 回归 —— `SELECT dept_name … GROUP BY d.dept_name` 的裸名/限定名现在视为同一列
+
+**验证**:SLT **1184 / PASS 1106 / GAP 78 / FAIL 0**(`03_datetime.slt` 45/45,14 条 `gap` 标记移除);协议 **42/42**;持久化 **15/15**;`compare_employees.py` **39/39 MATCH**。
 
 ### 本轮交付(v2.0.6 MySQL 语义兼容修复,2026-11-16)
 
@@ -298,14 +310,14 @@ employees 标准数据集(392 万行)实测:3 表 JOIN 求均薪 77s vs MySQL 6.
 - `tests/load_employees.py`:把 `test_db-master` 的 employees 数据集灌入 SQLTiny(默认 3307,WAL 模式),多行批插(~3.5 万行/s,392 万行约 50s);避开外键、ENUM→CHAR(1),保留复合主键与 DATE。
 - `tests/compare_employees.py`:同一组 14 条查询(过滤 / GROUP BY / 2 表&3 表 JOIN / SUM·AVG·COUNT / 定点)在 MySQL 与 SQLTiny 双端执行并规范化比对,修复后 **14/14 MATCH**。
 - 行数精确一致:employees 300024 / departments 9 / dept_manager 24 / dept_emp 331603 / titles 443308 / salaries 2844047;548MB WAL 重放 783 万条记录完整恢复 392 万行。
-- **已知差距(待办)**:PK 前缀索引探测(v1.2.5)、B+ 树主键索引(v2.0.0)、3 表 JOIN 执行优化 + 聚合下推(v2.0.1)、下推覆盖面扩展(v2.0.2)、主键点查索引探测(v2.0.3)、融合聚合 + UNION ALL(v2.0.4)、复杂查询正确性 + 语法补全(v2.0.5)均已落地,Release 基线下 3 表 JOIN 2.05s vs MySQL 1.60s(约 **1.28x**),高薪员工数 / 2 表哈希计行约 2.5x;仍走物化路径的场景:带 HAVING / 嵌套聚合 / LEFT JOIN / DISTINCT、聚合参数跨表引用、WHERE 跨表连接词;融合聚合快路径未覆盖 WHERE 含 OR / 函数 / 子查询、GROUP BY 分支,UNION 去重按 `to_string` 键(未做表达式级等价);AVG 仍以 Decimal 字符串回包;结果集 >16MB 未分包;**v2.0.5 遗留待优化**:P3(HAVING 使 3 表 JOIN 聚合下推失效,19.77s vs 4.10s)、P4(`DISTINCT` 全量物化去重,2.79s vs 0.29s)、UNION 多分支 COUNT 仍未达 MySQL 水平(0.71s vs 0.09s);超长事务专项压测未做。
+- **已知差距(待办)**:PK 前缀索引探测(v1.2.5)、B+ 树主键索引(v2.0.0)、3 表 JOIN 执行优化 + 聚合下推(v2.0.1)、下推覆盖面扩展(v2.0.2)、主键点查索引探测(v2.0.3)、融合聚合 + UNION ALL(v2.0.4)、复杂查询正确性 + 语法补全(v2.0.5)、MySQL 语义兼容(v2.0.6)、P1-a 日期时间模块(v2.0.7)均已落地,Release 基线下 3 表 JOIN 2.05s vs MySQL 1.60s(约 **1.28x**),高薪员工数 / 2 表哈希计行约 2.5x;仍走物化路径的场景:带 HAVING / 嵌套聚合 / LEFT JOIN / DISTINCT、聚合参数跨表引用、WHERE 跨表连接词;融合聚合快路径未覆盖 WHERE 含 OR / 函数 / 子查询、GROUP BY 分支,UNION 去重按 `to_string` 键(未做表达式级等价);AVG 仍以 Decimal 字符串回包;结果集 >16MB 未分包;**v2.0.5 遗留待优化**:P3(HAVING 使 3 表 JOIN 聚合下推失效,19.77s vs 4.10s)、P4(`DISTINCT` 全量物化去重,2.79s vs 0.29s)、UNION 多分支 COUNT 仍未达 MySQL 水平(0.71s vs 0.09s);超长事务专项压测未做。
 
 ### 验证基线
 
 | 测试 | 结果 |
 |---|---|
 | `ctest -C Debug` | **12/12**(含 `smoke_m6_isolation`、`smoke_m6_hsqldb_matrix`、`smoke_m6_session_db`、`dbx_probe` 与 v2.0.5 新增的 `smoke_sql_keywords` / `smoke_sql_syntax`);`smoke_m25_e2e` 端口统一为 3307,启动 server 后全通过 |
-| `sqllogictest`(外部套件 `SQLTinyTest/testcase`) | **1184 项 · PASS 1092 / GAP 92 / FAIL 0**(首轮 971/146/67) |
+| `sqllogictest`(外部套件 `SQLTinyTest/testcase`) | **1184 项 · PASS 1106 / GAP 78 / FAIL 0**(首轮 971/146/67;v2.0.6 修复后 1092/92/0;v2.0.7 P1-a 再消 14 项) |
 | `test_protocol.py` | **42 / 42 PASS** — 握手、COM_QUERY/PING/INIT_DB、COM_STMT_*,多连接隔离 |
 | `test_persistence.py` | **13 PASS / 2 GAP / 0 FAIL** — WAL 回放、强杀恢复、未提交不恢复、DROP TABLE 持久化;缺优雅关闭 checkpoint |
 | `smoke_sql_keywords` | 649 PASS / 0 FAIL — 180 个常用关键词大小写不敏感、运算符、字面量、注释、行列号、词法错误、Parser 分发 |
@@ -325,18 +337,18 @@ employees 标准数据集(392 万行)实测:3 表 JOIN 求均薪 77s vs MySQL 6.
 | `test_sqlalchemy.py` | 33 PASS / 0 FAIL / 0 GAP(原 #5–#8 与 DESCRIBE/SHOW FULL TABLES 反射限制均已修复) |
 | **实测客户端** | DBX/dbExpress(Delphi)连接 + 打开表 + 浏览索引/列正常;类 Navicat 图形工具浏览表/索引/列正常;PyMySQL / mysql CLI 正常 |
 
-### 版本标识(v2.0.6)
+### 版本标识(v2.0.7)
 
 | 位置 | 内容 |
 |---|---|
-| `CMakeLists.txt` | `project(SQLTiny VERSION 2.0.6 LANGUAGES CXX)` |
-| `vcpkg.json` | `"version-string": "2.0.6"` |
-| `src/main.cpp` | 启动横幅 `SQLTiny v2.0.6 — MySQL wire protocol server` |
+| `CMakeLists.txt` | `project(SQLTiny VERSION 2.0.7 LANGUAGES CXX)` |
+| `vcpkg.json` | `"version-string": "2.0.7"` |
+| `src/main.cpp` | 启动横幅 `SQLTiny v2.0.7 — MySQL wire protocol server` |
 | `src/version.rc.in` | exe Windows 版本资源(经 configure_file 注入 CMake 版本),右键属性页显示产品名 / 版本 / 版权 |
 | `README.md` / `CODEPLAN.md` | 本版本变更清单与验证基线 |
 | 协议层 `@@version` / `VERSION()` | 仍为 `5.7.0-SQLTiny` —— MySQL 客户端兼容用伪装版本,**不是**产品版本,不随产品版本改动 |
 
-> v1.1.0 统一了此前分散的版本号(启动横幅 `v1.0`、manifest `0.1.0`、CMake 未声明),交付 Prepared Statement、information_schema、SHOW 扩展与 EOF 帧兼容。**v1.1.2** 在此基础上交付 DBeaver / Database Client 实测兼容修复(DDL 选项跳过、SHOW TABLES WHERE/LIKE 过滤、`REFERENTIAL_CONSTRAINTS` 虚拟表、系统变量补齐、双引号与裸关键字别名、`INSTR/LOCATE/POSITION` 函数)。**v1.2.0** 交付 JOIN 性能优化(Hash Join + 预建列索引 + 成本估算 + `EXPLAIN`),INNER/LEFT JOIN 约 77x / 62x 提速,详见 README「v1.2.0 更新内容」。**v1.2.5** 交付大表 JOIN 主键索引利用(PK 前缀索引探测 + WHERE 谓词下推)与 SUM(DECIMAL) 列类型一致性修复,employees 3 表 JOIN 77s→23.8s、单员工⋈薪酬 28s→2.3s,详见 README「v1.2.5 更新内容」。**v2.0.0** 主键索引整体升级 B+ 树,索引级点查 +19% / 前缀扫描 +24% / 全量遍历 7.6x,端到端 employees JOIN 18.99s→18.42s(Release 基线),详见 README「v2.0.0 更新内容」。**v2.0.1** 优化 3 表 JOIN 执行性能(ExecContext 零拷贝、idx_probe 跳过右表物化、聚合下推到 PK 前缀探测),employees 3 表 JOIN 18.25s→1.97s(9.3x),与 MySQL 差距 11.7x→1.25x,详见 README「v2.0.1 更新内容」。**v2.0.2** 扩展聚合下推覆盖面(WHERE 按表侧拆分、哈希等值 JOIN 也下推、子查询/CASE 不下推加固),高薪员工数 2.76s→0.94s、2 表哈希计行 0.37s→0.13s,详见 README「v2.0.2 更新内容」。**v2.0.3** 让主键点查走索引前缀探测(`WHERE PK首列=同族字面量`),并以 `dead_rows_` / `has_dead_rows()` 在存在逻辑删除历史时回退全表扫描以保 MVCC 可见性,employees 点查 74ms→0.13ms、salaries 678ms→0.17ms,详见 README「v2.0.3 更新内容」。**v2.0.4** 增加单表聚合单遍扫描快路径(`SUM(salary)` 2.97s→0.35s、`WHERE salary>100000` 计行 0.774s→0.248s)并实现 UNION / UNION ALL(去重、链式、尾部 ORDER BY/LIMIT)与 `ORDER BY 1` 位置序号,详见 README「v2.0.4 更新内容」。**v2.0.5** 补齐复杂查询能力与正确性:WITH/递归 CTE、标量子查询、EXISTS、FROM 派生表、COUNT(DISTINCT)、BETWEEN、`ROW_NUMBER() OVER`、YEAR/MONTH/DAY 等,GROUP BY 别名与内嵌聚合修复;性能上 GROUP BY 高基数分桶 O(n²)→O(1)、相关子查询外层列等值走 PK 前缀探测、递归 CTE 改增量工作集,`compare_employees.py` 扩至 39 条并达 **39/39 MATCH**,详见 README「v2.0.5 更新内容」。**v2.0.6** 由外部 sqllogictest 套件驱动,把 SQL 语义与报错对齐 MySQL:NULL 排序/三值逻辑、LIKE 大小写、BIGINT 与表达式列类型、SQL 校验(1048/1054/1136/1366/1406/1242/1241/1111/1055/1222/3593)、RIGHT JOIN/逗号连接、窗口聚合、information_schema 主键元数据、字符串与数值函数;SLT **1184 项 PASS 1092 / GAP 92 / FAIL 0**,协议 **42/42**,详见 README「v2.0.6 更新内容」。
+> v1.1.0 统一了此前分散的版本号(启动横幅 `v1.0`、manifest `0.1.0`、CMake 未声明),交付 Prepared Statement、information_schema、SHOW 扩展与 EOF 帧兼容。**v1.1.2** 在此基础上交付 DBeaver / Database Client 实测兼容修复(DDL 选项跳过、SHOW TABLES WHERE/LIKE 过滤、`REFERENTIAL_CONSTRAINTS` 虚拟表、系统变量补齐、双引号与裸关键字别名、`INSTR/LOCATE/POSITION` 函数)。**v1.2.0** 交付 JOIN 性能优化(Hash Join + 预建列索引 + 成本估算 + `EXPLAIN`),INNER/LEFT JOIN 约 77x / 62x 提速,详见 README「v1.2.0 更新内容」。**v1.2.5** 交付大表 JOIN 主键索引利用(PK 前缀索引探测 + WHERE 谓词下推)与 SUM(DECIMAL) 列类型一致性修复,employees 3 表 JOIN 77s→23.8s、单员工⋈薪酬 28s→2.3s,详见 README「v1.2.5 更新内容」。**v2.0.0** 主键索引整体升级 B+ 树,索引级点查 +19% / 前缀扫描 +24% / 全量遍历 7.6x,端到端 employees JOIN 18.99s→18.42s(Release 基线),详见 README「v2.0.0 更新内容」。**v2.0.1** 优化 3 表 JOIN 执行性能(ExecContext 零拷贝、idx_probe 跳过右表物化、聚合下推到 PK 前缀探测),employees 3 表 JOIN 18.25s→1.97s(9.3x),与 MySQL 差距 11.7x→1.25x,详见 README「v2.0.1 更新内容」。**v2.0.2** 扩展聚合下推覆盖面(WHERE 按表侧拆分、哈希等值 JOIN 也下推、子查询/CASE 不下推加固),高薪员工数 2.76s→0.94s、2 表哈希计行 0.37s→0.13s,详见 README「v2.0.2 更新内容」。**v2.0.3** 让主键点查走索引前缀探测(`WHERE PK首列=同族字面量`),并以 `dead_rows_` / `has_dead_rows()` 在存在逻辑删除历史时回退全表扫描以保 MVCC 可见性,employees 点查 74ms→0.13ms、salaries 678ms→0.17ms,详见 README「v2.0.3 更新内容」。**v2.0.4** 增加单表聚合单遍扫描快路径(`SUM(salary)` 2.97s→0.35s、`WHERE salary>100000` 计行 0.774s→0.248s)并实现 UNION / UNION ALL(去重、链式、尾部 ORDER BY/LIMIT)与 `ORDER BY 1` 位置序号,详见 README「v2.0.4 更新内容」。**v2.0.5** 补齐复杂查询能力与正确性:WITH/递归 CTE、标量子查询、EXISTS、FROM 派生表、COUNT(DISTINCT)、BETWEEN、`ROW_NUMBER() OVER`、YEAR/MONTH/DAY 等,GROUP BY 别名与内嵌聚合修复;性能上 GROUP BY 高基数分桶 O(n²)→O(1)、相关子查询外层列等值走 PK 前缀探测、递归 CTE 改增量工作集,`compare_employees.py` 扩至 39 条并达 **39/39 MATCH**,详见 README「v2.0.5 更新内容」。**v2.0.6** 由外部 sqllogictest 套件驱动,把 SQL 语义与报错对齐 MySQL:NULL 排序/三值逻辑、LIKE 大小写、BIGINT 与表达式列类型、SQL 校验(1048/1054/1136/1366/1406/1242/1241/1111/1055/1222/3593)、RIGHT JOIN/逗号连接、窗口聚合、information_schema 主键元数据、字符串与数值函数;SLT **1184 项 PASS 1092 / GAP 92 / FAIL 0**,协议 **42/42**,详见 README「v2.0.6 更新内容」。**v2.0.7** 完成 P1-a 日期时间模块:`INTERVAL` 语法、14 个日期/时间函数与无括号 `CURRENT_*`、DATETIME 减法,SLT **PASS 1106 / GAP 78 / FAIL 0**,协议 42/42、持久化 15/15、`compare_employees` 39/39,详见 README「v2.0.7 更新内容」。
 
 ---
 

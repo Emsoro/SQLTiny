@@ -609,6 +609,21 @@ ast::ExprPtr Parser::parse_primary() {
         return e;
     }
 
+    // CURRENT_DATE / CURRENT_TIMESTAMP / CURRENT_TIME 在 MySQL 里可以不带括号,
+    // 词法上是保留字;直接折成函数调用,否则会被当成列名求值 NULL。
+    if (t.kind == TokenKind::KwCurrentDate || t.kind == TokenKind::KwCurrentTimestamp ||
+        t.kind == TokenKind::KwCurrentTime) {
+        consume();
+        auto e = std::make_unique<ast::Expression>();
+        e->kind = ast::ExprKind::FunctionCall;
+        e->func_name = t.text;
+        if (match(TokenKind::LParen)) {   // 带空括号的写法也接受
+            consume();
+            expect(TokenKind::RParen, ")");
+        }
+        return e;
+    }
+
     // 标识符 / 关键字(函数名 或 列名)
     // M6 P1 GAP #5: 关键字与列名冲突时按标识符处理(如 WHERE status = 'paid')。
     // 只拒绝会终结/结构化表达式的保留字,其余关键字(STATUS/SQL 类型名等)都可作为列名。
@@ -714,13 +729,30 @@ ast::ExprPtr Parser::parse_function_call(std::string name, int line, int col) {
     }
     // COUNT(DISTINCT x) / SUM(DISTINCT x) / AVG(DISTINCT x)
     if (match_consume(TokenKind::KwDistinct)) e->func_distinct = true;
+    // DATE_ADD(d, INTERVAL 1 DAY):把 INTERVAL n UNIT 折成 __interval(n, 'UNIT')
+    auto parse_arg = [&]() -> ast::ExprPtr {
+        if (match_consume(TokenKind::KwInterval)) {
+            auto n = parse_expr();
+            Token u = peek();
+            if (u.kind != TokenKind::Ident &&
+                !(static_cast<int>(u.kind) >= static_cast<int>(TokenKind::Kw_START) &&
+                  static_cast<int>(u.kind) <= static_cast<int>(TokenKind::Kw_END)))
+                throw ParseError(u.line, u.col, "expected interval unit");
+            consume();
+            std::vector<ast::ExprPtr> ia;
+            ia.push_back(std::move(n));
+            ia.push_back(ast::Expression::make_literal(types::Value::make_string(u.text)));
+            return ast::Expression::make_function("__interval", std::move(ia));
+        }
+        return parse_expr();
+    };
     if (match(TokenKind::RParen)) {
         // NOW(), CURRENT_TIMESTAMP, ROW_NUMBER() —— 不能直接 return,后面还要看 OVER (...)
         consume();
     } else {
-        e->func_args.push_back(parse_expr());
+        e->func_args.push_back(parse_arg());
         while (match_consume(TokenKind::Comma)) {
-            e->func_args.push_back(parse_expr());
+            e->func_args.push_back(parse_arg());
         }
         expect(TokenKind::RParen, ")");
     }

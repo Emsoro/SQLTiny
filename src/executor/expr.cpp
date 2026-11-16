@@ -194,6 +194,25 @@ types::Value Executor::eval(const ast::Expression& e, const ExecContext& ctx) co
                 return types::Value::make_bool(l.compare(r) == 0);
             }
 
+            // DATETIME/DATE 相减:MySQL 给出秒差(NOW()-NOW() = 0)
+            if (e.binop == ast::BinOp::Minus &&
+                (l.kind == types::Value::Kind::DateTime || l.kind == types::Value::Kind::Date) &&
+                (r.kind == types::Value::Kind::DateTime || r.kind == types::Value::Kind::Date)) {
+                auto to_epoch = [](const types::Value& v) -> int64_t {
+                    std::tm tm{};
+                    if (v.kind == types::Value::Kind::DateTime) {
+                        tm.tm_year = v.v_dt.year - 1900; tm.tm_mon = v.v_dt.month - 1;
+                        tm.tm_mday = v.v_dt.day; tm.tm_hour = v.v_dt.hour;
+                        tm.tm_min = v.v_dt.minute; tm.tm_sec = v.v_dt.second;
+                    } else {
+                        tm.tm_year = v.v_date.year - 1900; tm.tm_mon = v.v_date.month - 1;
+                        tm.tm_mday = v.v_date.day;
+                    }
+                    return static_cast<int64_t>(_mkgmtime(&tm));
+                };
+                return types::Value::make_int(to_epoch(l) - to_epoch(r));
+            }
+
             // MySQL 隐式类型转换:数字字符串在算术/比较中按数值处理('1' = 1 → 真)。
             // 预编译语句把字符串参数绑定到整数列时依赖这一行为。
             // 算术里非数字字符串按 0 处理('abc' + 1 = 1)；比较里则视为 UNKNOWN。
@@ -684,6 +703,226 @@ types::Value Executor::eval_function(
     if (lower == "user") {
         return types::Value::make_string("root@localhost");
     }
+    // ---- P1-a:日期时间函数模块 ----
+    auto to_dt = [](const types::Value& v, types::DateTimeValue& dt) -> bool {
+        if (v.is_null()) return false;
+        if (v.kind == types::Value::Kind::DateTime) { dt = v.v_dt; return true; }
+        if (v.kind == types::Value::Kind::Date) {
+            dt.year = v.v_date.year; dt.month = v.v_date.month; dt.day = v.v_date.day;
+            return true;
+        }
+        if (v.kind == types::Value::Kind::Time) {
+            dt.hour = v.v_time.hour; dt.minute = v.v_time.minute; dt.second = v.v_time.second;
+            return true;
+        }
+        std::string s = v.is_string() ? v.v_str : v.to_string();
+        if (s.size() >= 2 && s.front() == '\'' && s.back() == '\'')
+            s = s.substr(1, s.size() - 2);
+        int y = 0, mo = 0, d = 0, h = 0, mi = 0, se = 0;
+        int n = std::sscanf(s.c_str(), "%d-%d-%d %d:%d:%d", &y, &mo, &d, &h, &mi, &se);
+        if (n >= 3) {
+            dt.year = y; dt.month = mo; dt.day = d;
+            dt.hour = h; dt.minute = mi; dt.second = se;
+            return true;
+        }
+        return false;
+    };
+    auto epoch_of = [](const types::DateTimeValue& dt) -> int64_t {
+        std::tm tm{};
+        tm.tm_year = dt.year - 1900; tm.tm_mon = dt.month - 1; tm.tm_mday = dt.day;
+        tm.tm_hour = dt.hour; tm.tm_min = dt.minute; tm.tm_sec = dt.second;
+        return static_cast<int64_t>(_mkgmtime(&tm));
+    };
+    auto days_from_civil = [](int y, int m, int d) -> int64_t {
+        y -= (m <= 2);
+        int era = (y >= 0 ? y : y - 399) / 400;
+        unsigned yoe = static_cast<unsigned>(y - era * 400);
+        unsigned doy = static_cast<unsigned>((153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1);
+        unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+        // 719468 = 0000-03-01 到 1970-01-01 的天数;与 civil_from_days 的 +719468 互逆
+        return static_cast<int64_t>(era) * 146097 + static_cast<int64_t>(doe) - 719468;
+    };
+    auto civil_from_days = [](int64_t z, int& y, int& m, int& d) {
+        z += 719468;
+        int era = static_cast<int>((z >= 0 ? z : z - 146096) / 146097);
+        unsigned doe = static_cast<unsigned>(z - static_cast<int64_t>(era) * 146097);
+        unsigned yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+        y = static_cast<int>(yoe) + era * 400;
+        unsigned doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        unsigned mp = (5 * doy + 2) / 153;
+        d = static_cast<int>(doy - (153 * mp + 2) / 5 + 1);
+        m = static_cast<int>(mp + (mp < 10 ? 3 : -9));
+        y += (m <= 2);
+    };
+    auto is_leap = [](int y) { return (y % 4 == 0 && y % 100 != 0) || y % 400 == 0; };
+    auto days_in_month = [&](int y, int m) {
+        static const int md[] = {0,31,28,31,30,31,30,31,31,30,31,30,31};
+        if (m < 1 || m > 12) return 30;
+        return (m == 2 && is_leap(y)) ? 29 : md[m];
+    };
+    auto dt_arg = [&](size_t i, types::DateTimeValue& dt) -> bool {
+        return i < args.size() && to_dt(eval(*args[i], ctx), dt);
+    };
+
+    if (lower == "__interval") return types::Value::make_null();  // 只作 DATE_ADD/SUB 的参数载体
+    if (lower == "datediff" && args.size() >= 2) {
+        types::DateTimeValue a{}, b{};
+        if (!dt_arg(0, a) || !dt_arg(1, b)) return types::Value::make_null();
+        return types::Value::make_int(days_from_civil(a.year, a.month, a.day) -
+                                      days_from_civil(b.year, b.month, b.day));
+    }
+    if ((lower == "date_add" || lower == "date_sub") && args.size() >= 2) {
+        types::DateTimeValue dt{};
+        if (!dt_arg(0, dt)) return types::Value::make_null();
+        bool is_date = args[0]->kind != ast::ExprKind::FunctionCall ||
+                       (args[0]->func_name != "now" && args[0]->func_name != "current_timestamp");
+        int64_t n = 0;
+        std::string unit;
+        if (args[1]->kind == ast::ExprKind::FunctionCall &&
+            args[1]->func_name == "__interval" && args[1]->func_args.size() == 2) {
+            auto nv = eval(*args[1]->func_args[0], ctx);
+            nv.try_to_int(n);
+            auto uv = eval(*args[1]->func_args[1], ctx);
+            unit = uv.is_string() ? uv.v_str : uv.to_string();
+        } else {
+            auto nv = eval(*args[1], ctx);
+            nv.try_to_int(n);
+            if (args.size() >= 3) {
+                auto uv = eval(*args[2], ctx);
+                unit = uv.is_string() ? uv.v_str : uv.to_string();
+            } else unit = "DAY";
+        }
+        std::transform(unit.begin(), unit.end(), unit.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+        if (lower == "date_sub") n = -n;
+        if (unit == "YEAR" || unit == "YEAR_MONTH") {
+            dt.year = static_cast<int>(dt.year + n);
+            dt.day = static_cast<decltype(dt.day)>(
+                std::min<int>(dt.day, days_in_month(dt.year, dt.month)));
+        } else if (unit == "MONTH" || unit == "QUARTER") {
+            if (unit == "QUARTER") n *= 3;
+            int64_t t = static_cast<int64_t>(dt.year) * 12 + (dt.month - 1) + n;
+            dt.year = static_cast<int>(t / 12);
+            dt.month = static_cast<int>(t % 12) + 1;
+            if (dt.month < 1) { dt.month += 12; --dt.year; }
+            dt.day = static_cast<decltype(dt.day)>(
+                std::min<int>(dt.day, days_in_month(dt.year, dt.month)));
+        } else if (unit == "DAY" || unit == "WEEK") {
+            if (unit == "WEEK") n *= 7;
+            int y, m, d;
+            civil_from_days(days_from_civil(dt.year, dt.month, dt.day) + n, y, m, d);
+            dt.year = y; dt.month = m; dt.day = d;
+        } else {
+            int64_t sec = epoch_of(dt);
+            if (unit == "HOUR") sec += n * 3600;
+            else if (unit == "MINUTE") sec += n * 60;
+            else sec += n;
+            std::time_t tt = static_cast<std::time_t>(sec);
+            std::tm tm{}; gmtime_s(&tm, &tt);
+            dt.year = tm.tm_year + 1900; dt.month = tm.tm_mon + 1; dt.day = tm.tm_mday;
+            dt.hour = tm.tm_hour; dt.minute = tm.tm_min; dt.second = tm.tm_sec;
+            is_date = false;
+        }
+        if (is_date) {
+            types::DateValue d;
+            d.year = dt.year; d.month = dt.month; d.day = dt.day;
+            return types::Value::make_date(d);
+        }
+        return types::Value::make_datetime(dt);
+    }
+    if (lower == "last_day") {
+        types::DateTimeValue dt{};
+        if (!dt_arg(0, dt)) return types::Value::make_null();
+        types::DateValue d;
+        d.year = dt.year; d.month = dt.month; d.day = days_in_month(dt.year, dt.month);
+        return types::Value::make_date(d);
+    }
+    if (lower == "dayofweek" || lower == "week") {
+        types::DateTimeValue dt{};
+        if (!dt_arg(0, dt)) return types::Value::make_null();
+        int64_t z = days_from_civil(dt.year, dt.month, dt.day);
+        if (lower == "dayofweek") return types::Value::make_int(((z + 4) % 7 + 7) % 7 + 1);
+        int64_t jan1 = days_from_civil(dt.year, 1, 1);
+        int jan1_dow = static_cast<int>(((jan1 + 4) % 7 + 7) % 7 + 1);
+        int first_sunday = 1 + ((1 - jan1_dow + 7) % 7);   // 当年第一个周日的 day-of-year
+        int doy = static_cast<int>(z - jan1) + 1;
+        if (doy < first_sunday) return types::Value::make_int(0);
+        return types::Value::make_int((doy - first_sunday) / 7 + 1);
+    }
+    if (lower == "unix_timestamp") {
+        types::DateTimeValue dt{};
+        if (args.empty()) {
+            std::time_t t = std::time(nullptr);
+            return types::Value::make_int(static_cast<int64_t>(t));
+        }
+        if (!dt_arg(0, dt)) return types::Value::make_null();
+        return types::Value::make_int(epoch_of(dt));
+    }
+    if (lower == "from_unixtime" && !args.empty()) {
+        auto v = eval(*args[0], ctx);
+        int64_t sec = 0;
+        if (!v.try_to_int(sec)) return types::Value::make_null();
+        std::time_t tt = static_cast<std::time_t>(sec);
+        std::tm tm{}; gmtime_s(&tm, &tt);
+        return types::Value::make_string(fmt::format("{:04d}-{:02d}-{:02d} {:02d}:{:02d}:{:02d}",
+            tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec));
+    }
+    if (lower == "date_format" && args.size() >= 2) {
+        types::DateTimeValue dt{};
+        if (!dt_arg(0, dt)) return types::Value::make_null();
+        std::string f = [&] {
+            auto v = eval(*args[1], ctx);
+            return v.is_string() ? v.v_str : v.to_string();
+        }();
+        std::string out;
+        for (size_t i = 0; i < f.size(); ++i) {
+            if (f[i] != '%' || i + 1 >= f.size()) { out.push_back(f[i]); continue; }
+            char c = f[++i];
+            switch (c) {
+                case 'Y': case 'y': out += fmt::format("{:04d}", dt.year); break;
+                case 'm': out += fmt::format("{:02d}", dt.month); break;
+                case 'd': out += fmt::format("{:02d}", dt.day); break;
+                case 'H': out += fmt::format("{:02d}", dt.hour); break;
+                case 'i': out += fmt::format("{:02d}", dt.minute); break;
+                case 's': out += fmt::format("{:02d}", dt.second); break;
+                case '%': out.push_back('%'); break;
+                default: out.push_back('%'); out.push_back(c); break;
+            }
+        }
+        return types::Value::make_string(out);
+    }
+    if (lower == "str_to_date" && args.size() >= 2) {
+        auto sv = eval(*args[0], ctx), fv = eval(*args[1], ctx);
+        std::string s = sv.is_string() ? sv.v_str : sv.to_string();
+        std::string f = fv.is_string() ? fv.v_str : fv.to_string();
+        std::string scanf_fmt;
+        bool with_time = false;
+        for (size_t i = 0; i < f.size(); ++i) {
+            if (f[i] == '%' && i + 1 < f.size()) {
+                char c = f[++i];
+                if (c == 'H' || c == 'i' || c == 's') with_time = true;
+                scanf_fmt += "%d";
+            } else scanf_fmt.push_back(f[i]);
+        }
+        int y = 0, mo = 0, d = 0, h = 0, mi = 0, se = 0;
+        int n = with_time ? std::sscanf(s.c_str(), scanf_fmt.c_str(), &y, &mo, &d, &h, &mi, &se)
+                          : std::sscanf(s.c_str(), scanf_fmt.c_str(), &y, &mo, &d);
+        if (n < 3) return types::Value::make_null();
+        types::DateTimeValue dt{};
+        dt.year = y; dt.month = mo; dt.day = d;
+        dt.hour = h; dt.minute = mi; dt.second = se;
+        if (with_time) return types::Value::make_datetime(dt);
+        types::DateValue dv;
+        dv.year = y; dv.month = mo; dv.day = d;
+        return types::Value::make_date(dv);
+    }
+    if (lower == "curtime" || lower == "current_time") {
+        std::time_t t = std::time(nullptr);
+        std::tm tm{}; localtime_s(&tm, &t);
+        return types::Value::make_string(fmt::format("{:02d}:{:02d}:{:02d}",
+            tm.tm_hour, tm.tm_min, tm.tm_sec));
+    }
+
     // 日期/时间提取:YEAR / MONTH / DAY / HOUR / MINUTE / SECOND / CURDATE / DATE
     if (lower == "year" || lower == "month" || lower == "day" || lower == "dayofmonth" ||
         lower == "hour" || lower == "minute" || lower == "second" ||

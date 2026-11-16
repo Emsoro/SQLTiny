@@ -1515,8 +1515,10 @@ ResultSet Executor::exec_select_body(const ast::SelectStmt& s, const ExecContext
                 if (a.kind != b.kind) return false;
                 switch (a.kind) {
                     case ast::ExprKind::Column:
-                        return _stricmp(a.column_name.c_str(), b.column_name.c_str()) == 0 &&
-                               _stricmp(a.table_name.c_str(), b.table_name.c_str()) == 0;
+                        if (_stricmp(a.column_name.c_str(), b.column_name.c_str()) != 0) return false;
+                        // SELECT dept_name 与 GROUP BY d.dept_name 是同一列(限定名可省略)
+                        if (a.table_name.empty() || b.table_name.empty()) return true;
+                        return _stricmp(a.table_name.c_str(), b.table_name.c_str()) == 0;
                     case ast::ExprKind::Literal:
                         return a.literal.compare(b.literal) == 0 &&
                                a.literal.kind == b.literal.kind;
