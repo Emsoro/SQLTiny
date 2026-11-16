@@ -3,11 +3,11 @@
 > 目标:用现代 C++ (C++20) 重写 HSQLDB 核心引擎,构建一个轻量级嵌入式数据库 **SQLTiny**,同时暴露 **MySQL 客户端协议** 兼容端口——让标准 MySQL 客户端(mysql CLI、Navicat、JDBC Connector/J、Go sql.Open("mysql",...) 等)直接连接 SQLTiny。
 >
 > 源码输入:HSQLDB 2.7.4 `org.hsqldb`(Session / TransactionManagerMVCC / RowAction / persist)
-> 当前工作区:`d:\Cplusplus\SQLTiny`
+> 当前工作区:本仓库根目录
 
 ---
 
-## 0. 当前状态(2026-11-16,v2.0.5)
+## 0. 当前状态(2026-11-16,v2.0.6)
 
 > 下文 M1–M5 为原始规划、M6 各节含设计稿伪代码,均保留供追溯。**落地状态以本节与各节 ✅ 标记为准;实际目录与运行方式见 `README.md`,架构图见 `architecture.svg`。**
 
@@ -30,6 +30,7 @@
 | **主键点查索引探测(v2.0.3)** | ✅ | `WHERE PK首列=同族字面量` 改走 `for_each_by_pk_prefix`(谓词仍逐行复核)+ `dead_rows_` / `has_dead_rows()` 在逻辑删除历史存在时回退全扫;employees 点查 74ms→0.13ms · salaries 678ms→0.17ms |
 | **融合聚合 + UNION ALL(v2.0.4)** | ✅ | 单表聚合单遍扫描快路径(`SUM` 2.97s→**0.35s**、`WHERE salary>100000` 计行 0.774s→**0.248s**)+ UNION/UNION ALL(去重、链式、尾部 ORDER BY/LIMIT)+ `ORDER BY 1` 位置序号 |
 | **复杂查询正确性 + 语法补全(v2.0.5)** | ✅ | compare_employees 扩至 39 条;D1–D3 静默正确性缺陷、S1–S8 语法缺口(WITH/递归 CTE/标量子查询/EXISTS/派生表/COUNT(DISTINCT)/BETWEEN/窗口函数)、P1 子查询物化与去相关全部落地;**39/39 MATCH / 0 MISMATCH / 0 ST-ERR**,基础类 SQLTiny 5.45s vs MySQL 14.00s |
+| **MySQL 语义兼容修复(v2.0.6,2026-11-16)** | ✅ | 由独立 sqllogictest 套件(与本仓库同级的 `SQLTinyTest/testcase`)驱动:**FAIL 67→0**;SLT 1184 项 PASS 971→**1071** / GAP 146→**113** / FAIL **0**,协议套件 **42/42**,持久化 **13 PASS / 2 GAP**。修复覆盖值语义、协议、SQL 校验、JOIN/窗口、元数据、内置函数六类,详见下节 |
 | M6 P4 | ⬜ | 复制与更大测试覆盖;认证(caching_sha2_password / SSL)仍未做 |
 
 ### 本轮交付(v1.1.0 客户端兼容性)
@@ -86,6 +87,75 @@
 **本轮修复范围**:D1–D3、S1–S8 全部落地;P1 已修复(非相关物化缓存 + 相关去相关),P2 已改善;P3(HAVING 使聚合下推失效)、P4(DISTINCT 全量物化)记录基线后**转待办**。
 
 **回归口径与结果**:`compare_employees.py` 39 条 → **39 MATCH / 0 MISMATCH / 0 ST-ERR**;`ctest` **12/12** 全通过(`smoke_m25_e2e` 端口统一为 3307,不再受 3306 MySQL 干扰);新增 `smoke_sql_keywords`(649 PASS)、`smoke_sql_syntax`(160 PASS / 15 GAP)随 CTest 一起跑。
+
+### 本轮交付(v2.0.6 MySQL 语义兼容修复,2026-11-16)
+
+**驱动与口径**:外部 sqllogictest 套件(与本仓库同级的 `SQLTinyTest/testcase`,36 个 `.slt` + 2 个 Python 套件,期望值按 MySQL 8.0 语义书写)。首轮 **1184 项 / PASS 971 / GAP 146 / FAIL 67**;修复后 **PASS 1071 / GAP 113 / FAIL 0**,协议套件 **42/42**,持久化 **13 PASS / 2 GAP**。
+
+**A. 值语义与表达式(`src/types/value.cpp` / `src/executor/expr.cpp`)**
+
+| 项 | 修复 |
+|---|---|
+| NULL 排序 | `Value::compare` 把 NULL 视为最小值 → ASC 最前 / DESC 最后 |
+| 三值逻辑 | `__in` 对 NULL 左值或列表含 NULL 返回 UNKNOWN;`NOT IN (…,NULL)` 不再误返行 |
+| LIKE | `std::regex::icase`,默认 collation 不区分大小写 |
+| 隐式数值转换 | 算术/比较表达式里 string↔numeric 按数值提升(`'5' + 3 = 8`);非数值字符串参与数值运算返回 NULL。**已知例外**:`列 = '数字字符串'` 的等值比较仍按字符串语义(`sal = '9000'` 不命中),列入 sqllogictest GAP |
+| NULL 传播 | `length` / `char_length` / `round` / `instr` / `locate` 等 NULL-safe |
+| `NULLIF` / `IF` | `NULLIF` 修复(此前恒 NULL);`IF` 求值已实现,但解析器在函数名位置按关键字处理 → 1064,列入 GAP |
+| `ROUND` | DECIMAL 字面量按定点字符串舍入,`ROUND(1.005,2)=1.01` |
+| 未知函数 | `raise_error(1305, "42000", "FUNCTION ... does not exist")`;窗口/聚合/日期/CAST 等已知未实现函数仍按白名单静默 NULL |
+| 连接函数 | `connection_id` / `last_insert_id` / `row_count` / `found_rows` / `session_user` / `system_user` / `current_role` |
+| 字符串函数 | `upper/lower/trim/ltrim/rtrim/substr/substring/left/right/replace/reverse/lpad/rpad/repeat/concat_ws/ascii/ord/char` |
+| 数值函数 | `ceil/ceiling/floor/mod/power/pow/sqrt/sign/truncate/greatest/least` |
+| 错误通道 | Executor 新增 `eval_errno_` / `eval_sql_state_`,表达式层错误经 `take_eval_error()` 上抛为 MySQL ERR 包 |
+
+> 其中 `left` / `right` / `truncate` 的求值实现已存在于 `expr.cpp`,但解析器在这些位置按关键字处理(1064),仍需在函数调用上下文放开;`cast` / `convert` 同属此类。
+
+**B. 协议(`src/net/mysql_proto.cpp` / `infer_type`)**
+
+- BIGINT 极值:整型列且值为整型 double 时以 `"{:.0f}"` 文本下发,不再出现 `-9.223372036854776e+18`
+- 表达式结果列类型:BinaryOp / Case / 窗口函数由 `infer_type` 推断;UNION 左右类型不一致统一为 `Varchar`
+- `SELECT 1` 列类型为 LONGLONG;`COM_STMT_EXECUTE` 字符串参数绑定整数列时按数值命中
+- `COM_STMT_PREPARE` 语法错误返回 1064
+
+**C. SQL 校验(`src/executor/executor.cpp` / `src/parser/parser.cpp`)**
+
+| 错误码 | 场景 |
+|---|---|
+| 1048 | `coerce_row`:NOT NULL 写入 NULL;AUTO_INCREMENT 显式 NULL 分配下一个值 |
+| 1054 | 未知列(SELECT 表达式路径 + INSERT 列清单) |
+| 1136 | INSERT 列数与值数不一致 |
+| 1366 / 1264 | 整数列写入非数字 / 超出 TINYINT..BIGINT 范围 |
+| 1406 | VARCHAR / CHAR 超长 |
+| 1064 | 缺投影列表(`SELECT FROM t`) |
+| 1242 / 1241 | 多行标量子查询 / IN 子查询多列 |
+| 1248 | 派生表缺别名 |
+| 1049 | 限定名指向不存在的库 |
+| 1111 / 1055 / 3593 | 嵌套聚合 / ONLY_FULL_GROUP_BY / 窗口函数出现在 WHERE |
+| 1222 | UNION 列数不匹配 |
+
+**D. 查询能力**
+
+- 逗号连接在 `parse_from` 转成隐式 `CROSS JOIN`
+- `RIGHT JOIN` 补齐右表无匹配行(左列 NULL)
+- 链式 JOIN 列索引只登记 alias-or-real-name,避免 `d.id` 覆盖 `d2.id`
+- 空输入 + `GROUP BY` 不再产出伪行;GROUP BY 结果应用 LIMIT/OFFSET
+- 窗口函数块重写:`ROW_NUMBER` 与 `COUNT/SUM/AVG/MIN/MAX ... OVER (PARTITION BY … ORDER BY …)` 逐行返回;`RANK()` 结果与 MySQL 一致(用例期望值待校正),`DENSE_RANK` 返回行号而非稠密名次(已知缺陷),`LAG/LEAD/COUNT(*) OVER/命名窗口` 未实现
+- LIMIT/OFFSET 越界统一返回空集(UNION / 融合聚合 / 聚合 / 主路径 4 处)
+
+**E. 元数据与系统变量**
+
+- `information_schema.STATISTICS` / `KEY_COLUMN_USAGE` 从 `primary_key_cols` 生成主键索引与约束行
+- `SHOW COLUMNS` 的 `Default` 列取列默认值字面量
+- `SELECT @@autocommit` 返回 `1`/`0`(`SHOW VARIABLES` 仍 `ON`/`OFF`)
+- `lower_case_table_names` 统一为 `1`
+- `Session::setIsolation` 不再做级别提升映射,按请求级别原样报告;会话默认级别为 `REPEATABLE READ`
+
+**F. 测试与遗留**
+
+- SLT **1184 / 1071 / 113 / 0**、协议 **42/42**、持久化 **13/2/0**
+- 清除 52 个已通过的 `gap` 标记;4 处测试期望值按 MySQL 语义修正(NULL 自连接、`LIKE '%a%'` 大小写、RIGHT JOIN 行数、SHOW COLUMNS 列对齐)
+- 遗留 2 项持久化 GAP:**优雅关闭 / checkpoint**(`SIGINT`/`SIGTERM` 未处理,`sql.data` 不生成);WAL 回放与未提交事务不恢复本身正确
 
 ### 本轮交付(v2.0.4 融合聚合 + UNION ALL)
 
@@ -235,6 +305,9 @@ employees 标准数据集(392 万行)实测:3 表 JOIN 求均薪 77s vs MySQL 6.
 | 测试 | 结果 |
 |---|---|
 | `ctest -C Debug` | **12/12**(含 `smoke_m6_isolation`、`smoke_m6_hsqldb_matrix`、`smoke_m6_session_db`、`dbx_probe` 与 v2.0.5 新增的 `smoke_sql_keywords` / `smoke_sql_syntax`);`smoke_m25_e2e` 端口统一为 3307,启动 server 后全通过 |
+| `sqllogictest`(外部套件 `SQLTinyTest/testcase`) | **1184 项 · PASS 1071 / GAP 113 / FAIL 0**(首轮 971/146/67) |
+| `test_protocol.py` | **42 / 42 PASS** — 握手、COM_QUERY/PING/INIT_DB、COM_STMT_*,多连接隔离 |
+| `test_persistence.py` | **13 PASS / 2 GAP / 0 FAIL** — WAL 回放、强杀恢复、未提交不恢复、DROP TABLE 持久化;缺优雅关闭 checkpoint |
 | `smoke_sql_keywords` | 649 PASS / 0 FAIL — 180 个常用关键词大小写不敏感、运算符、字面量、注释、行列号、词法错误、Parser 分发 |
 | `smoke_sql_syntax` | 160 PASS / 0 FAIL / 15 GAP — 常用 SQL 语法端到端矩阵(未实现语法记 GAP) |
 | `smoke_m6_isolation` | 451/451 PASS — 四级别、脏读、快照、冲突、autocommit、SAVEPOINT、DML 回滚 |
@@ -252,18 +325,18 @@ employees 标准数据集(392 万行)实测:3 表 JOIN 求均薪 77s vs MySQL 6.
 | `test_sqlalchemy.py` | 33 PASS / 0 FAIL / 0 GAP(原 #5–#8 与 DESCRIBE/SHOW FULL TABLES 反射限制均已修复) |
 | **实测客户端** | DBX/dbExpress(Delphi)连接 + 打开表 + 浏览索引/列正常;类 Navicat 图形工具浏览表/索引/列正常;PyMySQL / mysql CLI 正常 |
 
-### 版本标识(v2.0.5)
+### 版本标识(v2.0.6)
 
 | 位置 | 内容 |
 |---|---|
-| `CMakeLists.txt` | `project(SQLTiny VERSION 2.0.5 LANGUAGES CXX)` |
-| `vcpkg.json` | `"version-string": "2.0.5"` |
-| `src/main.cpp` | 启动横幅 `SQLTiny v2.0.5 — MySQL wire protocol server` |
+| `CMakeLists.txt` | `project(SQLTiny VERSION 2.0.6 LANGUAGES CXX)` |
+| `vcpkg.json` | `"version-string": "2.0.6"` |
+| `src/main.cpp` | 启动横幅 `SQLTiny v2.0.6 — MySQL wire protocol server` |
 | `src/version.rc.in` | exe Windows 版本资源(经 configure_file 注入 CMake 版本),右键属性页显示产品名 / 版本 / 版权 |
 | `README.md` / `CODEPLAN.md` | 本版本变更清单与验证基线 |
 | 协议层 `@@version` / `VERSION()` | 仍为 `5.7.0-SQLTiny` —— MySQL 客户端兼容用伪装版本,**不是**产品版本,不随产品版本改动 |
 
-> v1.1.0 统一了此前分散的版本号(启动横幅 `v1.0`、manifest `0.1.0`、CMake 未声明),交付 Prepared Statement、information_schema、SHOW 扩展与 EOF 帧兼容。**v1.1.2** 在此基础上交付 DBeaver / Database Client 实测兼容修复(DDL 选项跳过、SHOW TABLES WHERE/LIKE 过滤、`REFERENTIAL_CONSTRAINTS` 虚拟表、系统变量补齐、双引号与裸关键字别名、`INSTR/LOCATE/POSITION` 函数)。**v1.2.0** 交付 JOIN 性能优化(Hash Join + 预建列索引 + 成本估算 + `EXPLAIN`),INNER/LEFT JOIN 约 77x / 62x 提速,详见 README「v1.2.0 更新内容」。**v1.2.5** 交付大表 JOIN 主键索引利用(PK 前缀索引探测 + WHERE 谓词下推)与 SUM(DECIMAL) 列类型一致性修复,employees 3 表 JOIN 77s→23.8s、单员工⋈薪酬 28s→2.3s,详见 README「v1.2.5 更新内容」。**v2.0.0** 主键索引整体升级 B+ 树,索引级点查 +19% / 前缀扫描 +24% / 全量遍历 7.6x,端到端 employees JOIN 18.99s→18.42s(Release 基线),详见 README「v2.0.0 更新内容」。**v2.0.1** 优化 3 表 JOIN 执行性能(ExecContext 零拷贝、idx_probe 跳过右表物化、聚合下推到 PK 前缀探测),employees 3 表 JOIN 18.25s→1.97s(9.3x),与 MySQL 差距 11.7x→1.25x,详见 README「v2.0.1 更新内容」。**v2.0.2** 扩展聚合下推覆盖面(WHERE 按表侧拆分、哈希等值 JOIN 也下推、子查询/CASE 不下推加固),高薪员工数 2.76s→0.94s、2 表哈希计行 0.37s→0.13s,详见 README「v2.0.2 更新内容」。**v2.0.3** 让主键点查走索引前缀探测(`WHERE PK首列=同族字面量`),并以 `dead_rows_` / `has_dead_rows()` 在存在逻辑删除历史时回退全表扫描以保 MVCC 可见性,employees 点查 74ms→0.13ms、salaries 678ms→0.17ms,详见 README「v2.0.3 更新内容」。**v2.0.4** 增加单表聚合单遍扫描快路径(`SUM(salary)` 2.97s→0.35s、`WHERE salary>100000` 计行 0.774s→0.248s)并实现 UNION / UNION ALL(去重、链式、尾部 ORDER BY/LIMIT)与 `ORDER BY 1` 位置序号,详见 README「v2.0.4 更新内容」。**v2.0.5** 补齐复杂查询能力与正确性:WITH/递归 CTE、标量子查询、EXISTS、FROM 派生表、COUNT(DISTINCT)、BETWEEN、`ROW_NUMBER() OVER`、YEAR/MONTH/DAY 等,GROUP BY 别名与内嵌聚合修复;性能上 GROUP BY 高基数分桶 O(n²)→O(1)、相关子查询外层列等值走 PK 前缀探测、递归 CTE 改增量工作集,`compare_employees.py` 扩至 39 条并达 **39/39 MATCH**,详见 README「v2.0.5 更新内容」。
+> v1.1.0 统一了此前分散的版本号(启动横幅 `v1.0`、manifest `0.1.0`、CMake 未声明),交付 Prepared Statement、information_schema、SHOW 扩展与 EOF 帧兼容。**v1.1.2** 在此基础上交付 DBeaver / Database Client 实测兼容修复(DDL 选项跳过、SHOW TABLES WHERE/LIKE 过滤、`REFERENTIAL_CONSTRAINTS` 虚拟表、系统变量补齐、双引号与裸关键字别名、`INSTR/LOCATE/POSITION` 函数)。**v1.2.0** 交付 JOIN 性能优化(Hash Join + 预建列索引 + 成本估算 + `EXPLAIN`),INNER/LEFT JOIN 约 77x / 62x 提速,详见 README「v1.2.0 更新内容」。**v1.2.5** 交付大表 JOIN 主键索引利用(PK 前缀索引探测 + WHERE 谓词下推)与 SUM(DECIMAL) 列类型一致性修复,employees 3 表 JOIN 77s→23.8s、单员工⋈薪酬 28s→2.3s,详见 README「v1.2.5 更新内容」。**v2.0.0** 主键索引整体升级 B+ 树,索引级点查 +19% / 前缀扫描 +24% / 全量遍历 7.6x,端到端 employees JOIN 18.99s→18.42s(Release 基线),详见 README「v2.0.0 更新内容」。**v2.0.1** 优化 3 表 JOIN 执行性能(ExecContext 零拷贝、idx_probe 跳过右表物化、聚合下推到 PK 前缀探测),employees 3 表 JOIN 18.25s→1.97s(9.3x),与 MySQL 差距 11.7x→1.25x,详见 README「v2.0.1 更新内容」。**v2.0.2** 扩展聚合下推覆盖面(WHERE 按表侧拆分、哈希等值 JOIN 也下推、子查询/CASE 不下推加固),高薪员工数 2.76s→0.94s、2 表哈希计行 0.37s→0.13s,详见 README「v2.0.2 更新内容」。**v2.0.3** 让主键点查走索引前缀探测(`WHERE PK首列=同族字面量`),并以 `dead_rows_` / `has_dead_rows()` 在存在逻辑删除历史时回退全表扫描以保 MVCC 可见性,employees 点查 74ms→0.13ms、salaries 678ms→0.17ms,详见 README「v2.0.3 更新内容」。**v2.0.4** 增加单表聚合单遍扫描快路径(`SUM(salary)` 2.97s→0.35s、`WHERE salary>100000` 计行 0.774s→0.248s)并实现 UNION / UNION ALL(去重、链式、尾部 ORDER BY/LIMIT)与 `ORDER BY 1` 位置序号,详见 README「v2.0.4 更新内容」。**v2.0.5** 补齐复杂查询能力与正确性:WITH/递归 CTE、标量子查询、EXISTS、FROM 派生表、COUNT(DISTINCT)、BETWEEN、`ROW_NUMBER() OVER`、YEAR/MONTH/DAY 等,GROUP BY 别名与内嵌聚合修复;性能上 GROUP BY 高基数分桶 O(n²)→O(1)、相关子查询外层列等值走 PK 前缀探测、递归 CTE 改增量工作集,`compare_employees.py` 扩至 39 条并达 **39/39 MATCH**,详见 README「v2.0.5 更新内容」。**v2.0.6** 由外部 sqllogictest 套件驱动,把 SQL 语义与报错对齐 MySQL:NULL 排序/三值逻辑、LIKE 大小写、BIGINT 与表达式列类型、SQL 校验(1048/1054/1136/1366/1406/1242/1241/1111/1055/1222/3593)、RIGHT JOIN/逗号连接、窗口聚合、information_schema 主键元数据、字符串与数值函数;SLT **1184 项 PASS 1071 / GAP 113 / FAIL 0**,协议 **42/42**,详见 README「v2.0.6 更新内容」。
 
 ---
 
@@ -350,7 +423,7 @@ employees 标准数据集(392 万行)实测:3 表 JOIN 求均薪 77s vs MySQL 6.
 
 ## 3. 目录结构(实际产物)
 
-> 立项时的设计稿路径见 §2 落地偏差说明。以下为 `d:\Cplusplus\SQLTiny` 当前真实结构。
+> 立项时的设计稿路径见 §2 落地偏差说明。以下为仓库根目录当前真实结构。
 
 ```
 SQLTiny/
@@ -943,6 +1016,12 @@ SQLTiny 第一版可以简化:
    - **超长事务**:配合 #3 版本回收(长事务导致 `versions_` 不压缩、内存增长),加"开事务→持续写入→长时 hold→崩溃恢复"专项压测
 
 7. **employees 数据集验证完成(2026-11-14)**:与真实 MySQL 同库对比 14/14 MATCH;同步修复 Navicat 2013(握手 `CLIENT_CONNECT_ATTRS` 残留字节)、DATE MIN/MAX(年份截断)、整型 SUM 字符串回包三项。**剩余差距**:大表 JOIN 疑似未利用主键索引走全表扫描(3 表 JOIN 77s vs MySQL 6.5s,待补 JOIN 索引利用);AVG 仍以字符串回包 —— 详见 §0 v1.2.2 交付。
+
+8. **sqllogictest 套件收尾(2026-11-16)**:FAIL 已清零,剩余 113 项 GAP 按域排序:函数 24(日期 14)、DDL/DML 方言 31、高级查询 19(窗口 Rank/LAG/LEAD、FULL OUTER JOIN、集合运算)、元数据 16、事务 5、表达式 15、兼容/回归 3。优先级:
+   - **持久化**:补 `SIGINT`/`SIGTERM` → checkpoint → truncate WAL,消除 persistence 的 2 项 GAP
+   - **函数**:日期函数优先;解析器放开 `IF/LEFT/RIGHT/TRUNCATE/CAST/CONVERT` 的函数名上下文
+   - **DDL/DML 方言**:CTAS、VIEW、INDEX、UNIQUE/CHECK、ALTER、TRUNCATE、INSERT 方言族
+   - **高级查询**:窗口方向先校正 `RANK()` 用例期望值、修复 `DENSE_RANK()`,再补 `LAG/LEAD/COUNT(*) OVER`;以及 `FULL OUTER JOIN`、`JOIN USING`、`INTERSECT/EXCEPT`
 
 ---
 

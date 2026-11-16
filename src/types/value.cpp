@@ -56,8 +56,11 @@ std::string Value::to_string() const {
 }
 
 int Value::compare(const Value& other) const {
-    // NULL 相等 / 与任何值比较都"未知",这里按 SQL = 语义处理,调用方决定
-    if (is_null() || other.is_null()) return 0;
+    // 排序语义:NULL 视为最小值(MySQL ASC 时 NULL 在最前,DESC 时在最后)。
+    // 比较/等值判定由调用方先用 is_null() 短路,本函数只用于排序与确定性比较。
+    if (is_null() && other.is_null()) return 0;
+    if (is_null()) return -1;
+    if (other.is_null()) return 1;
 
     // 数值类统一提升到 double 比较
     if (is_numeric() && other.is_numeric()) {

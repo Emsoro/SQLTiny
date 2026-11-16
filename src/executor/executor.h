@@ -155,6 +155,9 @@ private:
     types::Value eval_function(const std::string& name, const std::vector<ast::ExprPtr>& args,
                                bool star, const ExecContext& ctx) const;
 
+    /// 表达式层报错:写 eval_errno_/eval_sql_state_/eval_error_,由执行器转换为 ERR 包
+    void raise_error(uint16_t errno_, const char* sql_state, std::string msg) const;
+
     // 子查询缓存:按 Subquery 表达式节点指针键控,每条顶层语句开始时清空。
     // 非相关子查询只执行一次(P1:IN 子查询逐行重算 → 物化)。
     struct SqEntry {
@@ -164,6 +167,8 @@ private:
     mutable std::unordered_map<const void*, SqEntry> sq_cache_;
     mutable std::vector<storage::Row> sq_scratch_;   // 相关子查询的临时结果
     mutable std::string eval_error_;                 // 子查询执行错误向上传播
+    mutable uint16_t    eval_errno_ = 0;             // 表达式层错误码(默认 1064)
+    mutable std::string eval_sql_state_ = "42000";   // 表达式层 SQLSTATE
     mutable int exec_depth_ = 0;
 };
 

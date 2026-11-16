@@ -3,6 +3,7 @@
 #include "types/value.h"
 #include <fmt/format.h>
 #include <cstring>
+#include <cmath>
 #include <random>
 #include <chrono>
 #include <vector>
@@ -384,6 +385,15 @@ std::vector<std::vector<uint8_t>> encode_result_set(
             if (v.is_null()) {
                 w.write_null();
             } else {
+                auto ctype = (i < rs.column_types.size()) ? rs.column_types[i] : types::SqlType::Varchar;
+                // 整数列声明 LONGLONG/LONG 时,整数值的 double 必须按整数文本下发,
+                // 否则客户端按列类型做 int() 会因 "-9.2e+18" 之类失败。
+                if (v.kind == types::Value::Kind::Double && types::is_integer(ctype) &&
+                    std::isfinite(v.v_double) && v.v_double == std::floor(v.v_double) &&
+                    std::fabs(v.v_double) < 9.3e18) {
+                    w.write_lenenc_string(fmt::format("{:.0f}", v.v_double));
+                    continue;
+                }
                 std::string txt = value_to_text(v);
                 w.write_lenenc_string(txt);
             }

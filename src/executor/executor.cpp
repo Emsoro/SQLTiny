@@ -190,7 +190,7 @@ std::string Executor::default_db() const {
 
 ResultSet Executor::execute(const ast::Statement& stmt) {
     // 顶层语句开始时清空子查询缓存(缓存键是 AST 节点指针,跨语句会失效)
-    if (exec_depth_ == 0) { sq_cache_.clear(); eval_error_.clear(); }
+    if (exec_depth_ == 0) { sq_cache_.clear(); eval_error_.clear(); eval_errno_ = 0; }
     struct DepthGuard {
         int& d;
         explicit DepthGuard(int& x) : d(x) { ++d; }
@@ -284,6 +284,92 @@ ResultSet Executor::exec_insert(const ast::InsertStmt& s) {
     }
     auto& def = tbl->def();
 
+    // 列名列表校验:未知列(1054)/ 列数与值数不匹配(1136)
+    for (auto& cname : s.columns) {
+        if (def.column_index(cname) < 0) {
+            r.ok = false; r.mysql_errno = 1054; r.sql_state = "42S22";
+            r.error_message = fmt::format("Unknown column '{}' in 'field list'", cname);
+            return r;
+        }
+    }
+    for (auto& expr_row : s.value_rows) {
+        size_t expect = s.columns.empty() ? def.columns.size() : s.columns.size();
+        if (!expr_row.empty() && expr_row.size() != expect) {
+            r.ok = false; r.mysql_errno = 1136; r.sql_state = "21S01";
+            r.error_message = fmt::format(
+                "Column count doesn't match value count at row 1 (expected {}, got {})",
+                expect, expr_row.size());
+            return r;
+        }
+    }
+
+    // 严格模式取值校验:NOT NULL(1048) / 非法整数(1366) / 超长字符串(1406) / 数值越界(1264)
+    auto coerce_row = [&](storage::Row& row) -> bool {
+        for (size_t i = 0; i < def.columns.size() && i < row.size(); ++i) {
+            auto& cd = def.columns[i];
+            auto& v = row[i];
+            if (v.is_null()) {
+                // AUTO_INCREMENT 列显式给 NULL → 分配下一个值(MySQL 行为)
+                if (cd.is_auto_increment) {
+                    v = types::Value::make_int(tbl->next_auto_increment());
+                    continue;
+                }
+                if (!cd.nullable) {
+                    r.ok = false; r.mysql_errno = 1048; r.sql_state = "23000";
+                    r.error_message = fmt::format("Column '{}' cannot be null", cd.name);
+                    return false;
+                }
+                continue;
+            }
+            auto t = cd.type.type;
+            if (types::is_integer(t)) {
+                int64_t iv = 0;
+                if (v.is_double()) {
+                    double d = v.v_double;
+                    long double lo = -2147483649.0L, hi = 2147483648.0L;
+                    if (t == types::SqlType::BigInt) { lo = -9.2233720368547758e18L; hi = 9.2233720368547758e18L; }
+                    if (static_cast<long double>(d) < lo || static_cast<long double>(d) > hi) {
+                        r.ok = false; r.mysql_errno = 1264; r.sql_state = "22003";
+                        r.error_message = fmt::format("Out of range value for column '{}' at row 1", cd.name);
+                        return false;
+                    }
+                    iv = static_cast<int64_t>(d);
+                    v = types::Value::make_int(iv);
+                } else if (!v.try_to_int(iv)) {
+                    r.ok = false; r.mysql_errno = 1366; r.sql_state = "HY000";
+                    r.error_message = fmt::format(
+                        "Incorrect integer value: '{}' for column '{}' at row 1",
+                        v.is_string() ? v.v_str : v.to_string(), cd.name);
+                    return false;
+                } else {
+                    v = types::Value::make_int(iv);
+                }
+                if (t == types::SqlType::Int && (iv > 2147483647LL || iv < -2147483648LL)) {
+                    r.ok = false; r.mysql_errno = 1264; r.sql_state = "22003";
+                    r.error_message = fmt::format("Out of range value for column '{}' at row 1", cd.name);
+                    return false;
+                }
+                if (t == types::SqlType::SmallInt && (iv > 32767 || iv < -32768)) {
+                    r.ok = false; r.mysql_errno = 1264; r.sql_state = "22003";
+                    r.error_message = fmt::format("Out of range value for column '{}' at row 1", cd.name);
+                    return false;
+                }
+                if (t == types::SqlType::TinyInt && (iv > 127 || iv < -128)) {
+                    r.ok = false; r.mysql_errno = 1264; r.sql_state = "22003";
+                    r.error_message = fmt::format("Out of range value for column '{}' at row 1", cd.name);
+                    return false;
+                }
+            } else if (t == types::SqlType::Varchar || t == types::SqlType::Char) {
+                if (v.is_string() && cd.type.length > 0 && v.v_str.size() > cd.type.length) {
+                    r.ok = false; r.mysql_errno = 1406; r.sql_state = "22001";
+                    r.error_message = fmt::format("Data too long for column '{}' at row 1", cd.name);
+                    return false;
+                }
+            }
+        }
+        return true;
+    };
+
     int affected = 0;
     for (auto& expr_row : s.value_rows) {
         storage::Row row;
@@ -325,6 +411,8 @@ ResultSet Executor::exec_insert(const ast::InsertStmt& s) {
                 else row.push_back(types::Value::make_null());
             }
         }
+
+        if (!coerce_row(row)) return r;
 
         int64_t rid = -1;
         uint64_t create_scn = core::Database::instance().wal().next_scn();
@@ -389,6 +477,7 @@ ResultSet Executor::exec_insert(const ast::InsertStmt& s) {
                     row.push_back(eval(*cdef.default_value, ctx0));
                 } else row.push_back(types::Value::make_null());
             }
+            if (!coerce_row(row)) return r;
             int64_t rid = -1;
             uint64_t create_scn = core::Database::instance().wal().next_scn();
             if (!tbl->insert(row, &rid, create_scn, writer_txn(session_))) {
@@ -739,9 +828,23 @@ ResultSet Executor::exec_select(const ast::SelectStmt& s, const ExecContext* out
     r.column_names = std::move(left.column_names);
     r.column_types = std::move(left.column_types);
     r.rows = std::move(left.rows);
-    size_t ncols = r.column_names.size();
-    if (!r.rows.empty()) ncols = std::max(ncols, r.rows[0].size());
-    if (!right.rows.empty()) ncols = std::max(ncols, right.rows[0].size());
+    // UNION 两侧列数必须一致(MySQL 1222)
+    size_t left_cols = r.column_names.size();
+    size_t right_cols = right.column_names.size();
+    if (left_cols != right_cols) {
+        ResultSet er;
+        er.ok = false; er.mysql_errno = 1222; er.sql_state = "21000";
+        er.error_message = "The used SELECT statements have a different number of columns";
+        return er;
+    }
+    // 类型统一:两侧列类型不同 → 提升为字符串(避免列声明 INT 却下发文本导致客户端崩溃)
+    for (size_t i = 0; i < r.column_types.size() && i < right.column_types.size(); ++i) {
+        if (r.column_types[i] != right.column_types[i])
+            r.column_types[i] = types::SqlType::Varchar;
+    }
+    size_t ncols = left_cols;
+    if (ncols == 0 && !r.rows.empty()) ncols = r.rows[0].size();
+    if (ncols == 0 && !right.rows.empty()) ncols = right.rows[0].size();
     while (r.column_names.size() < ncols) {
         r.column_names.push_back(fmt::format("col{}", r.column_names.size() + 1));
         r.column_types.push_back(types::SqlType::Varchar);
@@ -794,8 +897,10 @@ ResultSet Executor::exec_select(const ast::SelectStmt& s, const ExecContext* out
         });
     }
     int64_t off = tail.offset.value_or(0);
-    if (off > 0 && static_cast<size_t>(off) < r.rows.size())
-        r.rows.erase(r.rows.begin(), r.rows.begin() + off);
+    if (off > 0) {
+        if (static_cast<size_t>(off) >= r.rows.size()) r.rows.clear();
+        else r.rows.erase(r.rows.begin(), r.rows.begin() + off);
+    }
     if (tail.limit && *tail.limit >= 0 && static_cast<size_t>(*tail.limit) < r.rows.size())
         r.rows.resize(static_cast<size_t>(*tail.limit));
     r.affected_rows = static_cast<int64_t>(r.rows.size());
@@ -807,9 +912,13 @@ ResultSet Executor::exec_select_body(const ast::SelectStmt& s, const ExecContext
     ResultSet r;
     auto take_eval_error = [&]() -> ResultSet {
         ResultSet er;
-        er.ok = false; er.mysql_errno = 1064; er.sql_state = "42000";
+        er.ok = false;
+        er.mysql_errno = eval_errno_ ? eval_errno_ : 1064;
+        er.sql_state = eval_errno_ ? eval_sql_state_ : std::string("42000");
         er.error_message = eval_error_;
         eval_error_.clear();
+        eval_errno_ = 0;
+        eval_sql_state_ = "42000";
         return er;
     };
 
@@ -822,7 +931,21 @@ ResultSet Executor::exec_select_body(const ast::SelectStmt& s, const ExecContext
     std::function<types::SqlType(const ast::Expression&, const std::vector<_SlotRef>*)> infer_type =
         [&](const ast::Expression& e, const std::vector<_SlotRef>* slots) -> types::SqlType {
         using namespace types;
-        if (e.is_window) return SqlType::BigInt;   // ROW_NUMBER() 返回 BIGINT
+        if (e.is_window) {
+            std::string wl = e.func_name;
+            std::transform(wl.begin(), wl.end(), wl.begin(),
+                           [](unsigned char c) { return std::tolower(c); });
+            if (wl == "row_number" || wl == "rank" || wl == "dense_rank" ||
+                wl == "count" || wl == "ntile")
+                return SqlType::BigInt;
+            if (wl == "avg" || wl == "percent_rank" || wl == "cume_dist")
+                return SqlType::Double;
+            if (slots && !e.func_args.empty()) {
+                auto t = infer_type(*e.func_args[0], slots);
+                if (t != SqlType::Null) return t;
+            }
+            return SqlType::Double;
+        }
         if (e.kind == ast::ExprKind::Column && slots) {
             for (auto& sl : *slots) {
                 for (auto& col : sl.def->columns) {
@@ -839,6 +962,37 @@ ResultSet Executor::exec_select_body(const ast::SelectStmt& s, const ExecContext
             if (!e.case_whens.empty() && e.case_whens[0].second)
                 return infer_type(*e.case_whens[0].second, slots);
             return SqlType::Varchar;
+        }
+        if (e.kind == ast::ExprKind::BinaryOp) {
+            switch (e.binop) {
+                case ast::BinOp::Eq: case ast::BinOp::Ne:
+                case ast::BinOp::Lt: case ast::BinOp::Gt:
+                case ast::BinOp::Le: case ast::BinOp::Ge:
+                case ast::BinOp::And: case ast::BinOp::Or:
+                    return SqlType::Boolean;
+                case ast::BinOp::Concat:
+                    return SqlType::Varchar;
+                default: break;
+            }
+            auto lt = e.lhs ? infer_type(*e.lhs, slots) : SqlType::Null;
+            auto rt = e.rhs ? infer_type(*e.rhs, slots) : SqlType::Null;
+            if (e.binop == ast::BinOp::Slash) return SqlType::Double;
+            // 只有两侧都是已知数值类型才给出数值列类型;否则保持字符串(安全兜底)
+            if (!is_numeric(lt) || !is_numeric(rt)) return SqlType::Varchar;
+            if (lt == SqlType::Double || rt == SqlType::Double ||
+                lt == SqlType::Decimal || rt == SqlType::Decimal ||
+                lt == SqlType::Float || rt == SqlType::Float)
+                return SqlType::Double;
+            if (is_integer(lt) && is_integer(rt))
+                return static_cast<int>(lt) >= static_cast<int>(rt) ? lt : rt;
+            return SqlType::Double;
+        }
+        if (e.kind == ast::ExprKind::UnaryOp) {
+            if (e.unary == ast::Expression::UnaryKind::Not ||
+                e.unary == ast::Expression::UnaryKind::IsNull ||
+                e.unary == ast::Expression::UnaryKind::IsNotNull)
+                return SqlType::Boolean;
+            return e.operand ? infer_type(*e.operand, slots) : SqlType::BigInt;
         }
         if (e.kind == ast::ExprKind::Literal) {
             switch (e.literal.kind) {
@@ -926,9 +1080,22 @@ ResultSet Executor::exec_select_body(const ast::SelectStmt& s, const ExecContext
             if (expr->kind == ast::ExprKind::Column) name = expr->column_name;
             r.column_names.push_back(name);
             r.column_types.push_back(infer_type(*expr, nullptr));
+        }
+        // WHERE 在无表查询里同样生效:SELECT 1 WHERE FALSE → 空结果集(列元数据仍要下发)
+        if (s.where && !to_bool(eval(*s.where, ctx))) {
+            if (!eval_error_.empty()) return take_eval_error();
+            return r;
+        }
+        for (auto& [expr, alias] : s.columns) {
+            (void)alias;
             row.push_back(eval(*expr, ctx));
         }
         if (!eval_error_.empty()) return take_eval_error();
+        // LIMIT / OFFSET:LIMIT 0 → 空集;OFFSET ≥ 1 → 空集
+        int64_t nofrom_off = s.offset.value_or(0);
+        int64_t nofrom_lim = s.limit.value_or(1);
+        if (nofrom_off > 0) return r;
+        if (nofrom_lim <= 0) return r;
         r.rows.push_back(row);
         return r;
     }
@@ -947,11 +1114,22 @@ ResultSet Executor::exec_select_body(const ast::SelectStmt& s, const ExecContext
     for (size_t i = 0; i < s.from_tables.size(); ++i) {
         if (i < s.from_derived.size() && s.from_derived[i] &&
             s.from_derived[i]->kind == ast::StmtKind::Select) {
+            // 派生表必须有别名(MySQL 1248)
+            if (s.from_tables[i].rfind("__derived", 0) == 0) {
+                r.ok = false; r.mysql_errno = 1248; r.sql_state = "42000";
+                r.error_message = "Every derived table must have its own alias";
+                return r;
+            }
             if (!add_derived(s.from_tables[i], *s.from_derived[i])) return r;
         }
     }
     for (auto& jc : s.joins) {
         if (jc.derived && jc.derived->kind == ast::StmtKind::Select) {
+            if (jc.table_name.rfind("__join_derived", 0) == 0) {
+                r.ok = false; r.mysql_errno = 1248; r.sql_state = "42000";
+                r.error_message = "Every derived table must have its own alias";
+                return r;
+            }
             if (!add_derived(jc.table_name, *jc.derived)) return r;
         }
     }
@@ -975,6 +1153,12 @@ ResultSet Executor::exec_select_body(const ast::SelectStmt& s, const ExecContext
     };
     auto* tbl = resolve_table(primary_table);
     if (!tbl) {
+        auto [missing_db, missing_tbl] = split_qname(primary_table);
+        if (!missing_db.empty() && !catalog_.database_exists(missing_db)) {
+            r.ok = false; r.mysql_errno = 1049; r.sql_state = "42000";
+            r.error_message = fmt::format("Unknown database '{}'", missing_db);
+            return r;
+        }
         r.ok = false; r.mysql_errno = 1146; r.sql_state = "42S02";
         r.error_message = fmt::format("Table '{}' doesn't exist", primary_table);
         return r;
@@ -1024,12 +1208,12 @@ ResultSet Executor::exec_select_body(const ast::SelectStmt& s, const ExecContext
         for (auto& slot : slots) {
             for (size_t i = 0; i < slot.def->columns.size(); ++i) {
                 std::string bare = slot.def->columns[i].name;
-                std::string qualified = slot.real_name + "." + bare;
-                std::string alias_q = slot.alias.empty() ? "" : (slot.alias + "." + bare);
                 int offset = slot.col_offset + static_cast<int>(i);
                 base_col_index[bare] = offset;
-                base_col_index[qualified] = offset;
-                if (!alias_q.empty()) base_col_index[alias_q] = offset;
+                // MySQL 语义:表一旦起了别名,原表名不能再作为限定符。
+                // (同名表自连接 + 别名时必须严格区分,否则 d.id 会互相覆盖)
+                if (slot.alias.empty()) base_col_index[slot.real_name + "." + bare] = offset;
+                else base_col_index[slot.alias + "." + bare] = offset;
                 ++name_count[bare];
             }
         }
@@ -1202,6 +1386,8 @@ ResultSet Executor::exec_select_body(const ast::SelectStmt& s, const ExecContext
     std::function<bool(const ast::Expression&)> contains_agg =
         [&](const ast::Expression& e) -> bool {
             if (e.kind == ast::ExprKind::FunctionCall) {
+                // 窗口函数(SUM(...) OVER (...))不是分组聚合,由投影阶段的窗口求值器处理
+                if (e.is_window) return false;
                 if (is_agg_func(e.func_name)) return true;
                 for (auto& a : e.func_args) if (a && contains_agg(*a)) return true;
             }
@@ -1221,6 +1407,63 @@ ResultSet Executor::exec_select_body(const ast::SelectStmt& s, const ExecContext
     bool has_agg = !s.group_by.empty() || static_cast<bool>(s.having);
     for (auto& [e, _] : s.columns) if (contains_agg(*e)) has_agg = true;
 
+    // ---- 静态语义校验(在扫描数据前失败,避免先做无用功) ----
+    auto make_error = [&](uint16_t err, const char* state, std::string msg) -> ResultSet {
+        ResultSet er;
+        er.ok = false; er.mysql_errno = err; er.sql_state = state;
+        er.error_message = std::move(msg);
+        return er;
+    };
+    {
+        // 窗口函数不允许出现在 WHERE(MySQL 3593)
+        std::function<bool(const ast::Expression&)> has_window =
+            [&](const ast::Expression& e) -> bool {
+                if (e.kind == ast::ExprKind::FunctionCall && e.is_window) return true;
+                if (e.lhs && has_window(*e.lhs)) return true;
+                if (e.rhs && has_window(*e.rhs)) return true;
+                if (e.operand && has_window(*e.operand)) return true;
+                if (e.case_base && has_window(*e.case_base)) return true;
+                for (auto& [w, r] : e.case_whens) {
+                    if (w && has_window(*w)) return true;
+                    if (r && has_window(*r)) return true;
+                }
+                if (e.case_else && has_window(*e.case_else)) return true;
+                for (auto& a : e.func_args) if (a && has_window(*a)) return true;
+                return false;
+            };
+        if (s.where && has_window(*s.where))
+            return make_error(3593, "HY000",
+                "You can't use window functions in WHERE clause");
+
+        // 嵌套聚合不允许:SUM(COUNT(*)) → 1111
+        std::function<bool(const ast::Expression&)> has_nested_agg =
+            [&](const ast::Expression& e) -> bool {
+                if (e.kind == ast::ExprKind::FunctionCall) {
+                    bool self_agg = !e.is_window && is_agg_func(e.func_name);
+                    if (self_agg) {
+                        for (auto& a : e.func_args)
+                            if (a && contains_agg(*a)) return true;
+                    }
+                    for (auto& a : e.func_args) if (a && has_nested_agg(*a)) return true;
+                }
+                if (e.lhs && has_nested_agg(*e.lhs)) return true;
+                if (e.rhs && has_nested_agg(*e.rhs)) return true;
+                if (e.operand && has_nested_agg(*e.operand)) return true;
+                if (e.case_base && has_nested_agg(*e.case_base)) return true;
+                for (auto& [w, r] : e.case_whens) {
+                    if (w && has_nested_agg(*w)) return true;
+                    if (r && has_nested_agg(*r)) return true;
+                }
+                if (e.case_else && has_nested_agg(*e.case_else)) return true;
+                return false;
+            };
+        bool nested = false;
+        for (auto& [e, _] : s.columns) if (has_nested_agg(*e)) { nested = true; break; }
+        if (!nested && s.having) nested = has_nested_agg(*s.having);
+        if (nested)
+            return make_error(1111, "HY000", "Invalid use of group function");
+    }
+
     // 输出列别名/类型(提前: 聚合下推路径会在 JOIN 阶段直接产出结果)
     r.column_names.clear();
     r.column_types.clear();
@@ -1238,8 +1481,11 @@ ResultSet Executor::exec_select_body(const ast::SelectStmt& s, const ExecContext
                 }
             }
         } else {
-            std::string name = alias.empty() ? "<expr>" : alias;
-            if (e->kind == ast::ExprKind::Column) name = e->column_name;
+            // 有别名时输出列名就是别名(ORDER BY 别名依赖这一点)
+            std::string name = alias;
+            if (name.empty()) {
+                name = (e->kind == ast::ExprKind::Column) ? e->column_name : std::string("<expr>");
+            }
             r.column_names.push_back(name);
             r.column_types.push_back(infer_type(*e, &slot_refs));
         }
@@ -1264,6 +1510,35 @@ ResultSet Executor::exec_select_body(const ast::SelectStmt& s, const ExecContext
             }
         }
         group_exprs.push_back(re);
+    }
+
+    // sql_mode 含 ONLY_FULL_GROUP_BY:未聚合的裸列必须在 GROUP BY 中(否则 1055)
+    if (!s.group_by.empty()) {
+        std::function<bool(const ast::Expression&, const ast::Expression&)> same_expr =
+            [&](const ast::Expression& a, const ast::Expression& b) -> bool {
+                if (a.kind != b.kind) return false;
+                switch (a.kind) {
+                    case ast::ExprKind::Column:
+                        return _stricmp(a.column_name.c_str(), b.column_name.c_str()) == 0 &&
+                               _stricmp(a.table_name.c_str(), b.table_name.c_str()) == 0;
+                    case ast::ExprKind::Literal:
+                        return a.literal.compare(b.literal) == 0 &&
+                               a.literal.kind == b.literal.kind;
+                    case ast::ExprKind::FunctionCall:
+                        return _stricmp(a.func_name.c_str(), b.func_name.c_str()) == 0;
+                    default: return false;
+                }
+            };
+        for (auto& [ce, alias] : s.columns) {
+            if (!ce || ce->kind != ast::ExprKind::Column) continue;   // 只查裸列
+            if (contains_agg(*ce)) continue;
+            bool in_group = false;
+            for (auto* ge : group_exprs) if (ge && same_expr(*ce, *ge)) { in_group = true; break; }
+            if (!in_group)
+                return make_error(1055, "42000",
+                    fmt::format("Expression #1 of SELECT list is not in GROUP BY clause and "
+                                "contains nonaggregated column '{}'", ce->column_name));
+        }
     }
 
     // ORDER BY 输出列位置/别名 → 输出列下标;未命中返回 -1
@@ -1881,6 +2156,10 @@ ResultSet Executor::exec_select_body(const ast::SelectStmt& s, const ExecContext
         }
 
         std::vector<storage::Row> new_left;
+        const bool is_right_join = (jc.kind == ast::JoinKind::Right);
+        std::vector<bool> right_matched(is_right_join ? right_rows.size() : 0, false);
+        const size_t left_width = (ji + 1 < slots.size())
+            ? static_cast<size_t>(slots[ji + 1].col_offset) : static_cast<size_t>(total_cols);
         for (auto& l : left_rows) {
             if (jc.kind == ast::JoinKind::Cross) {
                 for (auto& r : right_rows) {
@@ -1889,6 +2168,7 @@ ResultSet Executor::exec_select_body(const ast::SelectStmt& s, const ExecContext
                 }
                 continue;
             }
+            if (!is_right_join) {
             if (jc.kind != ast::JoinKind::Inner && jc.kind != ast::JoinKind::Left &&
                 jc.kind != ast::JoinKind::Right) continue;
 
@@ -1939,7 +2219,8 @@ ResultSet Executor::exec_select_body(const ast::SelectStmt& s, const ExecContext
                 }
             } else {
                 // ---- 退化路径: 非等值 / CROSS / RIGHT / 无 ON ----
-                for (auto& r : right_rows) {
+                for (size_t ri = 0; ri < right_rows.size(); ++ri) {
+                    auto& r = right_rows[ri];
                     storage::Row flat = l; flat.insert(flat.end(), r.begin(), r.end());
                     auto ctx = build_ctx(flat);
                     bool ok = true;
@@ -1956,7 +2237,29 @@ ResultSet Executor::exec_select_body(const ast::SelectStmt& s, const ExecContext
                     flat.push_back(types::Value::make_null());
                 new_left.push_back(std::move(flat));
             }
-            // Right/Full JOIN 暂不完整处理(保持既有语义)
+            continue;
+            }
+
+            // ---- RIGHT JOIN:保留右表,左表列 NULL(对未匹配的右行补空行) ----
+            for (size_t ri = 0; ri < right_rows.size(); ++ri) {
+                auto& r = right_rows[ri];
+                storage::Row flat = l; flat.insert(flat.end(), r.begin(), r.end());
+                auto ctx = build_ctx(flat);
+                bool ok = true;
+                if (jc.on) ok = to_bool(eval(*jc.on, ctx));
+                if (ok) {
+                    right_matched[ri] = true;
+                    new_left.push_back(std::move(flat));
+                }
+            }
+        }
+        if (is_right_join) {
+            for (size_t ri = 0; ri < right_rows.size(); ++ri) {
+                if (right_matched[ri]) continue;
+                storage::Row flat(left_width, types::Value::make_null());
+                flat.insert(flat.end(), right_rows[ri].begin(), right_rows[ri].end());
+                new_left.push_back(std::move(flat));
+            }
         }
         left_rows = std::move(new_left);
     }
@@ -2001,8 +2304,10 @@ ResultSet Executor::exec_select_body(const ast::SelectStmt& s, const ExecContext
         }
         int64_t off = s.offset.value_or(0);
         int64_t lim = s.limit.value_or(static_cast<int64_t>(fused_agg_rows.size()));
-        if (off > 0 && static_cast<size_t>(off) < fused_agg_rows.size())
-            fused_agg_rows.erase(fused_agg_rows.begin(), fused_agg_rows.begin() + off);
+        if (off > 0) {
+            if (static_cast<size_t>(off) >= fused_agg_rows.size()) fused_agg_rows.clear();
+            else fused_agg_rows.erase(fused_agg_rows.begin(), fused_agg_rows.begin() + off);
+        }
         if (lim >= 0 && static_cast<size_t>(lim) < fused_agg_rows.size())
             fused_agg_rows.resize(static_cast<size_t>(lim));
         r.rows = std::move(fused_agg_rows);
@@ -2089,8 +2394,9 @@ ResultSet Executor::exec_select_body(const ast::SelectStmt& s, const ExecContext
             }
             buckets[bi].rows.push_back(std::move(flat));
         }
-        // 空表 + 无 group_by — 生成一个空桶(对应 SELECT COUNT(*) FROM empty_t)
-        if (buckets.empty()) buckets.push_back({});
+        // 无 GROUP BY 时,空输入也要产出一行(COUNT=0 / SUM=NULL,与 MySQL 一致);
+        // 有 GROUP BY 时,空输入必须返回空集(不能凭空造一个 NULL 分组)。
+        if (buckets.empty() && group_exprs.empty()) buckets.push_back({});
 
         // 聚合计算(流式累加,支持 DISTINCT):对整桶求值
         auto compute_agg = [&](const ast::Expression& fe,
@@ -2296,6 +2602,15 @@ ResultSet Executor::exec_select_body(const ast::SelectStmt& s, const ExecContext
         }
 
         for (auto& o : outs) r.rows.push_back(std::move(o.row));
+        // GROUP BY 结果同样受 LIMIT/OFFSET 约束(之前直接 return 导致 LIMIT 失效)
+        int64_t goff = s.offset.value_or(0);
+        int64_t glim = s.limit.value_or(static_cast<int64_t>(r.rows.size()));
+        if (goff > 0) {
+            if (static_cast<size_t>(goff) >= r.rows.size()) r.rows.clear();
+            else r.rows.erase(r.rows.begin(), r.rows.begin() + goff);
+        }
+        if (glim >= 0 && static_cast<size_t>(glim) < r.rows.size())
+            r.rows.resize(static_cast<size_t>(glim));
         r.affected_rows = static_cast<int64_t>(r.rows.size());
         return r;
     }
@@ -2305,8 +2620,8 @@ ResultSet Executor::exec_select_body(const ast::SelectStmt& s, const ExecContext
     for (auto& row : after_where) projected.push_back(compute_row(row));
     if (!eval_error_.empty()) return take_eval_error();
 
-    // 窗口函数:PARTITION BY 分组 → 组内 ORDER BY 排序 → 填 ROW_NUMBER()
-    // (目前只实现 ROW_NUMBER();其他窗口函数保持 NULL)
+    // 窗口函数:PARTITION BY 分组 → 组内 ORDER BY 排序 → 填值
+    // 支持 ROW_NUMBER / RANK / DENSE_RANK / COUNT / SUM / AVG / MIN / MAX
     {
         std::vector<std::pair<size_t, const ast::Expression*>> win_cols;
         size_t oi = 0;
@@ -2322,7 +2637,10 @@ ResultSet Executor::exec_select_body(const ast::SelectStmt& s, const ExecContext
             std::string low = we->func_name;
             std::transform(low.begin(), low.end(), low.begin(),
                            [](unsigned char c) { return std::tolower(c); });
-            if (low != "row_number") continue;
+            const bool is_rank = (low == "row_number" || low == "rank" || low == "dense_rank");
+            const bool is_agg  = (low == "count" || low == "sum" || low == "avg" ||
+                                  low == "min" || low == "max");
+            if (!is_rank && !is_agg) continue;
             std::vector<std::vector<types::Value>> okeys(projected.size());
             std::unordered_map<std::string, std::vector<size_t>> groups;
             std::vector<std::string> gorder;
@@ -2345,10 +2663,71 @@ ResultSet Executor::exec_select_body(const ast::SelectStmt& s, const ExecContext
                     }
                     return false;
                 });
+                if (is_rank) {
+                    for (size_t r = 0; r < idxs.size(); ++r) {
+                        int64_t val = static_cast<int64_t>(r) + 1;
+                        if (low != "dense_rank" && low != "row_number") {
+                            // RANK:与上一行排序键相同则取同序号
+                            if (r > 0) {
+                                bool same = true;
+                                for (size_t t = 0; t < we->win_order.size(); ++t)
+                                    if (okeys[idxs[r]][t].compare(okeys[idxs[r-1]][t]) != 0) { same = false; break; }
+                                if (same && ocol < projected[idxs[r]].size())
+                                    val = projected[idxs[r-1]][ocol].is_int()
+                                        ? projected[idxs[r-1]][ocol].v_int : val;
+                            }
+                        }
+                        if (ocol < projected[idxs[r]].size())
+                            projected[idxs[r]][ocol] = types::Value::make_int(val);
+                    }
+                    continue;
+                }
+                // ---- 聚合窗口 ----
+                // 无 ORDER BY:整组聚合;有 ORDER BY:累积到当前行(MySQL 默认 RANGE 帧)
+                const bool cumulative = !we->win_order.empty();
+                const bool star_arg = (low == "count" && we->func_star_arg);
+                std::vector<types::Value> argsrc(idxs.size());
                 for (size_t r = 0; r < idxs.size(); ++r) {
-                    if (ocol < projected[idxs[r]].size())
-                        projected[idxs[r]][ocol] =
-                            types::Value::make_int(static_cast<int64_t>(r) + 1);
+                    argsrc[r] = (star_arg || we->func_args.empty())
+                        ? types::Value::make_int(1)
+                        : eval(*we->func_args[0], build_ctx(after_where[idxs[r]]));
+                }
+                double acc = 0;
+                int64_t iacc = 0, cnt = 0;
+                bool all_int = true, first = true;
+                types::Value best;
+                for (size_t r = 0; r < idxs.size(); ++r) {
+                    const auto& v = argsrc[r];
+                    if (!v.is_null()) {
+                        if (low == "count") ++cnt;
+                        else if (low == "min" || low == "max") {
+                            if (first) { best = v; first = false; }
+                            else {
+                                int c = v.compare(best);
+                                if ((low == "min" && c < 0) || (low == "max" && c > 0)) best = v;
+                            }
+                            ++cnt;
+                        } else if (v.is_int()) { iacc += v.v_int; acc += static_cast<double>(v.v_int); ++cnt; }
+                        else {
+                            all_int = false;
+                            double d; if (v.try_to_double(d)) acc += d;
+                            ++cnt;
+                        }
+                    }
+                    if (!cumulative && r + 1 < idxs.size()) continue;   // 整组:先累完再一次性写
+                    types::Value outv;
+                    if (low == "count") outv = types::Value::make_int(cnt);
+                    else if (cnt == 0) outv = types::Value::make_null();
+                    else if (low == "sum") outv = all_int ? types::Value::make_int(iacc)
+                                                          : types::Value::make_double(acc);
+                    else if (low == "avg") outv = types::Value::make_double(acc / static_cast<double>(cnt));
+                    else outv = best;
+                    if (cumulative) {
+                        if (ocol < projected[idxs[r]].size()) projected[idxs[r]][ocol] = outv;
+                    } else {
+                        for (size_t q = 0; q < idxs.size(); ++q)
+                            if (ocol < projected[idxs[q]].size()) projected[idxs[q]][ocol] = outv;
+                    }
                 }
             }
         }
@@ -2408,8 +2787,9 @@ ResultSet Executor::exec_select_body(const ast::SelectStmt& s, const ExecContext
     // LIMIT / OFFSET
     int64_t off = s.offset.value_or(0);
     int64_t lim = s.limit.value_or(static_cast<int64_t>(after_where.size()));
-    if (off > 0 && static_cast<size_t>(off) < after_where.size()) {
-        after_where.erase(after_where.begin(), after_where.begin() + off);
+    if (off > 0) {
+        if (static_cast<size_t>(off) >= after_where.size()) after_where.clear();
+        else after_where.erase(after_where.begin(), after_where.begin() + off);
     }
     if (lim >= 0 && static_cast<size_t>(lim) < after_where.size()) {
         after_where.resize(static_cast<size_t>(lim));
@@ -2487,12 +2867,21 @@ ResultSet Executor::exec_show_columns(const std::string& db_name, const std::str
         std::string key = col.is_primary_key ? "PRI" : "";
         // Extra
         std::string extra = col.is_auto_increment ? "auto_increment" : "";
+        // Default:有 DEFAULT 子句时输出其字面量(MySQL:字符串不带引号,数字原样)
+        types::Value default_cell = types::Value::make_null();
+        if (col.default_value && col.default_value->kind == ast::ExprKind::Literal) {
+            auto& lit = col.default_value->literal;
+            if (!lit.is_null()) {
+                if (lit.is_string()) default_cell = types::Value::make_string(lit.v_str);
+                else default_cell = types::Value::make_string(lit.to_string());
+            }
+        }
         r.rows.push_back({
             types::Value::make_string(col.name),
             types::Value::make_string(type_str),
             types::Value::make_string(nul),
             types::Value::make_string(key),
-            types::Value::make_null(),
+            default_cell,
             types::Value::make_string(extra),
         });
     }
@@ -2628,7 +3017,7 @@ ResultSet Executor::exec_show_variables(const std::string& pattern) {
         {"collation_server", "utf8mb4_general_ci"},
         {"default_storage_engine", "InnoDB"}, {"engine_condition_pushdown", "ON"},
         {"innodb_version", "5.7.0"}, {"interactive_timeout", "28800"},
-        {"join_buffer_size", "262144"}, {"lower_case_table_names", "0"},
+        {"join_buffer_size", "262144"}, {"lower_case_table_names", "1"},
         {"max_allowed_packet", "67108864"}, {"net_read_timeout", "30"},
         {"net_write_timeout", "60"}, {"max_connections", "151"},
         {"net_buffer_length", "16384"}, {"sql_mode", "ONLY_FULL_GROUP_BY"},
@@ -3234,7 +3623,38 @@ std::unique_ptr<storage::Table> Executor::build_information_schema_table(
             is_col("REFERENCED_TABLE_NAME", types::SqlType::Varchar),
             is_col("REFERENCED_COLUMN_NAME", types::SqlType::Varchar),
         };
-        return make_empty("KEY_COLUMN_USAGE", std::move(cols));
+        // 主键列约束必须可见:依赖该视图判断主键的 ORM / DBeaver 会误判
+        storage::TableDef def;
+        def.name = "KEY_COLUMN_USAGE";
+        def.columns = cols;
+        auto tbl = std::make_unique<storage::Table>(std::move(def));
+        for (auto& db : catalog_.list_databases()) {
+            for (auto& n : catalog_.table_names(db)) {
+                auto* t = catalog_.get_table(n, db);
+                if (!t) continue;
+                auto& tdef = t->def();
+                for (auto& pk_cols : tdef.primary_key_cols) {
+                    int64_t ord = 1;
+                    for (auto& cname : pk_cols) {
+                        tbl->insert({
+                            types::Value::make_string("def"),
+                            types::Value::make_string(db),
+                            types::Value::make_string("PRIMARY"),
+                            types::Value::make_string("def"),
+                            types::Value::make_string(db),
+                            types::Value::make_string(n),
+                            types::Value::make_string(cname),
+                            types::Value::make_int(ord++),
+                            types::Value::make_null(),
+                            types::Value::make_null(),
+                            types::Value::make_null(),
+                            types::Value::make_null(),
+                        });
+                    }
+                }
+            }
+        }
+        return tbl;
     }
 
     if (ci_eq(table_name, "REFERENTIAL_CONSTRAINTS")) {
@@ -3275,7 +3695,45 @@ std::unique_ptr<storage::Table> Executor::build_information_schema_table(
             is_col("COMMENT", types::SqlType::Varchar),
             is_col("INDEX_COMMENT", types::SqlType::Varchar),
         };
-        return make_empty("STATISTICS", std::move(cols));
+        // 主键索引真实存在(SHOW INDEX 已有 PRIMARY),统计视图也必须可见
+        storage::TableDef def;
+        def.name = "STATISTICS";
+        def.columns = cols;
+        auto tbl = std::make_unique<storage::Table>(std::move(def));
+        for (auto& db : catalog_.list_databases()) {
+            for (auto& n : catalog_.table_names(db)) {
+                auto* t = catalog_.get_table(n, db);
+                if (!t) continue;
+                auto& tdef = t->def();
+                int64_t card = static_cast<int64_t>(t->row_count());
+                for (auto& pk_cols : tdef.primary_key_cols) {
+                    int64_t seq = 1;
+                    for (auto& cname : pk_cols) {
+                        int ci = tdef.column_index(cname);
+                        bool nullable = (ci >= 0) ? tdef.columns[ci].nullable : false;
+                        tbl->insert({
+                            types::Value::make_string("def"),
+                            types::Value::make_string(db),
+                            types::Value::make_string(n),
+                            types::Value::make_int(0),              // NON_UNIQUE
+                            types::Value::make_string(db),
+                            types::Value::make_string("PRIMARY"),
+                            types::Value::make_int(seq++),
+                            types::Value::make_string(cname),
+                            types::Value::make_string("A"),
+                            types::Value::make_int(card),
+                            types::Value::make_null(),
+                            types::Value::make_null(),
+                            types::Value::make_string(nullable ? "YES" : ""),
+                            types::Value::make_string("BTREE"),
+                            types::Value::make_string(""),
+                            types::Value::make_string(""),
+                        });
+                    }
+                }
+            }
+        }
+        return tbl;
     }
 
     if (ci_eq(table_name, "COLUMNS")) {

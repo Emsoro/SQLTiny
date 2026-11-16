@@ -1,6 +1,6 @@
 # SQLTiny — Lightweight Embedded Database · MySQL Protocol Compatible
 
-> **Current version `v2.0.5` (2026-11-16)** · The version number is maintained in `CMakeLists.txt` (`project(SQLTiny VERSION 2.0.5)`), `vcpkg.json` (`version-string`) and the startup banner in `src/main.cpp`. The wire protocol still reports `5.7.0-SQLTiny` for MySQL client compatibility — that string is unrelated to the product version.
+> **Current version `v2.0.6` (2026-11-16)** · The version number is maintained in `CMakeLists.txt` (`project(SQLTiny VERSION 2.0.6)`), `vcpkg.json` (`version-string`) and the startup banner in `src/main.cpp`. The wire protocol still reports `5.7.0-SQLTiny` for MySQL client compatibility — that string is unrelated to the product version.
 
 **SQLTiny** is a lightweight relational database written from scratch in modern C++20, with its core design inspired by [HSQLDB](http://hsqldb.org/). It additionally exposes the **MySQL Wire Protocol**, so standard MySQL clients (`mysql` CLI, Navicat, DBeaver, Connector/J, PyMySQL, DBX/dbExpress) can connect directly.
 
@@ -453,10 +453,10 @@ FROM users u INNER JOIN orders o ON o.user_id = u.id;
 | Artifact | Type | Description |
 |---|---|---|
 | `build/Debug/sqltiny.lib` | static library | Engine core, for in-process embedding |
-| `build/Debug/sqltiny_server.exe` | executable | MySQL protocol TCP server (v2.0.5) |
+| `build/Debug/sqltiny_server.exe` | executable | MySQL protocol TCP server (v2.0.6) |
 | `build/Release/sqltiny_server.exe` | executable (release) | Same, Release build is about **0.9 MB** in a single file (static CRT + static fmt, no DLL dependencies, copy-and-run); Debug build is about 4.8 MB |
 
-**`sqltiny_server.exe` file info (v2.0.5)**:
+**`sqltiny_server.exe` file info (v2.0.6)**:
 
 | Property | Value |
 |---|---|
@@ -607,7 +607,7 @@ SQLTiny persists to the directory given by `--data-dir`, which holds two files:
 
 # 2. Explicit persistence directory (most common)
 #    Created on first start along with sql.wal + sql.data
-.\build\Debug\sqltiny_server.exe --port 3306 --user root --data-dir D:\SQLTiny\data
+.\build\Debug\sqltiny_server.exe --port 3306 --user root --data-dir <DATA_DIR>
 
 # 3. Custom location (relative or absolute)
 .\build\Debug\sqltiny_server.exe --port 3306 --user root --data-dir .\sqltiny_data

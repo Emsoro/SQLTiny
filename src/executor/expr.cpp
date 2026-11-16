@@ -7,6 +7,11 @@
 #include <sstream>
 #include <ctime>
 #include <cstdio>
+#include <cctype>
+#include <cstdint>
+#include <set>
+#include <unordered_set>
+#include <algorithm>
 
 namespace sqltiny::executor {
 
@@ -21,6 +26,13 @@ bool to_bool(const types::Value& v) {
 }
 
 static types::Value make_err() { return types::Value::make_null(); }
+
+void Executor::raise_error(uint16_t errno_, const char* sql_state, std::string msg) const {
+    if (!eval_error_.empty()) return;   // 保留第一个错误
+    eval_errno_ = errno_;
+    eval_sql_state_ = sql_state;
+    eval_error_ = std::move(msg);
+}
 
 types::Value Executor::eval(const ast::Expression& e, const ExecContext& ctx) const {
     switch (e.kind) {
@@ -42,8 +54,9 @@ types::Value Executor::eval(const ast::Expression& e, const ExecContext& ctx) co
                 if (e.column_name == "@@autocommit" ||
                     e.column_name == "@@session.autocommit" ||
                     e.column_name == "@@session_autocommit") {
+                    // SELECT @@autocommit 是整数 1/0;SHOW VARIABLES 才是 ON/OFF
                     return types::Value::make_string(
-                        (session_ && !session_->autocommit) ? "OFF" : "ON");
+                        (session_ && !session_->autocommit) ? "0" : "1");
                 }
                 static const std::unordered_map<std::string, std::string> vars = {
                     {"@@tx_isolation","REPEATABLE-READ"},{"@@session_tx_isolation","REPEATABLE-READ"},
@@ -98,6 +111,11 @@ types::Value Executor::eval(const ast::Expression& e, const ExecContext& ctx) co
                 if (c->outer_used) *c->outer_used = true;
                 c = c->outer;
             }
+            // 完全无法解析:MySQL 报 1054(之前静默 NULL,导致拼写错误被吞掉)
+            raise_error(1054, "42S22",
+                fmt::format("Unknown column '{}{}' in 'field list'",
+                            e.table_name.empty() ? "" : (e.table_name + "."),
+                            e.column_name));
             return types::Value::make_null();
         }
 
@@ -154,6 +172,30 @@ types::Value Executor::eval(const ast::Expression& e, const ExecContext& ctx) co
 
             auto r = eval(*e.rhs, ctx);
 
+            // MySQL 隐式类型转换:数字字符串在算术/比较中按数值处理('1' = 1 → 真)。
+            // 预编译语句把字符串参数绑定到整数列时依赖这一行为。
+            auto as_num = [](const types::Value& v, types::Value& out) -> bool {
+                if (v.is_numeric()) { out = v; return true; }
+                if (v.kind == types::Value::Kind::Bool) {
+                    out = types::Value::make_int(v.v_bool ? 1 : 0);
+                    return true;
+                }
+                if (v.is_string()) {
+                    int64_t iv = 0; double dv = 0;
+                    if (v.try_to_int(iv)) { out = types::Value::make_int(iv); return true; }
+                    if (v.try_to_double(dv)) { out = types::Value::make_double(dv); return true; }
+                }
+                return false;
+            };
+            bool num_str_mismatch = false;
+            if (l.is_string() && r.is_numeric()) {
+                types::Value t;
+                if (as_num(l, t)) l = t; else num_str_mismatch = true;
+            } else if (r.is_string() && l.is_numeric()) {
+                types::Value t;
+                if (as_num(r, t)) r = t; else num_str_mismatch = true;
+            }
+
             // 算术
             if (e.binop == ast::BinOp::Plus) {
                 if (l.is_int() && r.is_int()) return types::Value::make_int(l.v_int + r.v_int);
@@ -190,7 +232,8 @@ types::Value Executor::eval(const ast::Expression& e, const ExecContext& ctx) co
             }
 
             // 比较: 任一操作数为 NULL → UNKNOWN (三值逻辑), WHERE 层 to_bool 仍视为不匹配
-            if (l.is_null() || r.is_null()) return types::Value::make_null();
+            // 非数字字符串与数值比较同样视为 UNKNOWN(MySQL 语义)
+            if (l.is_null() || r.is_null() || num_str_mismatch) return types::Value::make_null();
             if (e.binop == ast::BinOp::Eq)   return types::Value::make_bool(l.sql_equals(r));
             if (e.binop == ast::BinOp::Ne)   return types::Value::make_bool(l.compare(r) != 0);
             if (e.binop == ast::BinOp::Lt)   return types::Value::make_bool(l.compare(r) <  0);
@@ -210,6 +253,15 @@ types::Value Executor::eval(const ast::Expression& e, const ExecContext& ctx) co
             if (!rows) return types::Value::make_null();
             if (e.subquery_exists) return types::Value::make_bool(!rows->empty());
             if (rows->empty() || (*rows)[0].empty()) return types::Value::make_null();
+            // 标量子查询只能返回一行(MySQL 1242)
+            if (rows->size() > 1) {
+                raise_error(1242, "21000", "Subquery returns more than 1 row");
+                return types::Value::make_null();
+            }
+            if ((*rows)[0].size() > 1) {
+                raise_error(1241, "21000", "Operand should contain 1 column(s)");
+                return types::Value::make_null();
+            }
             return (*rows)[0][0];   // 标量子查询:取第一行第一列
         }
 
@@ -257,7 +309,8 @@ types::Value Executor::eval_like(const types::Value& v, const types::Value& patt
     }
     re += '$';
     try {
-        std::regex rx(re);
+        // 默认 collation(utf8mb4_general_ci)大小写不敏感:'Alice' LIKE 'a%' 应为真
+        std::regex rx(re, std::regex::ECMAScript | std::regex::icase);
         return types::Value::make_bool(std::regex_match(s, rx));
     } catch (...) {
         return types::Value::make_bool(false);
@@ -301,24 +354,33 @@ types::Value Executor::eval_function(
     if (lower == "__in") {
         if (args.size() < 2) return types::Value::make_bool(false);
         auto left = eval(*args[0], ctx);
+        // SQL 三值逻辑:NULL IN (...) 恒为 UNKNOWN
+        if (left.is_null()) return types::Value::make_null();
         // 右值是 SELECT 子查询:非相关只物化一次(缓存),相关则逐行重算
         if (args[1] && args[1]->kind == ast::ExprKind::Subquery && args[1]->subquery_stmt) {
             if (!ctx.exec) return types::Value::make_bool(false);
             const auto* rows = ctx.exec->subquery_rows(*args[1], ctx);
             if (!rows) return types::Value::make_bool(false);
+            bool saw_null = false;
             for (auto& row : *rows) {
                 if (row.empty()) continue;
-                if (!left.is_null() && !row[0].is_null() && left.compare(row[0]) == 0)
-                    return types::Value::make_bool(true);
+                if (row.size() > 1) {
+                    raise_error(1241, "21000", "Operand should contain 1 column(s)");
+                    return types::Value::make_null();
+                }
+                if (row[0].is_null()) { saw_null = true; continue; }
+                if (left.compare(row[0]) == 0) return types::Value::make_bool(true);
             }
-            return types::Value::make_bool(false);
+            // 未命中但候选集含 NULL → UNKNOWN
+            return saw_null ? types::Value::make_null() : types::Value::make_bool(false);
         }
+        bool saw_null = false;
         for (size_t i = 1; i < args.size(); ++i) {
             auto v = eval(*args[i], ctx);
-            if (!left.is_null() && !v.is_null() && left.compare(v) == 0)
-                return types::Value::make_bool(true);
+            if (v.is_null()) { saw_null = true; continue; }
+            if (left.compare(v) == 0) return types::Value::make_bool(true);
         }
-        return types::Value::make_bool(false);
+        return saw_null ? types::Value::make_null() : types::Value::make_bool(false);
     }
     if (lower == "__like") {
         if (args.size() < 2) return types::Value::make_null();
@@ -351,10 +413,10 @@ types::Value Executor::eval_function(
         dt.second = tm.tm_sec;
         return types::Value::make_datetime(dt);
     }
-    if (lower == "length" || lower == "char_length") {
+    if (lower == "length" || lower == "char_length" || lower == "character_length") {
         if (args.empty()) return types::Value::make_int(0);
         auto v = eval(*args[0], ctx);
-        if (v.is_null()) return types::Value::make_int(0);
+        if (v.is_null()) return types::Value::make_null();   // NULL 传播
         auto s = v.is_string() ? v.v_str : v.to_string();
         if (s.size() >= 2 && s.front() == '\'' && s.back() == '\'') s = s.substr(1, s.size()-2);
         return types::Value::make_int(static_cast<int64_t>(s.size()));
@@ -380,14 +442,63 @@ types::Value Executor::eval_function(
     if (lower == "round") {
         if (args.empty()) return types::Value::make_null();
         auto v = eval(*args[0], ctx);
+        if (v.is_null()) return types::Value::make_null();   // NULL 传播
         int prec = 0;
         if (args.size() >= 2) {
             auto p = eval(*args[1], ctx);
             if (p.is_int()) prec = static_cast<int>(p.v_int);
         }
-        double d; v.try_to_double(d);
-        double factor = std::pow(10.0, prec);
-        return types::Value::make_double(std::round(d * factor) / factor);
+        if (prec < 0) prec = 0;
+        // 定点语义:先按十进制展开,再按「四舍五入(远离零)」截断。
+        // 直接 d*10^n 再 std::round 会把 1.005 的二进制误差放大成 1.00。
+        double d = 0;
+        v.try_to_double(d);
+        char buf[512];
+        std::snprintf(buf, sizeof(buf), "%.*f", prec + 8, d);
+        std::string s(buf);
+        auto dot = s.find('.');
+        if (dot == std::string::npos) {
+            return types::Value::make_double(d);
+        }
+        std::string ip = s.substr(0, dot);
+        std::string fp = s.substr(dot + 1);
+        bool neg = false;
+        if (!ip.empty() && ip[0] == '-') { neg = true; ip.erase(ip.begin()); }
+        if (static_cast<int>(fp.size()) <= prec) {
+            return types::Value::make_double(d);
+        }
+        char next = fp[prec];
+        fp = fp.substr(0, prec);
+        if (next >= '5') {
+            // 十进制 +1 进位
+            int carry = 1;
+            for (int i = static_cast<int>(fp.size()) - 1; i >= 0 && carry; --i) {
+                int dig = (fp[i] - '0') + carry;
+                fp[i] = static_cast<char>('0' + dig % 10);
+                carry = dig / 10;
+            }
+            for (int i = static_cast<int>(ip.size()) - 1; i >= 0 && carry; --i) {
+                int dig = (ip[i] - '0') + carry;
+                ip[i] = static_cast<char>('0' + dig % 10);
+                carry = dig / 10;
+            }
+            if (carry) ip.insert(ip.begin(), '1');
+        }
+        std::string out = (neg ? "-" : "") + ip + (fp.empty() ? "" : "." + fp);
+        try { return types::Value::make_double(std::stod(out)); }
+        catch (...) { return types::Value::make_double(d); }
+    }
+    if (lower == "nullif") {
+        // NULLIF(a,b): a=b → NULL,否则 a。任一为 NULL 时返回 a(=NULL)
+        if (args.size() < 2) return types::Value::make_null();
+        auto a = eval(*args[0], ctx);
+        auto b = eval(*args[1], ctx);
+        if (a.is_null() || b.is_null()) return a;
+        return a.compare(b) == 0 ? types::Value::make_null() : a;
+    }
+    if (lower == "if") {
+        if (args.size() < 3) return types::Value::make_null();
+        return to_bool(eval(*args[0], ctx)) ? eval(*args[1], ctx) : eval(*args[2], ctx);
     }
     if (lower == "coalesce") {
         for (auto& a : args) {
@@ -404,17 +515,30 @@ types::Value Executor::eval_function(
         return types::Value::make_null();
     }
     if (lower == "instr" || lower == "locate" || lower == "position") {
-        // INSTR(str, sub) / LOCATE(sub, str) —— 子串位置, 1 起, 未找到为 0。
-        // Database Client 用 INSTR(COLUMN_TYPE,'zerofill')>0 判断 zerofill / unsigned。
+        // INSTR(str, sub) / LOCATE(sub, str [, pos]) —— 子串位置, 1 起, 未找到为 0。
         if (args.size() < 2) return types::Value::make_int(0);
+        auto str_of = [&](const ast::Expression& a) -> std::string {
+            auto v = eval(a, ctx);
+            if (v.is_null()) return {};
+            std::string s = v.is_string() ? v.v_str : v.to_string();
+            if (s.size() >= 2 && s.front() == '\'' && s.back() == '\'') s = s.substr(1, s.size()-2);
+            return s;
+        };
         auto lc = [](std::string s) {
             std::transform(s.begin(), s.end(), s.begin(),
                            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
             return s;
         };
-        std::string s   = lower == "instr" ? eval(*args[0], ctx).v_str : eval(*args[1], ctx).v_str;
-        std::string sub = lower == "instr" ? eval(*args[1], ctx).v_str : eval(*args[0], ctx).v_str;
-        auto pos = lc(s).find(lc(sub));
+        std::string s   = (lower == "instr") ? str_of(*args[0]) : str_of(*args[1]);
+        std::string sub = (lower == "instr") ? str_of(*args[1]) : str_of(*args[0]);
+        int64_t start = 1;
+        if (lower == "locate" && args.size() >= 3) {
+            auto sp = eval(*args[2], ctx);
+            if (sp.is_int() && sp.v_int > 0) start = sp.v_int;
+        }
+        std::string ls = lc(s), lsub = lc(sub);
+        if (start > 1 && static_cast<size_t>(start - 1) > ls.size()) return types::Value::make_int(0);
+        auto pos = ls.find(lsub, static_cast<size_t>(start - 1));
         return types::Value::make_int(pos == std::string::npos ? 0 : static_cast<int64_t>(pos) + 1);
     }
     if (lower == "database" || lower == "schema") {
@@ -472,7 +596,236 @@ types::Value Executor::eval_function(
         types::DateValue d; d.year = dt.year; d.month = dt.month; d.day = dt.day;
         return types::Value::make_date(d);
     }
-    // 未知函数 —— NULL
+    // ---- 连接/会话信息函数 ----
+    if (lower == "connection_id") return types::Value::make_int(1);
+    if (lower == "last_insert_id") return types::Value::make_int(0);
+    if (lower == "row_count" || lower == "found_rows") return types::Value::make_int(0);
+    if (lower == "session_user" || lower == "system_user" || lower == "current_role")
+        return types::Value::make_string("root@localhost");
+
+    // ---- 字符串函数 ----
+    auto arg_str = [&](size_t i) -> std::string {
+        if (i >= args.size()) return {};
+        auto v = eval(*args[i], ctx);
+        if (v.is_null()) return {};
+        std::string s = v.is_string() ? v.v_str : v.to_string();
+        if (s.size() >= 2 && s.front() == '\'' && s.back() == '\'') s = s.substr(1, s.size()-2);
+        return s;
+    };
+    auto arg_is_null = [&](size_t i) -> bool {
+        if (i >= args.size()) return true;
+        return eval(*args[i], ctx).is_null();
+    };
+    if (lower == "upper" || lower == "ucase" || lower == "lower" || lower == "lcase") {
+        if (args.empty()) return types::Value::make_null();
+        if (arg_is_null(0)) return types::Value::make_null();
+        std::string s = arg_str(0);
+        std::transform(s.begin(), s.end(), s.begin(), [&](unsigned char c) {
+            return static_cast<char>((lower == "upper" || lower == "ucase")
+                                     ? std::toupper(c) : std::tolower(c));
+        });
+        return types::Value::make_string(s);
+    }
+    if (lower == "trim" || lower == "ltrim" || lower == "rtrim") {
+        if (args.empty() || arg_is_null(0)) return types::Value::make_null();
+        std::string s = arg_str(0);
+        auto sp = [](unsigned char c) { return std::isspace(c) != 0; };
+        if (lower != "rtrim") s.erase(s.begin(), std::find_if_not(s.begin(), s.end(), sp));
+        if (lower != "ltrim") s.erase(std::find_if_not(s.rbegin(), s.rend(), sp).base(), s.end());
+        return types::Value::make_string(s);
+    }
+    if (lower == "substr" || lower == "substring") {
+        if (args.size() < 2 || arg_is_null(0) || arg_is_null(1)) return types::Value::make_null();
+        std::string s = arg_str(0);
+        int64_t pos = 1, len = INT64_MAX;
+        auto pv = eval(*args[1], ctx);
+        if (pv.is_int()) pos = pv.v_int;
+        else if (pv.is_double()) pos = static_cast<int64_t>(pv.v_double);
+        if (args.size() >= 3) {
+            auto lv = eval(*args[2], ctx);
+            if (lv.is_int()) len = lv.v_int;
+        }
+        int64_t n = static_cast<int64_t>(s.size());
+        if (pos < 0) pos = n + pos + 1;
+        if (pos < 1) pos = 1;
+        if (pos > n) return types::Value::make_string("");
+        int64_t start = pos - 1;
+        int64_t take = (len == INT64_MAX) ? (n - start) : std::max<int64_t>(0, len);
+        return types::Value::make_string(s.substr(static_cast<size_t>(start),
+                                                  static_cast<size_t>(std::min(take, n - start))));
+    }
+    if (lower == "left" || lower == "right") {
+        if (args.size() < 2 || arg_is_null(0) || arg_is_null(1)) return types::Value::make_null();
+        std::string s = arg_str(0);
+        int64_t k = 0;
+        auto kv = eval(*args[1], ctx);
+        if (kv.is_int()) k = kv.v_int;
+        if (k < 0) k = 0;
+        size_t take = std::min<size_t>(static_cast<size_t>(k), s.size());
+        return types::Value::make_string(lower == "left" ? s.substr(0, take)
+                                                         : s.substr(s.size() - take));
+    }
+    if (lower == "replace") {
+        if (args.size() < 3 || arg_is_null(0) || arg_is_null(1) || arg_is_null(2))
+            return types::Value::make_null();
+        std::string s = arg_str(0), from = arg_str(1), to = arg_str(2);
+        if (from.empty()) return types::Value::make_string(s);
+        std::string out;
+        size_t p = 0;
+        for (;;) {
+            auto f = s.find(from, p);
+            if (f == std::string::npos) { out += s.substr(p); break; }
+            out += s.substr(p, f - p);
+            out += to;
+            p = f + from.size();
+        }
+        return types::Value::make_string(out);
+    }
+    if (lower == "reverse") {
+        if (args.empty() || arg_is_null(0)) return types::Value::make_null();
+        std::string s = arg_str(0);
+        std::reverse(s.begin(), s.end());
+        return types::Value::make_string(s);
+    }
+    if (lower == "lpad" || lower == "rpad") {
+        if (args.size() < 3) return types::Value::make_null();
+        std::string s = arg_str(0), pad = arg_str(2);
+        int64_t k = 0;
+        auto kv = eval(*args[1], ctx);
+        if (kv.is_int()) k = kv.v_int;
+        if (k < 0) k = 0;
+        if (pad.empty()) return types::Value::make_string(s);
+        std::string fill;
+        while (static_cast<int64_t>(fill.size()) < k) fill += pad;
+        fill.resize(static_cast<size_t>(k));
+        if (static_cast<int64_t>(s.size()) >= k) s.resize(static_cast<size_t>(k));
+        else if (lower == "lpad") s = fill.substr(0, static_cast<size_t>(k) - s.size()) + s;
+        else s += fill.substr(0, static_cast<size_t>(k) - s.size());
+        return types::Value::make_string(s);
+    }
+    if (lower == "repeat") {
+        if (args.size() < 2 || arg_is_null(0) || arg_is_null(1)) return types::Value::make_null();
+        std::string s = arg_str(0);
+        int64_t k = 0;
+        auto kv = eval(*args[1], ctx);
+        if (kv.is_int()) k = kv.v_int;
+        std::string out;
+        for (int64_t i = 0; i < k; ++i) out += s;
+        return types::Value::make_string(out);
+    }
+    if (lower == "concat_ws") {
+        if (args.size() < 2) return types::Value::make_null();
+        std::string sep = arg_str(0), out;
+        for (size_t i = 1; i < args.size(); ++i) {
+            if (arg_is_null(i)) continue;
+            if (!out.empty() || i > 1) out += sep;
+            out += arg_str(i);
+        }
+        return types::Value::make_string(out);
+    }
+    if (lower == "ascii" || lower == "ord") {
+        if (args.empty() || arg_is_null(0)) return types::Value::make_null();
+        std::string s = arg_str(0);
+        return types::Value::make_int(s.empty() ? 0 : static_cast<int64_t>(static_cast<unsigned char>(s[0])));
+    }
+    if (lower == "char") {
+        std::string out;
+        for (size_t i = 0; i < args.size(); ++i) {
+            auto v = eval(*args[i], ctx);
+            int64_t c = 0;
+            if (!v.try_to_int(c)) continue;
+            out.push_back(static_cast<char>(c & 0xff));
+        }
+        return types::Value::make_string(out);
+    }
+
+    // ---- 数值函数 ----
+    auto arg_num = [&](size_t i, bool& ok) -> double {
+        ok = false;
+        if (i >= args.size()) return 0;
+        auto v = eval(*args[i], ctx);
+        double d = 0;
+        if (v.try_to_double(d)) { ok = true; return d; }
+        return 0;
+    };
+    if (lower == "ceil" || lower == "ceiling" || lower == "floor") {
+        if (args.empty() || arg_is_null(0)) return types::Value::make_null();
+        bool ok = false; double d = arg_num(0, ok);
+        if (!ok) return types::Value::make_null();
+        return types::Value::make_int(static_cast<int64_t>(
+            (lower == "floor") ? std::floor(d) : std::ceil(d)));
+    }
+    if (lower == "mod") {
+        if (args.size() < 2 || arg_is_null(0) || arg_is_null(1)) return types::Value::make_null();
+        auto a = eval(*args[0], ctx), b = eval(*args[1], ctx);
+        if (a.is_int() && b.is_int()) {
+            if (b.v_int == 0) return types::Value::make_null();
+            return types::Value::make_int(a.v_int % b.v_int);
+        }
+        bool oka = false, okb = false;
+        double da = arg_num(0, oka), db = arg_num(1, okb);
+        if (!oka || !okb || db == 0) return types::Value::make_null();
+        return types::Value::make_double(std::fmod(da, db));
+    }
+    if (lower == "power" || lower == "pow") {
+        if (args.size() < 2 || arg_is_null(0) || arg_is_null(1)) return types::Value::make_null();
+        bool oka = false, okb = false;
+        double da = arg_num(0, oka), db = arg_num(1, okb);
+        if (!oka || !okb) return types::Value::make_null();
+        return types::Value::make_double(std::pow(da, db));
+    }
+    if (lower == "sqrt") {
+        if (args.empty() || arg_is_null(0)) return types::Value::make_null();
+        bool ok = false; double d = arg_num(0, ok);
+        if (!ok || d < 0) return types::Value::make_null();
+        return types::Value::make_double(std::sqrt(d));
+    }
+    if (lower == "sign") {
+        if (args.empty() || arg_is_null(0)) return types::Value::make_null();
+        bool ok = false; double d = arg_num(0, ok);
+        if (!ok) return types::Value::make_null();
+        return types::Value::make_int(d > 0 ? 1 : (d < 0 ? -1 : 0));
+    }
+    if (lower == "truncate") {
+        if (args.size() < 2 || arg_is_null(0) || arg_is_null(1)) return types::Value::make_null();
+        bool ok = false; double d = arg_num(0, ok);
+        int64_t prec = 0;
+        auto pv = eval(*args[1], ctx);
+        if (pv.is_int()) prec = pv.v_int;
+        if (!ok) return types::Value::make_null();
+        double factor = std::pow(10.0, static_cast<double>(prec));
+        return types::Value::make_double(std::trunc(d * factor) / factor);
+    }
+    if (lower == "greatest" || lower == "least") {
+        if (args.empty()) return types::Value::make_null();
+        types::Value best;
+        bool first = true;
+        for (size_t i = 0; i < args.size(); ++i) {
+            auto v = eval(*args[i], ctx);
+            if (v.is_null()) return types::Value::make_null();
+            if (first) { best = v; first = false; continue; }
+            int c = v.compare(best);
+            if ((lower == "greatest" && c > 0) || (lower == "least" && c < 0)) best = v;
+        }
+        return best;
+    }
+
+    // 已知但尚未实现的 MySQL 函数:保持历史行为(返回 NULL),避免误报 1305
+    static const std::set<std::string> kKnownUnimplemented = {
+        "row_number", "rank", "dense_rank", "percent_rank", "cume_dist", "ntile",
+        "lag", "lead", "first_value", "last_value", "nth_value",
+        "sum", "avg", "min", "max", "count", "group_concat",
+        "date_add", "date_sub", "adddate", "subdate", "datediff", "timediff",
+        "last_day", "dayofweek", "dayofyear", "week", "weekday", "quarter",
+        "unix_timestamp", "from_unixtime", "date_format", "str_to_date",
+        "curtime", "current_time", "localtime", "utc_date", "utc_time",
+        "timestampdiff", "timestampadd", "makedate", "period_add",
+        "cast", "convert", "binary", "json_extract", "json_unquote",
+    };
+    if (kKnownUnimplemented.count(lower)) return types::Value::make_null();
+
+    // 真正未知的函数:MySQL 报 1305,而不是静默 NULL
+    raise_error(1305, "42000", fmt::format("FUNCTION {} does not exist", name));
     return types::Value::make_null();
 }
 

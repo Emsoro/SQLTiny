@@ -762,6 +762,11 @@ ast::StmtPtr Parser::parse_select() {
         stmt->columns.push_back({ std::move(expr), std::move(alias) });
         if (!match_consume(TokenKind::Comma)) break;
     }
+    // SELECT FROM t —— 缺投影列表是语法错误(MySQL 1064)
+    if (stmt->columns.empty()) {
+        auto tk = peek();
+        throw ParseError(tk.line, tk.col, "expected select expression list");
+    }
 
     if (match_consume(TokenKind::KwFrom)) {
         if (match_consume(TokenKind::KwDual)) {
@@ -856,6 +861,23 @@ void Parser::parse_from(ast::SelectStmt& s) {
             s.from_derived.push_back(nullptr);
         }
     } while (match_consume(TokenKind::Comma));
+
+    // FROM a, b, c → MySQL 等价于 a CROSS JOIN b CROSS JOIN c。
+    // 执行器只把 from_tables[0] 当主表,因此把其余表搬到 joins(隐式 CROSS JOIN)。
+    if (s.from_tables.size() > 1) {
+        for (size_t i = 1; i < s.from_tables.size(); ++i) {
+            ast::JoinClause jc;
+            jc.kind = ast::JoinKind::Cross;
+            jc.table_name = s.from_tables[i];
+            jc.alias = s.from_aliases[i].second;
+            if (i < s.from_derived.size() && s.from_derived[i])
+                jc.derived = std::move(s.from_derived[i]);
+            s.joins.push_back(std::move(jc));
+        }
+        s.from_tables.resize(1);
+        s.from_aliases.resize(1);
+        s.from_derived.resize(1);
+    }
 }
 
 std::pair<std::string, std::string> Parser::parse_table_ref_alias() {

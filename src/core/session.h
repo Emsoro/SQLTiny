@@ -65,8 +65,8 @@ public:
     //   TX_REPEATABLE_READ  → 提升为 TX_SERIALIZABLE (MVCC 下即快照隔离)
     //   所有级别都不会读到未提交数据
     // ============================================================
-    ast::IsolationLevel isolationLevelDefault = ast::IsolationLevel::ReadCommitted;
-    ast::IsolationLevel isolationLevel        = ast::IsolationLevel::ReadCommitted;
+    ast::IsolationLevel isolationLevelDefault = ast::IsolationLevel::RepeatableRead;
+    ast::IsolationLevel isolationLevel        = ast::IsolationLevel::RepeatableRead;
     bool                isReadOnlyIsolation  = false;
 
     /// 设置隔离级别。sessionDefault=true 影响会话默认值(SET SESSION ...),

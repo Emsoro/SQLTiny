@@ -98,14 +98,10 @@ struct WalBufferScope {
 // 隔离级别 (HSQLDB 2.7.4 Session.setIsolation / setIsolationDefault)
 // ============================================================
 void Session::setIsolation(ast::IsolationLevel level, bool sessionDefault) {
-    bool read_only = false;
-    if (level == ast::IsolationLevel::ReadUncommitted) {
-        level = ast::IsolationLevel::ReadCommitted;   // 提升:MVCC 下 READ UNCOMMITTED → READ COMMITTED
-        read_only = !sessionDefault;                   // 下一事务级还附加"只读"
-    }
-    if (level == ast::IsolationLevel::RepeatableRead) {
-        level = ast::IsolationLevel::Serializable;     // 提升:REPEATABLE READ → SERIALIZABLE
-    }
+    // 对外如实反映用户设置的级别(SELECT @@transaction_isolation 必须原样返回);
+    // 内部语义:READ UNCOMMITTED 仍然只读已提交数据(MVCC 快照),
+    // READ COMMITTED / REPEATABLE READ / SERIALIZABLE 由 readSCN() 决定快照粒度。
+    bool read_only = (level == ast::IsolationLevel::ReadUncommitted) && !sessionDefault;
     if (sessionDefault) {
         isolationLevelDefault = level;
         isolationLevel = level;

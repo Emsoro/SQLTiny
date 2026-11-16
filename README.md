@@ -2,7 +2,9 @@
 
 > 🌐 语言: [English](./README.en.md) · **简体中文**
 
-> **当前版本 `v2.0.5`(2026-11-16)** · 版本号统一维护在 `CMakeLists.txt`(`project(SQLTiny VERSION 2.0.5)`)、`vcpkg.json`(`version-string`)与 `src/main.cpp` 启动横幅。协议层对外仍伪装为 `5.7.0-SQLTiny` 以兼容 MySQL 客户端,与产品版本无关。
+> **当前版本 `v2.0.6`(2026-11-16)** · 版本号统一维护在 `CMakeLists.txt`(`project(SQLTiny VERSION 2.0.6)`)、`vcpkg.json`(`version-string`)与 `src/main.cpp` 启动横幅。协议层对外仍伪装为 `5.7.0-SQLTiny` 以兼容 MySQL 客户端,与产品版本无关。
+>
+> v2.0.6 交付 **MySQL 语义 / 协议兼容修复**(由独立 sqllogictest 套件驱动,FAIL 67→0),内容见下文「v2.0.6 更新内容」。
 
 **SQLTiny** 是用现代 C++20 从零重写的轻量级关系型数据库,核心设计灵感来自 [HSQLDB](http://hsqldb.org/),额外暴露 **MySQL Wire Protocol**——标准 MySQL 客户端(`mysql` CLI、Navicat、DBeaver、Connector/J、PyMySQL、DBX/dbExpress)直接连接。
 
@@ -34,6 +36,58 @@
 > 🔒 **锁分层**: Catalog.mu_(DDL) → Table.mu_ shared_lock(SELECT 多读者并行) / unique_lock(DML 独占) → RowLockMap(行级冲突检测) → TransactionManager.writeLock_(提交边界) → WalManager.mu_(WAL 文件读写)
 >
 > 🧊 **MVCC**: SELECT 完全不加锁,`for_each_visible(querySCN, readerTxn)` 按 `createSCN/deleteSCN` 与 `pendingTxn` 过滤;未提交行只对所属事务可见,commit 才 `finalize_commit` 对外发布
+
+---
+
+## 🆕 v2.0.6 更新内容（MySQL 语义兼容修复，2026-11-16）
+
+由独立 sqllogictest 测试集（与本仓库同级的 `SQLTinyTest/testcase`，36 个 `.slt`，按 MySQL 8.0 语义书写）驱动：首轮 **1184 项 / PASS 971 / GAP 146 / FAIL 67**，修复后 **PASS 1071 / GAP 113 / FAIL 0**；协议套件 **42/42**，持久化 **13 PASS / 2 GAP**。
+
+### 1. 值语义与表达式
+
+| 类别 | 修复 |
+|---|---|
+| NULL 排序 | `Value::compare` 视 NULL 为最小值：ASC 最前 / DESC 最后 |
+| 三值逻辑 | `NULL IN (...)`、`NOT IN (…,NULL)` 返回 UNKNOWN；`AND/OR/NOT` 完整三值 |
+| LIKE | 默认不区分大小写（`regex::icase`），`'Alice' LIKE 'a%'` = 1 |
+| 隐式转换 | 算术表达式按数值处理，`SELECT '5' + 3` → `8`；列与字符串字面量的等值比较仍走字符串语义（`sal = '9000'` 为已知 GAP） |
+| NULL 传播 | `LENGTH/CHAR_LENGTH(NULL)` → NULL；`NULLIF` / `IFNULL` / `COALESCE` 正确求值（`IF()` 与关键字冲突，暂为 GAP） |
+| ROUND | DECIMAL 字面量按定点舍入，`ROUND(1.005,2)` = `1.01` |
+| 未知函数 | 报 `1305 FUNCTION ... does not exist`，不再静默返回 NULL |
+| 函数补齐 | `UPPER/LOWER/TRIM/LTRIM/RTRIM/SUBSTR/REPLACE/REVERSE/LPAD/RPAD/REPEAT/CONCAT_WS/ASCII/CHAR`、`CEIL/FLOOR/MOD/POWER/SQRT/SIGN/GREATEST/LEAST`、`LOCATE` 三参数 |
+
+### 2. 协议层
+
+- BIGINT 极值按整数文本下发（`-9223372036854775808`），整型列的整数值不再输出科学计数法
+- 表达式结果列推断为数值类型（`SELECT 1` 的列类型为 LONGLONG，而非 VAR_STRING）
+- `COM_STMT_EXECUTE` 字符串参数绑定整数列时按列类型隐式转换后命中
+- `COM_STMT_PREPARE` 语法错误返回 1064
+
+### 3. SQL 校验与报错（对齐 MySQL）
+
+`1048` NOT NULL · `1054` 未知列（SELECT / INSERT）· `1136` 插入列数不匹配 · `1366/1264/1406` 类型 / 范围 / 长度 · `1064` 缺投影列表 · `1242/1241` 标量 / IN 子查询 · `1248` 派生表缺别名 · `1049` 已删库 · `1111` 嵌套聚合 · `1055` ONLY_FULL_GROUP_BY · `1222` UNION 列数 · `3593` 窗口函数出现在 WHERE · `1305` 未知函数
+
+### 4. 查询能力
+
+- `RIGHT JOIN`、逗号连接（隐式 CROSS JOIN）、链式 JOIN 复用同一表名/别名
+- 空输入 + `GROUP BY` 不再产出伪行；`GROUP BY` 后的 `LIMIT/OFFSET` 生效
+- 窗口函数：`ROW_NUMBER() OVER` 与 `COUNT/SUM/AVG/MIN/MAX ... OVER (PARTITION BY … ORDER BY …)` 逐行返回；`RANK()` 结果与 MySQL 一致（用例期望值待校正），`DENSE_RANK/LAG/LEAD/COUNT(*) OVER/命名窗口` 仍为 GAP
+- `UNION` 列数校验、左右类型统一；`LIMIT/OFFSET` 越界返回空集
+
+### 5. 元数据
+
+- `information_schema.STATISTICS` / `KEY_COLUMN_USAGE` 输出主键索引与主键列约束
+- `SHOW COLUMNS` 的 `Default` 列返回真实默认值
+- `SELECT @@autocommit` 返回 `1`；`lower_case_table_names` 统一为 `1`
+- 隔离级别按请求原样返回（不再把 `REPEATABLE READ` 映射成 SERIALIZABLE）
+
+### 6. 测试结果
+
+| 套件 | 结果 |
+|---|---|
+| sqllogictest（36 文件） | 1184 项 · **PASS 1071 · GAP 113 · FAIL 0** |
+| `test_protocol.py` | **42 / 42 PASS** |
+| `test_persistence.py` | **13 PASS / 2 GAP / 0 FAIL**（缺优雅关闭 checkpoint） |
 
 ---
 
@@ -399,7 +453,8 @@ SQL 语法:`SET SESSION TRANSACTION ISOLATION LEVEL <级别>`(会话默认)、`S
 | **主键点查索引探测 (v2.0.3)** | ✅ | `WHERE PK首列=常量` 走 `for_each_by_pk_prefix`,不再全表扫描;逻辑删除历史自动回退全扫保证 MVCC 可见性;`employees` 点查 74ms→**0.13ms** · `salaries` 678ms→**0.17ms** |
 | **融合聚合 + UNION ALL (v2.0.4)** | ✅ | 单表聚合单遍扫描快路径:`SUM(salary)` 2.97s→**0.35s**、`WHERE salary>100000` 计行 0.774s→**0.248s**;UNION/UNION ALL(含去重、链式、尾部 ORDER BY/LIMIT)+ `ORDER BY 1` 位置序号;三端结果与 MySQL 对比验证 |
 | **复杂查询正确性 + 语法补全 (v2.0.5)** | ✅ | WITH/递归 CTE、标量子查询、EXISTS、FROM 派生表、COUNT(DISTINCT)、BETWEEN、`ROW_NUMBER() OVER`、日期函数;GROUP BY 别名与内嵌聚合修复;高基数分桶 O(n²)→O(1)、相关子查询去相关;`compare_employees.py` 39 条 **39/39 MATCH** |
-| **后续** | 📋 | 等待队列/死锁检测 → 存储过程 · caching_sha2_password / SSL · 复制 |
+| **MySQL 语义兼容修复 (v2.0.6, 2026-11-16)** | ✅ | sqllogictest 套件驱动 **FAIL 67→0**;NULL 排序/三值逻辑、LIKE 大小写、BIGINT/表达式列类型、SQL 校验(1048/1054/1136/1366/1406/1242/1241/1111/1055/1222/3593)、RIGHT JOIN/逗号连接、窗口聚合、information_schema 主键元数据、字符串与数值函数;SLT **PASS 1071 / GAP 113 / FAIL 0**,协议 **42/42** |
+| **后续** | 📋 | 优雅关闭 checkpoint · 日期函数与关键字同名函数 · 等待队列/死锁检测 → 存储过程 · caching_sha2_password / SSL · 复制 |
 
 ---
 
@@ -455,10 +510,10 @@ FROM users u INNER JOIN orders o ON o.user_id = u.id;
 | 产物 | 类型 | 说明 |
 |---|---|---|
 | `build/Debug/sqltiny.lib` | 静态库 | 引擎核心,嵌入式进程内调用 |
-| `build/Debug/sqltiny_server.exe` | 可执行 | MySQL 协议 TCP 服务器(v2.0.5) |
+| `build/Debug/sqltiny_server.exe` | 可执行 | MySQL 协议 TCP 服务器(v2.0.6) |
 | `build/Release/sqltiny_server.exe` | 可执行(发布版) | 同上,Release 版约 **0.9 MB** 单文件(静态 CRT + fmt 静态链接,无 dll 依赖,可直接拷贝部署);Debug 版约 4.8 MB |
 
-**`sqltiny_server.exe` 文件信息(v2.0.5)**:
+**`sqltiny_server.exe` 文件信息(v2.0.6)**:
 
 | 属性 | 值 |
 |---|---|
@@ -554,6 +609,23 @@ dbx_probe           58/58 PASS         DBX/dbExpress SQL 探针(进程内:连接
 test_stmt_prepare    7/7   PASS        预编译语句 binary protocol 全流程
 ```
 
+**外部逻辑测试集**（sqllogictest 风格，独立目录 `SQLTinyTest/testcase`，与本仓库同级）：
+
+| 套件 | 结果 |
+|---|---|
+| `runner.py`（36 个 `.slt`，1184 项） | **PASS 1071 · GAP 113 · FAIL 0** |
+| `python/test_protocol.py` | **42 / 42 PASS** |
+| `python/test_persistence.py` | **13 PASS / 2 GAP / 0 FAIL**（缺优雅关闭 checkpoint 路径） |
+
+```powershell
+# 在 SQLTinyTest 目录执行；server 默认取 ../SQLTiny/build/Release/sqltiny_server.exe
+python testcase\runner.py
+python testcase\python\test_protocol.py
+python testcase\python\test_persistence.py
+```
+
+计划、缺口清单与历史基线见该目录的 `PLAN.md` / `README.md`。
+
 ---
 
 ## 🚀 使用方式
@@ -615,7 +687,7 @@ SQLTiny 通过 `--data-dir` 指定持久化目录,目录下生成两个文件:
 
 # 2. 指定持久化目录 (最常用)
 #    第一次启动自动创建目录,生成 sql.wal + sql.data
-.\build\Debug\sqltiny_server.exe --port 3306 --user root --data-dir D:\SQLTiny\data
+.\build\Debug\sqltiny_server.exe --port 3306 --user root --data-dir <数据目录>
 
 # 3. 自定义位置 (相对或绝对路径都可以)
 .\build\Debug\sqltiny_server.exe --port 3306 --user root --data-dir .\sqltiny_data
@@ -632,11 +704,12 @@ SQLTiny 通过 `--data-dir` 指定持久化目录,目录下生成两个文件:
 | **多库 DDL** | `CREATE DATABASE [IF NOT EXISTS]` / `DROP DATABASE [IF EXISTS]` / `USE db` | Catalog 多库化,库级独立表 |
 | **表 DDL** | `CREATE TABLE t(...) [IF NOT EXISTS]` / `DROP TABLE [IF EXISTS]` | PRIMARY KEY / AUTO_INCREMENT / DEFAULT / NOT NULL |
 | **DML** | `INSERT INTO t VALUES(…, …)` / 多行 / 指定列 / `UPDATE t SET x=… WHERE …` / `DELETE FROM t WHERE …` | 显式 NULL 不被补 DEFAULT |
-| **查询** | `SELECT cols FROM t WHERE … ORDER BY … LIMIT n` | IS NULL / IS NOT NULL / LIKE / IN / 比较运算 / AND / OR / NOT |
-| **表达式** | `CASE [base] WHEN .. THEN .. [ELSE ..] END` / 标量子查询 / `?` 占位符 | 简单 CASE 与搜索 CASE |
-| **聚合** | `COUNT(*)` / `COUNT(col)` / `SUM` / `AVG` / `MIN` / `MAX` | GROUP BY + HAVING 完整 |
-| **表连接** | INNER JOIN / LEFT JOIN / CROSS JOIN / 多 JOIN 链 | 别名限定列 + LEFT JOIN 保留 NULL 行 |
-| **子查询** | `WHERE col IN (SELECT …)` | 标量子查询 |
+| **查询** | `SELECT cols FROM t WHERE … GROUP BY … HAVING … ORDER BY … LIMIT n [OFFSET m]` / `UNION [ALL]` / `ORDER BY 1` | IS NULL / IS NOT NULL / LIKE / IN / BETWEEN / 比较运算 / AND / OR / NOT |
+| **表达式** | `CASE [base] WHEN .. THEN .. [ELSE ..] END` / `NULLIF` / `COALESCE` / `IFNULL` / `GREATEST` / `LEAST` / 字符串·数值函数 / `?` 占位符 | 简单 CASE 与搜索 CASE；未知函数报 1305；`IF()` / `LEFT()` / `RIGHT()` 等与关键字同名，暂为 GAP |
+| **聚合** | `COUNT(*)` / `COUNT(col)` / `COUNT(DISTINCT x)` / `SUM` / `AVG` / `MIN` / `MAX` | GROUP BY + HAVING 完整；嵌套聚合报 1111；ONLY_FULL_GROUP_BY 报 1055 |
+| **窗口函数** | `ROW_NUMBER() / RANK() / DENSE_RANK()` · `COUNT/SUM/AVG/MIN/MAX(...) OVER (PARTITION BY … ORDER BY …)` | 逐行返回，支持分区与组内累计 |
+| **表连接** | INNER JOIN / LEFT JOIN / RIGHT JOIN / CROSS JOIN / 逗号连接 / 多 JOIN 链 | 别名限定列；LEFT/RIGHT JOIN 保留无匹配侧的 NULL 行 |
+| **子查询** | `IN (SELECT …)` / 标量子查询（含相关） / `EXISTS` / FROM 派生表 / CTE（含 `WITH RECURSIVE`） | 多行标量子查询报 1242、IN 多列报 1241、派生表缺别名报 1248 |
 | **SHOW** | `SHOW DATABASES` / `SHOW TABLES` / `SHOW [FULL] COLUMNS FROM [db.]t` / `SHOW CREATE TABLE t` / `SHOW STATUS` / `SHOW VARIABLES [LIKE pattern]` / `SHOW INDEX|KEYS FROM [db.]t` / `SHOW TABLE STATUS [LIKE]` / `SHOW ENGINES` / `SHOW PLUGINS` / `SHOW CHARSET` / `SHOW COLLATION` / `SHOW PROCESSLIST` / `SHOW WARNINGS` / `SHOW TRIGGERS [WHERE]` | LIKE 支持 `%xxx%` / `xxx%` / `%xxx` / 精确匹配;支持 `` `db`.`tbl` `` 反引号限定名 |
 | **元数据** | `information_schema.SCHEMATA` / `TABLES` / `COLUMNS` / `TABLE_CONSTRAINTS` / `KEY_COLUMN_USAGE` / `STATISTICS` / `TRIGGERS` / `ROUTINES` / `VIEWS` / `EVENTS` | 每次查询物化的虚拟表,第三方工具元数据浏览可用 |
 | **系统** | `SET NAMES utf8mb4` / `SET AUTOCOMMIT = 0/1` / `SET [SESSION] TRANSACTION ISOLATION LEVEL …` | 真实生效;`@@tx_isolation` / `@@autocommit` 返回会话真实值 |
@@ -740,7 +813,7 @@ netstat -ano | findstr :3306
 A: M4 前 version 字符串以 `SQLTiny-` 开头,PyMySQL 解析 version 失败。M4 已修成 `5.7.0-SQLTiny`。如果还有这个错,确认是最新 build。
 
 **Q: PyMySQL 报 `Packet sequence number wrong` / `InterfaceError (0, '')`?**
-A: 这通常是前一个查询没正确处理错误包导致连接状态不同步。重新建立连接即可;也可以先 `conn.ping(reconnect=True)`。
+A: 根因是结果集列声明类型与实际返回值不一致（客户端按列类型转换失败后中断读行，残留包导致下一条命令错位）。历史触发点 BIGINT 极值文本、UNION 类型不兼容、`SUM(DECIMAL)` 列类型已修复；若仍复现，用 `--query-log` 抓取该语句并检查 `infer_type` 的列类型推断。
 
 **Q: 密码登录失败?**
 A: 开发期不校验密码,user 必须是 `root`,密码任意填(`mysql -u root -p` 直接回车也行)。
