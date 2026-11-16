@@ -150,30 +150,65 @@ struct InsertStmt {
     std::vector<std::string> columns;   // 可空,空表示全列
     std::vector<std::vector<ExprPtr>> value_rows;  // VALUES 子句
     StmtPtr select_source;                          // INSERT … SELECT … (M3)
+    // P1-b: INSERT 方言
+    bool ignore = false;                            // INSERT IGNORE
+    bool replace = false;                           // REPLACE INTO (冲突时删旧插新)
+    std::vector<std::pair<std::string, ExprPtr>> on_dup_update;  // ON DUPLICATE KEY UPDATE
 };
 
 // ---------- UPDATE ----------
 struct UpdateStmt {
     std::string table_name;
-    std::vector<std::pair<std::string, ExprPtr>> set_clause;  // (col, expr)
+    std::string alias;                              // 表别名
+    std::vector<JoinClause> joins;                  // 多表 UPDATE (P1-b)
+    std::vector<std::pair<std::string, ExprPtr>> set_clause;  // (col 可带限定, expr)
     ExprPtr where;
+    std::vector<std::pair<ExprPtr, bool>> order_by; // ORDER BY (P1-b)
+    std::optional<int64_t> limit;                   // LIMIT (P1-b)
 };
 
 // ---------- DELETE ----------
 struct DeleteStmt {
     std::string table_name;
+    std::string alias;                              // 表别名
     ExprPtr where;
+    std::vector<std::pair<ExprPtr, bool>> order_by; // ORDER BY (P1-b)
+    std::optional<int64_t> limit;                   // LIMIT (P1-b)
 };
 
 // ---------- DDL ----------
 struct CreateTableStmt {
     bool if_not_exists = false;
+    bool temporary = false;                         // CREATE TEMPORARY TABLE (P1-b,语义同普通表)
     std::string table_name;
     std::vector<ColumnDef> columns;
     std::vector<std::vector<std::string>> primary_key;  // 列名列表
     struct IdxDef { std::string name; std::vector<std::string> columns; bool unique; };
     std::vector<IdxDef> indexes;
+    // P1-b: CREATE TABLE 变体
+    std::optional<int64_t> auto_increment_start;    // AUTO_INCREMENT=n 表选项
+    std::string like_table;                         // CREATE TABLE ... LIKE src
+    StmtPtr select_source;                          // CREATE TABLE ... AS SELECT
 };
+
+struct TruncateStmt { std::string table_name; };
+
+struct AlterTableStmt {
+    enum class Action { AddColumn } action = Action::AddColumn;
+    std::string table_name;
+    ColumnDef column;                               // ADD COLUMN 的列定义
+};
+
+struct RenameTableStmt { std::string from_table, to_table; };
+
+struct CreateIndexStmt {
+    std::string index_name;
+    std::string table_name;
+    std::vector<std::string> columns;
+    bool unique = false;
+};
+
+struct CreateViewStmt { std::string view_name; StmtPtr query; };
 
 struct DropTableStmt {
     bool if_exists = false;
@@ -251,6 +286,8 @@ enum class StmtKind {
     Begin, Commit, Rollback,       // M6 事务
     StartTransaction,              // START TRANSACTION (BEGIN 别名, 可带隔离级别)
     Savepoint, RollbackToSavepoint, ReleaseSavepoint,
+    // P1-b DDL
+    TruncateTable, AlterTable, RenameTable, CreateIndex, CreateView,
 };
 
 struct Statement {
@@ -268,6 +305,11 @@ struct Statement {
     std::unique_ptr<UseStmt>         use_;
     std::unique_ptr<ShowStmt>        show_;
     std::unique_ptr<SetStmt>         set_;
+    std::unique_ptr<TruncateStmt>    truncate_;
+    std::unique_ptr<AlterTableStmt>  alter_table_;
+    std::unique_ptr<RenameTableStmt> rename_table_;
+    std::unique_ptr<CreateIndexStmt> create_index_;
+    std::unique_ptr<CreateViewStmt>  create_view_;
 
     std::string savepoint_name;
     std::string raw;

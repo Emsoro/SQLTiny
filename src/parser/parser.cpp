@@ -211,16 +211,24 @@ ast::StmtPtr Parser::parse_top() {
             return s;
         }
         case TokenKind::KwInsert:    return parse_insert();
+        case TokenKind::KwReplace:   return parse_insert();  // REPLACE INTO → InsertStmt.replace
         case TokenKind::KwUpdate:    return parse_update();
         case TokenKind::KwDelete:    return parse_delete();
+        case TokenKind::KwTruncate:  return parse_truncate();
+        case TokenKind::KwAlter:     return parse_alter_table();
+        case TokenKind::KwRename:    return parse_rename_table();
         case TokenKind::KwCreate: {
             consume(); // CREATE
             auto nt = peek();
             if (nt.kind == TokenKind::KwDatabase || nt.kind == TokenKind::KwSchema)
                 return parse_create_database();
-            if (nt.kind == TokenKind::KwTable)
+            if (nt.kind == TokenKind::KwTable || nt.kind == TokenKind::KwTemporary)
                 return parse_create_table();
-            throw ParseError(nt.line, nt.col, fmt::format("expected TABLE or DATABASE after CREATE, got '{}'", nt.text));
+            if (nt.kind == TokenKind::KwIndex || nt.kind == TokenKind::KwUnique)
+                return parse_create_index();
+            if (nt.kind == TokenKind::KwView)
+                return parse_create_view();
+            throw ParseError(nt.line, nt.col, fmt::format("expected TABLE/DATABASE/INDEX/VIEW after CREATE, got '{}'", nt.text));
         }
         case TokenKind::KwDrop: {
             consume(); // DROP
@@ -1031,13 +1039,18 @@ void Parser::parse_joins(ast::SelectStmt& s) {
 // ========== INSERT ==========
 
 ast::StmtPtr Parser::parse_insert() {
-    consume(); // INSERT
-    bool or_replace = false;
-    if (match_consume(TokenKind::KwOr) && match_consume(TokenKind::KwReplace)) or_replace = true;
-    (void)or_replace;
+    TokenKind first = consume().kind;         // INSERT 或 REPLACE
+    auto stmt = std::make_unique<ast::InsertStmt>();
+    if (first == TokenKind::KwReplace) stmt->replace = true;
+    else {
+        // SQLite 风格 INSERT OR REPLACE (兼容旧行为)
+        if (match_consume(TokenKind::KwOr) && match_consume(TokenKind::KwReplace))
+            stmt->replace = true;
+    }
+    // INSERT IGNORE
+    if (match_consume(TokenKind::KwIgnore)) stmt->ignore = true;
     expect(TokenKind::KwInto, "INTO");
 
-    auto stmt = std::make_unique<ast::InsertStmt>();
     stmt->table_name = parse_table_ref();
 
     // 可选列列表
@@ -1052,8 +1065,8 @@ ast::StmtPtr Parser::parse_insert() {
         }
     }
 
-    // VALUES 或 SELECT 子句 (M3)
-    if (match_consume(TokenKind::KwValues)) {
+    // VALUES / VALUE 或 SELECT 或 SET (P1-b)
+    if (match_consume(TokenKind::KwValues) || match_consume(TokenKind::KwValue)) {
         do {
             expect(TokenKind::LParen, "(");
             std::vector<ast::ExprPtr> row;
@@ -1065,13 +1078,34 @@ ast::StmtPtr Parser::parse_insert() {
             consume(); // )
             stmt->value_rows.push_back(std::move(row));
         } while (match_consume(TokenKind::Comma));
+    } else if (match_consume(TokenKind::KwSet)) {
+        // INSERT ... SET col = expr, ... → 等价单行列插入
+        stmt->value_rows.push_back({});
+        do {
+            std::string col = kw_or_ident();
+            expect(TokenKind::Eq, "=");
+            stmt->columns.push_back(std::move(col));
+            stmt->value_rows[0].push_back(parse_expr());
+        } while (match_consume(TokenKind::Comma));
     } else if (match(TokenKind::KwSelect)) {
         // INSERT … SELECT … :不要 match_consume,让 parse_select 自己处理 SELECT token
         auto sub = parse_select();
         stmt->select_source = std::move(sub);
     } else {
         auto t = peek();
-        throw ParseError(t.line, t.col, "expected VALUES or SELECT after INSERT");
+        throw ParseError(t.line, t.col, "expected VALUES/VALUE/SET/SELECT after INSERT");
+    }
+
+    // ON DUPLICATE KEY UPDATE col = expr, ...
+    if (match_consume(TokenKind::KwOn)) {
+        expect(TokenKind::KwDuplicate, "DUPLICATE");
+        expect(TokenKind::KwKey, "KEY");
+        expect(TokenKind::KwUpdate, "UPDATE");
+        do {
+            std::string col = kw_or_ident();
+            expect(TokenKind::Eq, "=");
+            stmt->on_dup_update.emplace_back(std::move(col), parse_expr());
+        } while (match_consume(TokenKind::Comma));
     }
 
     auto r = std::make_unique<ast::Statement>();
@@ -1085,16 +1119,63 @@ ast::StmtPtr Parser::parse_insert() {
 ast::StmtPtr Parser::parse_update() {
     consume(); // UPDATE
     auto stmt = std::make_unique<ast::UpdateStmt>();
-    stmt->table_name = parse_table_ref();
+
+    // 目标表 [AS] alias
+    auto ref = parse_table_ref_alias();
+    stmt->table_name = ref.first;
+    stmt->alias = ref.second;
+
+    // 多表 UPDATE: [INNER|LEFT] JOIN t2 [AS] a2 ON ...
+    while (true) {
+        if (!match(TokenKind::KwJoin) && !match(TokenKind::KwInner) &&
+            !match(TokenKind::KwLeft) && !match(TokenKind::KwRight) &&
+            !match(TokenKind::KwCross)) break;
+        ast::JoinClause jc;
+        if (match_consume(TokenKind::KwLeft)) {
+            match_consume(TokenKind::KwOuter); match_consume(TokenKind::KwJoin);
+            jc.kind = ast::JoinKind::Left;
+        } else if (match_consume(TokenKind::KwRight)) {
+            match_consume(TokenKind::KwOuter); match_consume(TokenKind::KwJoin);
+            jc.kind = ast::JoinKind::Right;
+        } else if (match_consume(TokenKind::KwCross)) {
+            match_consume(TokenKind::KwJoin);
+            jc.kind = ast::JoinKind::Cross;
+        } else {
+            match_consume(TokenKind::KwInner);  // 可选
+            match_consume(TokenKind::KwJoin);
+            jc.kind = ast::JoinKind::Inner;
+        }
+        auto jref = parse_table_ref_alias();
+        jc.table_name = jref.first;
+        jc.alias = jref.second;
+        if (match_consume(TokenKind::KwOn)) jc.on = parse_expr();
+        stmt->joins.push_back(std::move(jc));
+    }
+
     expect(TokenKind::KwSet, "SET");
     do {
         std::string col = kw_or_ident();
+        if (match_consume(TokenKind::Dot)) col += "." + kw_or_ident();   // 限定列名 a.n
         expect(TokenKind::Eq, "=");
         auto expr = parse_expr();
         stmt->set_clause.push_back({ std::move(col), std::move(expr) });
     } while (match_consume(TokenKind::Comma));
     if (match_consume(TokenKind::KwWhere)) {
         stmt->where = parse_expr();
+    }
+    if (match_consume(TokenKind::KwOrder)) {
+        expect(TokenKind::KwBy, "BY");
+        do {
+            bool asc = true;
+            auto e = parse_expr();
+            if (match_consume(TokenKind::KwDesc)) asc = false;
+            else match_consume(TokenKind::KwAsc);
+            stmt->order_by.emplace_back(std::move(e), asc);
+        } while (match_consume(TokenKind::Comma));
+    }
+    if (match_consume(TokenKind::KwLimit)) {
+        Token n = consume();
+        stmt->limit = n.int_value;
     }
     auto r = std::make_unique<ast::Statement>();
     r->kind = ast::StmtKind::Update;
@@ -1108,9 +1189,25 @@ ast::StmtPtr Parser::parse_delete() {
     consume(); // DELETE
     expect(TokenKind::KwFrom, "FROM");
     auto stmt = std::make_unique<ast::DeleteStmt>();
-    stmt->table_name = parse_table_ref();
+    auto ref = parse_table_ref_alias();
+    stmt->table_name = ref.first;
+    stmt->alias = ref.second;
     if (match_consume(TokenKind::KwWhere)) {
         stmt->where = parse_expr();
+    }
+    if (match_consume(TokenKind::KwOrder)) {
+        expect(TokenKind::KwBy, "BY");
+        do {
+            bool asc = true;
+            auto e = parse_expr();
+            if (match_consume(TokenKind::KwDesc)) asc = false;
+            else match_consume(TokenKind::KwAsc);
+            stmt->order_by.emplace_back(std::move(e), asc);
+        } while (match_consume(TokenKind::Comma));
+    }
+    if (match_consume(TokenKind::KwLimit)) {
+        Token n = consume();
+        stmt->limit = n.int_value;
     }
     auto r = std::make_unique<ast::Statement>();
     r->kind = ast::StmtKind::Delete;
@@ -1175,6 +1272,21 @@ ast::ColumnDef Parser::parse_column_def() {
             def.is_primary_key = true; def.nullable = false;
         }
         else if (match_consume(TokenKind::KwAutoIncrement)) { def.is_auto_increment = true; }
+        else if (match_consume(TokenKind::KwUnique)) {
+            // 列级 UNIQUE [KEY] —— 引擎暂不以二级索引强制,解析并忽略
+            match_consume(TokenKind::KwKey);
+        }
+        else if (match_consume(TokenKind::KwCheck)) {
+            // 列级 CHECK (expr) —— 解析并忽略
+            if (match_consume(TokenKind::LParen)) {
+                int depth = 1;
+                while (depth > 0 && !match(TokenKind::Eof)) {
+                    TokenKind k = consume().kind;
+                    if (k == TokenKind::LParen) ++depth;
+                    else if (k == TokenKind::RParen) --depth;
+                }
+            }
+        }
         else if (match_consume(TokenKind::KwDefault)) {
             auto e = parse_expr();
             def.default_value = std::shared_ptr<ast::Expression>(e.release());
@@ -1229,6 +1341,31 @@ std::vector<ast::ColumnDef> Parser::parse_column_defs() {
                 while (!match(TokenKind::Comma) && !match(TokenKind::RParen) && !match(TokenKind::Eof))
                     consume();
             }
+        } else if (match(TokenKind::KwKey) || match(TokenKind::KwIndex)) {
+            // 表级 KEY (col...) / INDEX (col...) —— 非唯一索引,引擎暂不强制,解析并忽略
+            consume();
+            if (match(TokenKind::Ident) || match(TokenKind::QuotedIdent)) (void)kw_or_ident(); // 可选索引名
+            expect(TokenKind::LParen, "(");
+            do { (void)kw_or_ident(); } while (match_consume(TokenKind::Comma));
+            expect(TokenKind::RParen, ")");
+        } else if (match(TokenKind::KwUnique)) {
+            // 表级 UNIQUE (col...) / UNIQUE KEY [name] (col...) —— 解析并忽略
+            consume();
+            match_consume(TokenKind::KwKey);
+            if (match(TokenKind::Ident) || match(TokenKind::QuotedIdent)) (void)kw_or_ident();
+            expect(TokenKind::LParen, "(");
+            do { (void)kw_or_ident(); } while (match_consume(TokenKind::Comma));
+            expect(TokenKind::RParen, ")");
+        } else if (match(TokenKind::KwCheck)) {
+            // 表级 CHECK (expr) —— 解析并忽略(吞到右括号)
+            consume();
+            expect(TokenKind::LParen, "(");
+            int depth = 1;
+            while (depth > 0 && !match(TokenKind::Eof)) {
+                TokenKind k = consume().kind;
+                if (k == TokenKind::LParen) ++depth;
+                else if (k == TokenKind::RParen) --depth;
+            }
         } else if (match_consume(TokenKind::KwConstraint)) {
             // CONSTRAINT name PRIMARY KEY/UNIQUE/FOREIGN KEY ... —— 跳过名字后按对应约束处理
             (void)kw_or_ident();
@@ -1275,14 +1412,34 @@ std::vector<ast::ColumnDef> Parser::parse_column_defs() {
 
 ast::StmtPtr Parser::parse_create_table() {
     // CREATE 已在 parse_top 里 consume 掉
-    match_consume(TokenKind::KwTemporary);
+    auto stmt = std::make_unique<ast::CreateTableStmt>();
+    if (match_consume(TokenKind::KwTemporary)) stmt->temporary = true;
     expect(TokenKind::KwTable, "TABLE");
 
-    auto stmt = std::make_unique<ast::CreateTableStmt>();
     if (match_consume(TokenKind::KwIf) && match_consume(TokenKind::KwNot) && match_consume(TokenKind::KwExists)) {
         stmt->if_not_exists = true;
     }
     stmt->table_name = parse_table_ref();
+
+    // CREATE TABLE ... LIKE src
+    if (match_consume(TokenKind::KwLike)) {
+        stmt->like_table = parse_table_ref();
+        skip_ddl_options();
+        auto r = std::make_unique<ast::Statement>();
+        r->kind = ast::StmtKind::CreateTable;
+        r->create_table_ = std::move(stmt);
+        return r;
+    }
+
+    // CREATE TABLE ... AS SELECT ...
+    if (match_consume(TokenKind::KwAs)) {
+        if (match(TokenKind::KwSelect)) stmt->select_source = parse_select();
+        skip_ddl_options();
+        auto r = std::make_unique<ast::Statement>();
+        r->kind = ast::StmtKind::CreateTable;
+        r->create_table_ = std::move(stmt);
+        return r;
+    }
 
     auto cols = parse_column_defs();
     // 把表级 PRIMARY KEY 转成列级
@@ -1312,10 +1469,18 @@ ast::StmtPtr Parser::parse_create_table() {
         stmt->primary_key.push_back(table_pk);
     }
     stmt->columns = std::move(cols);
+
+    // 表选项:捕获 AUTO_INCREMENT=n,其余跳过
+    if (match(TokenKind::KwAutoIncrement)) {
+        consume();                          // AUTO_INCREMENT
+        match_consume(TokenKind::Eq);       // = (可省略)
+        stmt->auto_increment_start = consume().int_value;
+    }
+    skip_ddl_options();   // ENGINE= / DEFAULT CHARSET= / COLLATE= 等表选项
+
     auto r = std::make_unique<ast::Statement>();
     r->kind = ast::StmtKind::CreateTable;
     r->create_table_ = std::move(stmt);
-    skip_ddl_options();   // ENGINE= / DEFAULT CHARSET= / COLLATE= 等表选项
     return r;
 }
 
@@ -1340,6 +1505,81 @@ ast::StmtPtr Parser::parse_drop_table() {
     auto r = std::make_unique<ast::Statement>();
     r->kind = ast::StmtKind::DropTable;
     r->drop_table_ = std::move(stmt);
+    return r;
+}
+
+ast::StmtPtr Parser::parse_truncate() {
+    consume(); // TRUNCATE
+    match_consume(TokenKind::KwTable);
+    auto stmt = std::make_unique<ast::TruncateStmt>();
+    stmt->table_name = parse_table_ref();
+    auto r = std::make_unique<ast::Statement>();
+    r->kind = ast::StmtKind::TruncateTable;
+    r->truncate_ = std::move(stmt);
+    return r;
+}
+
+ast::StmtPtr Parser::parse_alter_table() {
+    consume(); // ALTER
+    expect(TokenKind::KwTable, "TABLE");
+    auto stmt = std::make_unique<ast::AlterTableStmt>();
+    stmt->table_name = parse_table_ref();
+    if (match_consume(TokenKind::KwAdd)) {
+        match_consume(TokenKind::KwColumn);  // COLUMN 可选
+        stmt->column = parse_column_def();
+    } else {
+        auto t = peek();
+        throw ParseError(t.line, t.col, "only ALTER TABLE ... ADD COLUMN is supported");
+    }
+    auto r = std::make_unique<ast::Statement>();
+    r->kind = ast::StmtKind::AlterTable;
+    r->alter_table_ = std::move(stmt);
+    return r;
+}
+
+ast::StmtPtr Parser::parse_rename_table() {
+    consume(); // RENAME
+    expect(TokenKind::KwTable, "TABLE");
+    auto stmt = std::make_unique<ast::RenameTableStmt>();
+    stmt->from_table = parse_table_ref();
+    expect(TokenKind::KwTo, "TO");
+    stmt->to_table = parse_table_ref();
+    auto r = std::make_unique<ast::Statement>();
+    r->kind = ast::StmtKind::RenameTable;
+    r->rename_table_ = std::move(stmt);
+    return r;
+}
+
+ast::StmtPtr Parser::parse_create_index() {
+    // CREATE 已 consume;当前在 INDEX 或 UNIQUE
+    auto stmt = std::make_unique<ast::CreateIndexStmt>();
+    if (match_consume(TokenKind::KwUnique)) stmt->unique = true;
+    expect(TokenKind::KwIndex, "INDEX");
+    stmt->index_name = kw_or_ident();
+    expect(TokenKind::KwOn, "ON");
+    stmt->table_name = parse_table_ref();
+    expect(TokenKind::LParen, "(");
+    do { stmt->columns.push_back(kw_or_ident()); } while (match_consume(TokenKind::Comma));
+    expect(TokenKind::RParen, ")");
+    skip_ddl_options();
+    auto r = std::make_unique<ast::Statement>();
+    r->kind = ast::StmtKind::CreateIndex;
+    r->create_index_ = std::move(stmt);
+    return r;
+}
+
+ast::StmtPtr Parser::parse_create_view() {
+    // CREATE 已 consume;当前在 VIEW
+    consume(); // VIEW
+    auto stmt = std::make_unique<ast::CreateViewStmt>();
+    stmt->view_name = parse_table_ref();
+    if (match_consume(TokenKind::KwAs)) {
+        if (match(TokenKind::KwSelect) || match(TokenKind::KwWith))
+            stmt->query = parse_select();
+    }
+    auto r = std::make_unique<ast::Statement>();
+    r->kind = ast::StmtKind::CreateView;
+    r->create_view_ = std::move(stmt);
     return r;
 }
 

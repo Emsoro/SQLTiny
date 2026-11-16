@@ -59,6 +59,7 @@ static const KwEntry k_keywords[] = {
     {"SCHEMA",     TokenKind::KwSchema},
     {"DROP",       TokenKind::KwDrop},
     {"ALTER",      TokenKind::KwAlter},
+    {"RENAME",     TokenKind::KwRename},
     {"ADD",        TokenKind::KwAdd},
     {"COLUMN",     TokenKind::KwColumn},
     {"PRIMARY",    TokenKind::KwPrimary},

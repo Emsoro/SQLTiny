@@ -7,7 +7,7 @@
 
 ---
 
-## 0. 当前状态(2026-11-16,v2.0.7)
+## 0. 当前状态(2026-11-16,v2.0.8)
 
 > 下文 M1–M5 为原始规划、M6 各节含设计稿伪代码,均保留供追溯。**落地状态以本节与各节 ✅ 标记为准;实际目录与运行方式见 `README.md`,架构图见 `architecture.svg`。**
 
@@ -32,6 +32,7 @@
 | **复杂查询正确性 + 语法补全(v2.0.5)** | ✅ | compare_employees 扩至 39 条;D1–D3 静默正确性缺陷、S1–S8 语法缺口(WITH/递归 CTE/标量子查询/EXISTS/派生表/COUNT(DISTINCT)/BETWEEN/窗口函数)、P1 子查询物化与去相关全部落地;**39/39 MATCH / 0 MISMATCH / 0 ST-ERR**,基础类 SQLTiny 5.45s vs MySQL 14.00s |
 | **MySQL 语义兼容修复(v2.0.6,2026-11-16)** | ✅ | 由独立 sqllogictest 套件(与本仓库同级的 `SQLTinyTest/testcase`)驱动:**FAIL 67→0**;SLT 1184 项 PASS 971→**1092** / GAP 146→**92** / FAIL **0**,协议套件 **42/42**,持久化 **15/15**。修复覆盖值语义、协议、SQL 校验、JOIN/窗口、元数据、内置函数六类,P0 语义批(`<=>`/CAST/CONVERT/会话函数/聚合扩展)已完成,详见下节 |
 | **P1-a 日期时间函数模块(v2.0.7)** | ✅ | `DATEDIFF`/`DATE_ADD`/`DATE_SUB`/`LAST_DAY`/`DAYOFWEEK`/`WEEK`/`DATE_FORMAT`/`STR_TO_DATE`/`UNIX_TIMESTAMP`/`FROM_UNIXTIME`/`CURTIME` + 无括号 `CURRENT_*` + INTERVAL 语法;SLT **1184 / PASS 1106 / GAP 78 / FAIL 0**,协议 42/42,持久化 15/15 |
+| **P1-b DML 方言 + DDL 核心(v2.0.8)** | ✅ | INSERT 方言(VALUE/SET/IGNORE/REPLACE/ON DUPLICATE)、UPDATE/DELETE ORDER BY LIMIT、多表 UPDATE、TRUNCATE、AUTO_INCREMENT 起始值/非主键自增、CTAS/LIKE/TEMPORARY/VIEW/INDEX/ALTER/RENAME、DDL 隐式提交;SLT **1184 / PASS 1132 / GAP 52 / FAIL 0** |
 | M6 P4 | ⬜ | 复制与更大测试覆盖;认证(caching_sha2_password / SSL)仍未做 |
 
 ### 本轮交付(v1.1.0 客户端兼容性)
@@ -99,6 +100,18 @@
 - **顺带修复**:P0 引入的 1055 回归 —— `SELECT dept_name … GROUP BY d.dept_name` 的裸名/限定名现在视为同一列
 
 **验证**:SLT **1184 / PASS 1106 / GAP 78 / FAIL 0**(`03_datetime.slt` 45/45,14 条 `gap` 标记移除);协议 **42/42**;持久化 **15/15**;`compare_employees.py` **39/39 MATCH**。
+
+### 本轮交付(v2.0.8 P1-b DML 方言 + DDL 核心,2026-11-16)
+
+由 `SQLTinySLT` 的 P1-b 批次驱动,GAP **78→52**、FAIL 保持 0。AST 一次性扩展(Insert/Update/Delete/CreateTable 增字段 + 5 个新 DDL StmtKind),lexer 新增 `RENAME` token,再分 parser / executor / catalog / storage / session 五层落地。
+
+- **INSERT 方言**(`parser.cpp` / `executor.cpp`):`VALUE` 单数、`() VALUES()`(NOT NULL 数值列填 0)、`INSERT ... SET`(折成单行多列)、`INSERT IGNORE`(冲突 warnings++ 跳过)、`REPLACE INTO`(冲突删旧插新)、`ON DUPLICATE KEY UPDATE`(冲突按表达式更新);1062 冲突分支按三种策略分流
+- **UPDATE / DELETE**(`executor.cpp`):ORDER BY 排序键 + LIMIT 截断(先收集再排序);多表 `UPDATE ... JOIN ... SET a.c=b.d` 用扩展行 + 合并 col_index 在关联行上下文求值 SET;SET 列名支持 `a.c` 限定
+- **AUTO_INCREMENT**(`catalog.cpp` / `table.cpp`):建表 `AUTO_INCREMENT=n` → cursor=n-1;非主键自增列建表 + `KEY(seq)` 语法可解析
+- **DDL 核心**(`parser.cpp` / `executor.cpp` / `catalog.cpp` / `table.cpp`):CTAS(查询推断列+填数据)、`LIKE`(复制定义)、`TEMPORARY`、`VIEW`、`CREATE [UNIQUE] INDEX`、`ALTER TABLE ADD COLUMN`(现有行补默认)、`RENAME TABLE`、`TRUNCATE`(清行+重建唯一索引+游标归零);表级/列级 `KEY`/`UNIQUE`/`CHECK` 语法解析
+- **DDL 隐式提交**(`session.cpp`):DDL 语句执行前若在事务中先 commit,之后的 ROLLBACK 不再撤销此前的 DML(MySQL 语义)
+
+**验证**:SLT **1184 / PASS 1132 / GAP 52 / FAIL 0**;协议 **42/42**;持久化 **15/15**。CTest 12 项中 2 项 smoke 失败(`smoke_m25_e2e` 端口依赖、`smoke_m6_isolation` 的 `@@autocommit` 显示格式),已用 git stash 切到 HEAD 基线对比确认为既有问题,与本次改动无关。
 
 ### 本轮交付(v2.0.6 MySQL 语义兼容修复,2026-11-16)
 
@@ -317,7 +330,7 @@ employees 标准数据集(392 万行)实测:3 表 JOIN 求均薪 77s vs MySQL 6.
 | 测试 | 结果 |
 |---|---|
 | `ctest -C Debug` | **12/12**(含 `smoke_m6_isolation`、`smoke_m6_hsqldb_matrix`、`smoke_m6_session_db`、`dbx_probe` 与 v2.0.5 新增的 `smoke_sql_keywords` / `smoke_sql_syntax`);`smoke_m25_e2e` 端口统一为 3307,启动 server 后全通过 |
-| `sqllogictest`(外部套件 `SQLTinyTest/testcase`) | **1184 项 · PASS 1106 / GAP 78 / FAIL 0**(首轮 971/146/67;v2.0.6 修复后 1092/92/0;v2.0.7 P1-a 再消 14 项) |
+| `sqllogictest`(外部套件 `SQLTinySLT`) | **1184 项 · PASS 1132 / GAP 52 / FAIL 0**(首轮 971/146/67;v2.0.6 修复后 1092/92/0;v2.0.7 P1-a 消 14 项→78;v2.0.8 P1-b 再消 26 项→52) |
 | `test_protocol.py` | **42 / 42 PASS** — 握手、COM_QUERY/PING/INIT_DB、COM_STMT_*,多连接隔离 |
 | `test_persistence.py` | **13 PASS / 2 GAP / 0 FAIL** — WAL 回放、强杀恢复、未提交不恢复、DROP TABLE 持久化;缺优雅关闭 checkpoint |
 | `smoke_sql_keywords` | 649 PASS / 0 FAIL — 180 个常用关键词大小写不敏感、运算符、字面量、注释、行列号、词法错误、Parser 分发 |
@@ -337,13 +350,13 @@ employees 标准数据集(392 万行)实测:3 表 JOIN 求均薪 77s vs MySQL 6.
 | `test_sqlalchemy.py` | 33 PASS / 0 FAIL / 0 GAP(原 #5–#8 与 DESCRIBE/SHOW FULL TABLES 反射限制均已修复) |
 | **实测客户端** | DBX/dbExpress(Delphi)连接 + 打开表 + 浏览索引/列正常;类 Navicat 图形工具浏览表/索引/列正常;PyMySQL / mysql CLI 正常 |
 
-### 版本标识(v2.0.7)
+### 版本标识(v2.0.8)
 
 | 位置 | 内容 |
 |---|---|
-| `CMakeLists.txt` | `project(SQLTiny VERSION 2.0.7 LANGUAGES CXX)` |
-| `vcpkg.json` | `"version-string": "2.0.7"` |
-| `src/main.cpp` | 启动横幅 `SQLTiny v2.0.7 — MySQL wire protocol server` |
+| `CMakeLists.txt` | `project(SQLTiny VERSION 2.0.8 LANGUAGES CXX)` |
+| `vcpkg.json` | `"version-string": "2.0.8"` |
+| `src/main.cpp` | 启动横幅 `SQLTiny v2.0.8 — MySQL wire protocol server` |
 | `src/version.rc.in` | exe Windows 版本资源(经 configure_file 注入 CMake 版本),右键属性页显示产品名 / 版本 / 版权 |
 | `README.md` / `CODEPLAN.md` | 本版本变更清单与验证基线 |
 | 协议层 `@@version` / `VERSION()` | 仍为 `5.7.0-SQLTiny` —— MySQL 客户端兼容用伪装版本,**不是**产品版本,不随产品版本改动 |

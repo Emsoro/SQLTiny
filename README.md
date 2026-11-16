@@ -2,9 +2,9 @@
 
 > 🌐 语言: [English](./README.en.md) · **简体中文**
 
-> **当前版本 `v2.0.7`(2026-11-16)** · 版本号统一维护在 `CMakeLists.txt`(`project(SQLTiny VERSION 2.0.7)`)、`vcpkg.json`(`version-string`)与 `src/main.cpp` 启动横幅。协议层对外仍伪装为 `5.7.0-SQLTiny` 以兼容 MySQL 客户端,与产品版本无关。
+> **当前版本 `v2.0.8`(2026-11-16)** · 版本号统一维护在 `CMakeLists.txt`(`project(SQLTiny VERSION 2.0.8)`)、`vcpkg.json`(`version-string`)与 `src/main.cpp` 启动横幅。协议层对外仍伪装为 `5.7.0-SQLTiny` 以兼容 MySQL 客户端,与产品版本无关。
 >
-> v2.0.6 交付 **MySQL 语义 / 协议兼容修复**(由独立 sqllogictest 套件驱动,FAIL 67→0),内容见下文「v2.0.6 更新内容」。
+> v2.0.8 交付 **P1-b DML 方言 + DDL 核心**(由独立 sqllogictest 套件驱动,GAP 78→52),内容见下文「v2.0.8 更新内容」。
 
 **SQLTiny** 是用现代 C++20 从零重写的轻量级关系型数据库,核心设计灵感来自 [HSQLDB](http://hsqldb.org/),额外暴露 **MySQL Wire Protocol**——标准 MySQL 客户端(`mysql` CLI、Navicat、DBeaver、Connector/J、PyMySQL、DBX/dbExpress)直接连接。
 
@@ -36,6 +36,36 @@
 > 🔒 **锁分层**: Catalog.mu_(DDL) → Table.mu_ shared_lock(SELECT 多读者并行) / unique_lock(DML 独占) → RowLockMap(行级冲突检测) → TransactionManager.writeLock_(提交边界) → WalManager.mu_(WAL 文件读写)
 >
 > 🧊 **MVCC**: SELECT 完全不加锁,`for_each_visible(querySCN, readerTxn)` 按 `createSCN/deleteSCN` 与 `pendingTxn` 过滤;未提交行只对所属事务可见,commit 才 `finalize_commit` 对外发布
+
+---
+
+## 🆕 v2.0.8 更新内容（P1-b DML 方言 + DDL 核心，2026-11-16）
+
+由独立 sqllogictest 套件的 P1-b 批次驱动，GAP 从 **78 降到 52**，FAIL 保持 0。
+
+**INSERT 方言**
+- `INSERT ... VALUE`（单数）、`INSERT INTO t () VALUES ()`、`INSERT ... SET col=expr, ...`
+- `INSERT IGNORE`（主键冲突跳过 + warnings）、`REPLACE INTO`（冲突删旧插新）、`ON DUPLICATE KEY UPDATE`（冲突更新指定列）
+
+**UPDATE / DELETE 扩展**
+- `UPDATE ... ORDER BY ... LIMIT`、`DELETE ... ORDER BY ... LIMIT`
+- 多表 `UPDATE t a JOIN u b ON ... SET a.c = b.d`
+- `TRUNCATE TABLE`（清空行、重建唯一索引、自增游标归零）
+
+**AUTO_INCREMENT**
+- 建表 `AUTO_INCREMENT=n` 起始值生效（cursor 初始化为 n-1）
+- 非主键自增列（`seq INT AUTO_INCREMENT, KEY (seq)`）可建表并分配
+
+**DDL 核心**
+- `CREATE TABLE ... AS SELECT`（按查询结果推断列并填数据）、`CREATE TABLE ... LIKE src`（复制定义）
+- `CREATE TEMPORARY TABLE`、`CREATE VIEW ... AS SELECT`、`CREATE [UNIQUE] INDEX`
+- `ALTER TABLE ... ADD COLUMN`（追加列并给现有行补默认值）、`RENAME TABLE ... TO ...`
+- 表级/列级 `KEY` / `UNIQUE` / `CHECK` 约束语法可解析
+- **DDL 隐式提交**：事务中执行 DDL 前先 commit，之前的 DML 不被随后的 ROLLBACK 撤销
+
+**验证**
+- SLT 全量 **1184 项 · PASS 1132 / GAP 52 / FAIL 0**
+- 协议 **42/42** · 持久化 **15/15**（CTest 2 项既有 smoke 偏差与本次改动无关，已用 HEAD 基线对比确认）
 
 ---
 
@@ -480,6 +510,7 @@ SQL 语法:`SET SESSION TRANSACTION ISOLATION LEVEL <级别>`(会话默认)、`S
 | **复杂查询正确性 + 语法补全 (v2.0.5)** | ✅ | WITH/递归 CTE、标量子查询、EXISTS、FROM 派生表、COUNT(DISTINCT)、BETWEEN、`ROW_NUMBER() OVER`、日期函数;GROUP BY 别名与内嵌聚合修复;高基数分桶 O(n²)→O(1)、相关子查询去相关;`compare_employees.py` 39 条 **39/39 MATCH** |
 | **MySQL 语义兼容修复 (v2.0.6, 2026-11-16)** | ✅ | sqllogictest 套件驱动 **FAIL 67→0**;NULL 排序/三值逻辑、LIKE 大小写、BIGINT/表达式列类型、SQL 校验(1048/1054/1136/1366/1406/1242/1241/1111/1055/1222/3593)、RIGHT JOIN/逗号连接、窗口聚合、information_schema 主键元数据、字符串与数值函数;SLT **PASS 1092 / GAP 92 / FAIL 0**,协议 **42/42** |
 | **P1-a 日期时间函数模块 (v2.0.7)** | ✅ | `DATEDIFF`/`DATE_ADD`/`DATE_SUB`/`LAST_DAY`/`DAYOFWEEK`/`WEEK`/`DATE_FORMAT`/`STR_TO_DATE`/`UNIX_TIMESTAMP`/`FROM_UNIXTIME`/`CURTIME`/无括号 `CURRENT_*`,`INTERVAL` 语法 + DATETIME 减法;SLT **PASS 1106 / GAP 78 / FAIL 0**,协议 42/42,持久化 15/15 |
+| **P1-b DML 方言 + DDL 核心 (v2.0.8)** | ✅ | INSERT 方言(VALUE/SET/IGNORE/REPLACE/ON DUPLICATE)、UPDATE/DELETE ORDER BY LIMIT、多表 UPDATE、TRUNCATE、AUTO_INCREMENT 起始值/非主键自增、CTAS/LIKE/TEMPORARY/VIEW/INDEX/ALTER/RENAME、DDL 隐式提交;SLT **PASS 1132 / GAP 52 / FAIL 0** |
 | **后续** | 📋 | 等待队列/死锁检测 → 存储过程 · caching_sha2_password / SSL · 复制 |
 
 ---
@@ -536,10 +567,10 @@ FROM users u INNER JOIN orders o ON o.user_id = u.id;
 | 产物 | 类型 | 说明 |
 |---|---|---|
 | `build/Debug/sqltiny.lib` | 静态库 | 引擎核心,嵌入式进程内调用 |
-| `build/Debug/sqltiny_server.exe` | 可执行 | MySQL 协议 TCP 服务器(v2.0.7) |
+| `build/Debug/sqltiny_server.exe` | 可执行 | MySQL 协议 TCP 服务器(v2.0.8) |
 | `build/Release/sqltiny_server.exe` | 可执行(发布版) | 同上,Release 版约 **0.9 MB** 单文件(静态 CRT + fmt 静态链接,无 dll 依赖,可直接拷贝部署);Debug 版约 4.8 MB |
 
-**`sqltiny_server.exe` 文件信息(v2.0.7)**:
+**`sqltiny_server.exe` 文件信息(v2.0.8)**:
 
 | 属性 | 值 |
 |---|---|

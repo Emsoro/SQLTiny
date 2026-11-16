@@ -63,7 +63,7 @@ enum class TokenKind : uint16_t {
     KwTruncate,
 
     // DDL
-    KwCreate, KwTable, KwDatabase, KwSchema, KwDrop, KwAlter,
+    KwCreate, KwTable, KwDatabase, KwSchema, KwDrop, KwAlter, KwRename,
     KwAdd, KwColumn, KwPrimary, KwKey, KwUnique, KwForeign, KwReferences,
     KwIndex, KwConstraint, KwCheck, KwDefaultKw, KwAutoIncrement,
     KwComment, KwTemporary, KwIf, KwExists, KwReplace,

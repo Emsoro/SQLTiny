@@ -60,6 +60,11 @@ private:
     ast::StmtPtr parse_delete();
     ast::StmtPtr parse_create_table();
     ast::StmtPtr parse_drop_table();
+    ast::StmtPtr parse_truncate();
+    ast::StmtPtr parse_alter_table();
+    ast::StmtPtr parse_rename_table();
+    ast::StmtPtr parse_create_index();
+    ast::StmtPtr parse_create_view();
     ast::StmtPtr parse_create_database();
     ast::StmtPtr parse_drop_database();
     ast::StmtPtr parse_use();

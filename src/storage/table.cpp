@@ -60,6 +60,26 @@ int64_t Table::next_auto_increment() {
     return ++auto_inc_cursor_;
 }
 
+void Table::truncate() {
+    std::unique_lock<std::shared_mutex> lock(mu_);
+    row_map_.clear();
+    versions_.clear();
+    dead_rows_ = 0;
+    next_row_id_ = 1;
+    auto_inc_cursor_ = 0;
+    if (!def_.primary_key_cols.empty())
+        pk_index_ = std::make_unique<IndexBPlusTree>(true /*unique*/);
+}
+
+void Table::add_column(const ast::ColumnDef& col, const types::Value& default_value) {
+    std::unique_lock<std::shared_mutex> lock(mu_);
+    def_.columns.push_back(col);
+    for (auto& [rid, row] : row_map_) {
+        (void)rid;
+        row.push_back(default_value);
+    }
+}
+
 bool Table::delete_by_pk(const Row& pk_values, uint64_t deleteSCN,
                          uint64_t pendingTxn) {
     std::unique_lock<std::shared_mutex> lock(mu_);

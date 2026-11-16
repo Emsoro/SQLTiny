@@ -1,6 +1,6 @@
 # SQLTiny — Lightweight Embedded Database · MySQL Protocol Compatible
 
-> **Current version `v2.0.7` (2026-11-16)** · The version number is maintained in `CMakeLists.txt` (`project(SQLTiny VERSION 2.0.7)`), `vcpkg.json` (`version-string`) and the startup banner in `src/main.cpp`. The wire protocol still reports `5.7.0-SQLTiny` for MySQL client compatibility — that string is unrelated to the product version.
+> **Current version `v2.0.8` (2026-11-16)** · The version number is maintained in `CMakeLists.txt` (`project(SQLTiny VERSION 2.0.8)`), `vcpkg.json` (`version-string`) and the startup banner in `src/main.cpp`. The wire protocol still reports `5.7.0-SQLTiny` for MySQL client compatibility — that string is unrelated to the product version.
 
 **SQLTiny** is a lightweight relational database written from scratch in modern C++20, with its core design inspired by [HSQLDB](http://hsqldb.org/). It additionally exposes the **MySQL Wire Protocol**, so standard MySQL clients (`mysql` CLI, Navicat, DBeaver, Connector/J, PyMySQL, DBX/dbExpress) can connect directly.
 
@@ -34,6 +34,18 @@
 > 🔒 **Lock hierarchy**: Catalog.mu_ (DDL) → Table.mu_ shared_lock (concurrent SELECT readers) / unique_lock (exclusive DML) → RowLockMap (row-level conflict detection) → TransactionManager.writeLock_ (commit boundary) → WalManager.mu_ (WAL file I/O)
 >
 > 🧊 **MVCC**: SELECT takes no locks at all; `for_each_visible(querySCN, readerTxn)` filters by `createSCN/deleteSCN` and `pendingTxn`. Uncommitted rows are visible only to their owning transaction; `finalize_commit` publishes them at commit.
+
+---
+
+## 🆕 What's new in v2.0.8 (P1-b DML dialect + DDL core, 2026-11-16)
+
+Driven by the P1-b batch of the standalone sqllogictest suite: GAP 78 → **52**, still zero FAIL.
+
+- **INSERT dialect**: `VALUE` (singular), `() VALUES()`, `INSERT ... SET`, `INSERT IGNORE`, `REPLACE INTO`, `ON DUPLICATE KEY UPDATE`
+- **UPDATE/DELETE**: `ORDER BY ... LIMIT`, multi-table `UPDATE ... JOIN ... SET`, `TRUNCATE TABLE`
+- **AUTO_INCREMENT**: table option `AUTO_INCREMENT=n`, non-PK auto-increment columns
+- **DDL core**: `CREATE TABLE ... AS SELECT` / `LIKE`, `TEMPORARY`, `VIEW`, `CREATE INDEX`, `ALTER TABLE ... ADD COLUMN`, `RENAME TABLE`, DDL implicit commit
+- **Validation**: SLT **1184 items · PASS 1132 / GAP 52 / FAIL 0**, protocol 42/42, persistence 15/15
 
 ---
 
@@ -422,6 +434,7 @@ SQL syntax: `SET SESSION TRANSACTION ISOLATION LEVEL <level>` (session default),
 | **Complex-query correctness + syntax (v2.0.5)** | ✅ | WITH/recursive CTE, scalar subqueries, EXISTS, derived tables, COUNT(DISTINCT), BETWEEN, `ROW_NUMBER() OVER`, date functions; GROUP BY alias and nested aggregates fixed; high-cardinality bucketing O(n²)→O(1), correlated-subquery decorrelation; `compare_employees.py` **39/39 MATCH** |
 | **MySQL semantic compatibility (v2.0.6)** | ✅ | SLT-driven FAIL 67→0, PASS 1092 / GAP 92 / FAIL 0; NULL semantics, error codes, RIGHT JOIN, window aggregates, metadata |
 | **P1-a date/time module (v2.0.7)** | ✅ | `DATEDIFF`, `DATE_ADD`/`DATE_SUB` with INTERVAL, `LAST_DAY`, `DAYOFWEEK`, `WEEK`, `DATE_FORMAT`, `STR_TO_DATE`, `UNIX_TIMESTAMP`, `FROM_UNIXTIME`, `CURTIME`, parenthesis-free `CURRENT_*`; SLT **PASS 1106 / GAP 78 / FAIL 0** |
+| **P1-b DML dialect + DDL core (v2.0.8)** | ✅ | INSERT dialect, UPDATE/DELETE ORDER BY LIMIT, multi-table UPDATE, TRUNCATE, AUTO_INCREMENT, CTAS/LIKE/TEMPORARY/VIEW/INDEX/ALTER/RENAME, DDL implicit commit; SLT **PASS 1132 / GAP 52 / FAIL 0** |
 | **Upcoming** | 📋 | Wait queue / deadlock detection → stored procedures · caching_sha2_password / SSL · replication |
 
 ---
@@ -476,10 +489,10 @@ FROM users u INNER JOIN orders o ON o.user_id = u.id;
 | Artifact | Type | Description |
 |---|---|---|
 | `build/Debug/sqltiny.lib` | static library | Engine core, for in-process embedding |
-| `build/Debug/sqltiny_server.exe` | executable | MySQL protocol TCP server (v2.0.7) |
+| `build/Debug/sqltiny_server.exe` | executable | MySQL protocol TCP server (v2.0.8) |
 | `build/Release/sqltiny_server.exe` | executable (release) | Same, Release build is about **0.9 MB** in a single file (static CRT + static fmt, no DLL dependencies, copy-and-run); Debug build is about 4.8 MB |
 
-**`sqltiny_server.exe` file info (v2.0.7)**:
+**`sqltiny_server.exe` file info (v2.0.8)**:
 
 | Property | Value |
 |---|---|

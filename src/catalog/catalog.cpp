@@ -113,7 +113,90 @@ bool Catalog::create_table(const ast::CreateTableStmt& stmt, const std::string& 
     def.primary_key_cols = stmt.primary_key;
 
     auto t = std::make_unique<storage::Table>(def);
+    // P1-b: AUTO_INCREMENT=n 表选项 —— 起始值 n 表示下一个生成值为 n,cursor 内部存 n-1
+    if (stmt.auto_increment_start && *stmt.auto_increment_start > 0)
+        t->set_auto_inc_cursor(*stmt.auto_increment_start - 1);
     db->tables[lower] = std::move(t);
+    return true;
+}
+
+bool Catalog::create_table_from_def(const storage::TableDef& def, const std::string& default_db) {
+    std::lock_guard<std::mutex> lock(mu_);
+    std::string db_name = default_db;
+    std::string table_name = def.name;
+    auto dot = table_name.find('.');
+    if (dot != std::string::npos) {
+        db_name = lower_name(table_name.substr(0, dot));
+        table_name = table_name.substr(dot + 1);
+    }
+    DbTables* db = get_db(db_name);
+    if (!db) return false;
+    std::string lower = lower_name(table_name);
+    if (db->tables.count(lower)) return false;
+    storage::TableDef copy = def;
+    copy.name = lower;
+    db->tables[lower] = std::make_unique<storage::Table>(std::move(copy));
+    return true;
+}
+
+bool Catalog::truncate_table(const std::string& name, const std::string& default_db) {
+    std::lock_guard<std::mutex> lock(mu_);
+    std::string db_name = default_db;
+    std::string table_name = name;
+    auto dot = table_name.find('.');
+    if (dot != std::string::npos) {
+        db_name = lower_name(table_name.substr(0, dot));
+        table_name = table_name.substr(dot + 1);
+    }
+    DbTables* db = get_db(db_name);
+    if (!db) return false;
+    auto it = db->tables.find(lower_name(table_name));
+    if (it == db->tables.end()) return false;
+    it->second->truncate();
+    return true;
+}
+
+bool Catalog::add_column(const std::string& name, const ast::ColumnDef& col, const std::string& default_db) {
+    std::lock_guard<std::mutex> lock(mu_);
+    std::string db_name = default_db;
+    std::string table_name = name;
+    auto dot = table_name.find('.');
+    if (dot != std::string::npos) {
+        db_name = lower_name(table_name.substr(0, dot));
+        table_name = table_name.substr(dot + 1);
+    }
+    DbTables* db = get_db(db_name);
+    if (!db) return false;
+    auto it = db->tables.find(lower_name(table_name));
+    if (it == db->tables.end()) return false;
+    types::Value defval = col.default_value && col.default_value->kind == ast::ExprKind::Literal
+        ? col.default_value->literal : types::Value::make_null();
+    it->second->add_column(col, defval);
+    return true;
+}
+
+bool Catalog::rename_table(const std::string& from, const std::string& to, const std::string& default_db) {
+    std::lock_guard<std::mutex> lock(mu_);
+    std::string db_name = default_db;
+    std::string from_name = from;
+    auto dot = from_name.find('.');
+    if (dot != std::string::npos) {
+        db_name = lower_name(from_name.substr(0, dot));
+        from_name = from_name.substr(dot + 1);
+    }
+    std::string to_name = to;
+    auto dot2 = to_name.find('.');
+    if (dot2 != std::string::npos) to_name = to_name.substr(dot2 + 1);
+    DbTables* db = get_db(db_name);
+    if (!db) return false;
+    auto it = db->tables.find(lower_name(from_name));
+    if (it == db->tables.end()) return false;
+    std::string lower_to = lower_name(to_name);
+    if (db->tables.count(lower_to)) return false;
+    auto tbl = std::move(it->second);
+    db->tables.erase(it);
+    tbl->mutable_def().name = lower_to;
+    db->tables[lower_to] = std::move(tbl);
     return true;
 }
 

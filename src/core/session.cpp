@@ -69,7 +69,20 @@ static bool is_write_stmt(ast::StmtKind k) {
     using ast::StmtKind;
     return k == StmtKind::Insert || k == StmtKind::Update || k == StmtKind::Delete ||
            k == StmtKind::CreateTable || k == StmtKind::DropTable ||
-           k == StmtKind::CreateDatabase || k == StmtKind::DropDatabase;
+           k == StmtKind::CreateDatabase || k == StmtKind::DropDatabase ||
+           k == StmtKind::TruncateTable || k == StmtKind::AlterTable ||
+           k == StmtKind::RenameTable || k == StmtKind::CreateIndex ||
+           k == StmtKind::CreateView;
+}
+
+// P1-b: DDL 语句 —— MySQL 中执行 DDL 会隐式提交当前事务
+static bool is_ddl_stmt(ast::StmtKind k) {
+    using ast::StmtKind;
+    return k == StmtKind::CreateTable || k == StmtKind::DropTable ||
+           k == StmtKind::CreateDatabase || k == StmtKind::DropDatabase ||
+           k == StmtKind::TruncateTable || k == StmtKind::AlterTable ||
+           k == StmtKind::RenameTable || k == StmtKind::CreateIndex ||
+           k == StmtKind::CreateView;
 }
 
 Session::Session() : txn_id_(g_next_session_id.fetch_add(1)) {
@@ -316,6 +329,14 @@ executor::ResultSet Session::execute(const std::string& sql) {
                 last = applySavepoint(*st);
                 if (!last.ok) return last;
                 continue;
+            }
+
+            // P1-b: DDL 隐式提交 —— 执行 DDL 前先提交当前事务,
+            // 使之前的 DML 不可被随后的 ROLLBACK 撤销 (MySQL 语义)
+            if (is_ddl_stmt(kind) && isInTransaction()) {
+                if (!commitTransaction())
+                    return make_err(1213, "40001", "Serialization failure — snapshot write conflict");
+                implicit_active = false;
             }
 
             // —— 普通语句:autocommit 时每条语句隐式 begin+commit;

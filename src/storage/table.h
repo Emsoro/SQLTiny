@@ -40,6 +40,7 @@ public:
     explicit Table(TableDef def);
 
     const TableDef& def() const { return def_; }
+    TableDef& mutable_def() { return def_; }
 
     /// 插入一行。成功返回 true;主键冲突返回 false
     /// createSCN = 0 表示"立即可见" (M1-M4 兼容,隐式 active)
@@ -86,6 +87,12 @@ public:
     /// M5.5 Snapshot 重建 + AUTO_INCREMENT 收尾:恢复 cursor
     void set_auto_inc_cursor(int64_t v) { auto_inc_cursor_ = v; }
     int64_t auto_inc_cursor() const { return auto_inc_cursor_; }
+
+    /// TRUNCATE:清空所有行/版本/索引,自增游标归零
+    void truncate();
+
+    /// ALTER TABLE ADD COLUMN:追加列定义,并给已有行补默认值
+    void add_column(const ast::ColumnDef& col, const types::Value& default_value);
 
     /// M5.6 MVCC:行版本元信息读写
     /// 参考 HSQLDB 2.7.4 RowAction.canRead():任何隔离级别都不读未提交数据。

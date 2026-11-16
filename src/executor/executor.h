@@ -116,6 +116,11 @@ private:
 
     ResultSet exec_create_table(const ast::CreateTableStmt& s);
     ResultSet exec_drop_table(const ast::DropTableStmt& s);
+    ResultSet exec_truncate(const ast::TruncateStmt& s);
+    ResultSet exec_alter_table(const ast::AlterTableStmt& s);
+    ResultSet exec_rename_table(const ast::RenameTableStmt& s);
+    ResultSet exec_create_index(const ast::CreateIndexStmt& s);
+    ResultSet exec_create_view(const ast::CreateViewStmt& s);
     ResultSet exec_insert(const ast::InsertStmt& s);
     ResultSet exec_update(const ast::UpdateStmt& s);
     ResultSet exec_delete(const ast::DeleteStmt& s);

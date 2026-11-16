@@ -28,6 +28,15 @@ public:
     bool drop_table(const std::string& name, bool if_exists, const std::string& default_db = "default");
     bool table_exists(const std::string& name, const std::string& default_db = "default") const;
 
+    /// 从已有表定义创建表 (CREATE TABLE ... LIKE / AS SELECT 用)
+    bool create_table_from_def(const storage::TableDef& def, const std::string& default_db = "default");
+    /// 清空表的所有行 (TRUNCATE):重建 Table 实例,保留定义与自增值归零
+    bool truncate_table(const std::string& name, const std::string& default_db = "default");
+    /// ALTER TABLE ADD COLUMN:给表及其现有行追加一列
+    bool add_column(const std::string& name, const ast::ColumnDef& col, const std::string& default_db = "default");
+    /// RENAME TABLE:改表名
+    bool rename_table(const std::string& from, const std::string& to, const std::string& default_db = "default");
+
     storage::Table* get_table(const std::string& name, const std::string& default_db = "default");
     const storage::Table* get_table(const std::string& name, const std::string& default_db = "default") const;
 
