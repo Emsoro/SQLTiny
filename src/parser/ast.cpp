@@ -121,6 +121,9 @@ ExprPtr Expression::clone() const {
     for (const auto& a : func_args) e->func_args.push_back(a ? a->clone() : nullptr);
     e->func_star_arg = func_star_arg;
     e->func_distinct = func_distinct;
+    e->is_window = is_window;
+    for (auto& p : win_partition) e->win_partition.push_back(p ? p->clone() : nullptr);
+    for (auto& [o, asc] : win_order) e->win_order.push_back({o ? o->clone() : nullptr, asc});
     e->subquery_stmt = subquery_stmt ? clone_stmt(*subquery_stmt) : nullptr;
     e->subquery_exists = subquery_exists;
     e->case_base = case_base ? case_base->clone() : nullptr;

@@ -1700,6 +1700,53 @@ ResultSet Executor::exec_select_body(const ast::SelectStmt& s, const ExecContext
     bool has_agg = !s.group_by.empty() || static_cast<bool>(s.having);
     for (auto& [e, _] : s.columns) if (contains_agg(*e)) has_agg = true;
 
+    // P3: 找出表达式中"唯一的聚合函数调用"节点(允许被标量函数包裹,如 ROUND(AVG(x),2))。
+    // 返回该聚合节点指针;若不存在聚合或存在多个聚合则返回 nullptr。
+    std::function<const ast::Expression*(const ast::Expression&)> count_agg_nodes =
+        [&](const ast::Expression& e) -> const ast::Expression* {
+        int cnt = 0;
+        const ast::Expression* found = nullptr;
+        std::function<void(const ast::Expression&)> walk = [&](const ast::Expression& x) {
+            if (x.kind == ast::ExprKind::FunctionCall) {
+                if (!x.is_window && is_agg_func(x.func_name)) { ++cnt; found = &x; return; }
+            }
+            if (x.lhs) walk(*x.lhs);
+            if (x.rhs) walk(*x.rhs);
+            if (x.operand) walk(*x.operand);
+            for (auto& a : x.func_args) if (a) walk(*a);
+            if (x.kind == ast::ExprKind::Case) {
+                if (x.case_base) walk(*x.case_base);
+                for (auto& [w, r] : x.case_whens) { if (w) walk(*w); if (r) walk(*r); }
+                if (x.case_else) walk(*x.case_else);
+            }
+        };
+        walk(e);
+        return cnt == 1 ? found : nullptr;
+    };
+    auto agg_kind_of = [&](const ast::Expression& e) -> int {
+        std::string low = ci_lower(e.func_name);
+        if (low == "count") return e.func_star_arg ? 1 : 2;
+        if (low == "sum") return 3;
+        if (low == "avg") return 4;
+        if (low == "min") return 5;
+        if (low == "max") return 6;
+        return 0;
+    };
+    // 聚合签名:函数名 + star + 参数裸列名(忽略表限定,因 HAVING 与 SELECT 的列限定可能不同)。
+    // 用于把 HAVING 里的聚合节点匹配到 fused_cols 里已累加的聚合值。
+    auto agg_sig = [&](const ast::Expression& a) -> std::string {
+        std::string sig = ci_lower(a.func_name);
+        sig += a.func_star_arg ? "*" : ":";
+        if (!a.func_star_arg && !a.func_args.empty() && a.func_args[0]) {
+            const auto& p = *a.func_args[0];
+            if (p.kind == ast::ExprKind::Column)
+                sig += p.column_name;              // 裸列名,不含 table 限定
+            else if (p.kind == ast::ExprKind::Literal)
+                sig += p.literal.to_string();
+        }
+        return sig;
+    };
+
     // ---- 静态语义校验(在扫描数据前失败,避免先做无用功) ----
     auto make_error = [&](uint16_t err, const char* state, std::string msg) -> ResultSet {
         ResultSet er;
@@ -1861,8 +1908,14 @@ ResultSet Executor::exec_select_body(const ast::SelectStmt& s, const ExecContext
     // 分组键与 WHERE 只引用左表列;聚合参数只引用右表列;非聚合 SELECT 列只引用左表列。
     // 满足时边探测边累加,不再物化中间行 —— 中间行构造(每行 10 列、含多次字符串分配)
     // 是 3 表 JOIN 的决定性开销。
-    struct FusedCol { int kind = 0; const ast::Expression* arg = nullptr; };
-    std::vector<FusedCol> fused_cols;   // 0=非聚合 1=COUNT(*) 2=COUNT 3=SUM 4=AVG 5=MIN 6=MAX
+    struct FusedCol {
+        int kind = 0;                          // 0=非聚合 1=COUNT(*) 2=COUNT 3=SUM 4=AVG 5=MIN 6=MAX
+        const ast::Expression* arg = nullptr;  // 聚合参数列表达式
+        const ast::Expression* wrap = nullptr; // 包裹聚合的标量函数(如 ROUND),为 nullptr 表示顶层聚合
+        const ast::Expression* agg_node = nullptr; // 聚合函数节点
+        std::string sig;                       // 聚合签名(供 HAVING 匹配)
+    };
+    std::vector<FusedCol> fused_cols;
     std::map<std::string, int> right_col_index;   // 右表列名 -> 行内局部下标
     int  fused_right_offset = 0, fused_right_cols = 0;
     bool fuse_agg = false;
@@ -1891,7 +1944,8 @@ ResultSet Executor::exec_select_body(const ast::SelectStmt& s, const ExecContext
         return rec(e);
     };
     std::vector<const ast::Expression*> fused_left_preds, fused_right_preds;  // WHERE 按表侧拆分
-    if (has_agg && !s.having && !s.distinct && !s.joins.empty()) {
+    // P3: 允许 HAVING(聚合下推后在产出结果上过滤)、允许标量函数包裹聚合(ROUND(AVG(x),2))
+    if (has_agg && !s.distinct && !s.joins.empty()) {
         const auto& lastp = join_plans.back();
         // 仅 INNER: LEFT JOIN 无匹配需保留左行(聚合下推路径不做 NULL 补齐)
         // 探测方式: PK 前缀探测(不物化右表)或 哈希等值探测(需物化右表建桶)
@@ -1931,25 +1985,46 @@ ResultSet Executor::exec_select_body(const ast::SelectStmt& s, const ExecContext
                 for (auto& [e, _] : s.columns) {
                     FusedCol fc;
                     if (e->kind == ast::ExprKind::Star) { ok = false; break; }  // SELECT * 不走下推
-                    if (e->kind == ast::ExprKind::FunctionCall && is_agg_func(e->func_name)) {
-                        if (e->func_distinct) { ok = false; break; }   // DISTINCT 聚合不下推
-                        std::string low = e->func_name;
-                        std::transform(low.begin(), low.end(), low.begin(),
-                                       [](unsigned char c) { return std::tolower(c); });
-                        if (e->func_star_arg && low == "count") { fc.kind = 1; }
-                        else if (e->func_args.empty() || !e->func_args[0]) { ok = false; break; }
-                        else {
-                            if (contains_agg(*e->func_args[0])) { ok = false; break; }  // 嵌套聚合不下推
-                            if (!cols_in_range(*e->func_args[0], fused_right_offset, total_cols)) {
-                                ok = false; break;
-                            }
-                            fc.arg = e->func_args[0].get();
-                            fc.kind = (low == "count") ? 2 : (low == "sum") ? 3
-                                    : (low == "avg")   ? 4 : (low == "min") ? 5 : 6;
-                        }
-                    } else {
+                    const ast::Expression* an = count_agg_nodes(*e);
+                    if (!an) {
+                        // 非聚合列:必须只引用左表列
                         if (contains_agg(*e) || !cols_in_range(*e, 0, fused_right_offset)) {
                             ok = false; break;
+                        }
+                    } else {
+                        // 唯一聚合节点:校验 DISTINCT / 参数
+                        if (an->func_distinct) { ok = false; break; }
+                        if (an->kind != ast::ExprKind::FunctionCall) { ok = false; break; }
+                        if (an->func_star_arg) {
+                            fc.kind = (agg_kind_of(*an) == 1) ? 1 : 0;
+                        } else if (an->func_args.empty() || !an->func_args[0]) {
+                            ok = false; break;
+                        } else {
+                            if (contains_agg(*an->func_args[0])) { ok = false; break; }
+                            if (!cols_in_range(*an->func_args[0], fused_right_offset, total_cols)) {
+                                ok = false; break;
+                            }
+                            fc.arg = an->func_args[0].get();
+                            fc.kind = agg_kind_of(*an);
+                        }
+                        if (fc.kind == 0) { ok = false; break; }
+                        fc.agg_node = an;
+                        fc.sig = agg_sig(*an);
+                        if (an != e.get()) {
+                            // 聚合被标量函数包裹:外层必须不含子查询/CASE/变量/左表列,
+                            // 其余参数只能是字面量(如 ROUND(..., 2))。用 cols_in_range 对整个
+                            // 表达式检查会因子节点聚合参数在右表而误判,故逐参数检查非聚合部分。
+                            if (e->kind != ast::ExprKind::FunctionCall || e->is_window) { ok = false; break; }
+                            bool wrap_ok = true;
+                            for (auto& a : e->func_args) {
+                                if (!a) continue;
+                                if (a.get() == an) continue;                 // 聚合参数本身
+                                if (contains_agg(*a)) { wrap_ok = false; break; }
+                                if (!cols_in_range(*a, fused_right_offset, total_cols) &&
+                                    a->kind != ast::ExprKind::Literal) { wrap_ok = false; break; }
+                            }
+                            if (!wrap_ok) { ok = false; break; }
+                            fc.wrap = e.get();
                         }
                     }
                     fused_cols.push_back(fc);
@@ -1963,6 +2038,32 @@ ResultSet Executor::exec_select_body(const ast::SelectStmt& s, const ExecContext
                         ok = false; break;
                     }
                 }
+            }
+            // P3: HAVING 里的聚合必须都能在 SELECT 的 fused_cols 里按签名找到,
+            // 否则禁用下推(回退通用路径),避免 HAVING 聚合值无累加器。
+            if (ok && s.having) {
+                std::function<bool(const ast::Expression&)> having_ok =
+                    [&](const ast::Expression& x) -> bool {
+                    if (x.kind == ast::ExprKind::FunctionCall && !x.is_window && is_agg_func(x.func_name)) {
+                        std::string sg = agg_sig(x);
+                        for (auto& fc : fused_cols) if (fc.sig == sg) return true;
+                        return false;
+                    }
+                    if (x.lhs && !having_ok(*x.lhs)) return false;
+                    if (x.rhs && !having_ok(*x.rhs)) return false;
+                    if (x.operand && !having_ok(*x.operand)) return false;
+                    for (auto& a : x.func_args) if (a && !having_ok(*a)) return false;
+                    if (x.kind == ast::ExprKind::Case) {
+                        if (x.case_base && !having_ok(*x.case_base)) return false;
+                        for (auto& [w, r] : x.case_whens) {
+                            if (w && !having_ok(*w)) return false;
+                            if (r && !having_ok(*r)) return false;
+                        }
+                        if (x.case_else && !having_ok(*x.case_else)) return false;
+                    }
+                    return true;
+                };
+                if (!having_ok(*s.having)) ok = false;
             }
             fuse_agg = ok;
         }
@@ -2279,6 +2380,7 @@ ResultSet Executor::exec_select_body(const ast::SelectStmt& s, const ExecContext
     bool fused_done = false;                      // 聚合下推已直接产出结果
     std::vector<storage::Row> fused_agg_rows;     // 每个分组一行(SELECT 投影)
     std::vector<storage::Row> fused_reps;         // 每个分组的代表性整行(供 ORDER BY / 非聚合列)
+    std::vector<std::vector<types::Value>> fused_raw_aggs; // 每组每个融合列的纯聚合值(未套 wrap,供 HAVING)
 
     for (size_t ji = 0; ji < s.joins.size(); ++ji) {
         auto& jc = s.joins[ji];
@@ -2411,23 +2513,49 @@ ResultSet Executor::exec_select_body(const ast::SelectStmt& s, const ExecContext
                 grps.push_back(FGrp{});
                 grps.back().accs.resize(fused_cols.size());
             }
+            // P3: 标量函数包裹聚合(如 ROUND(AVG(x),2)):把聚合节点位置换成字面量后套用外层函数
+            auto apply_wrap = [&](const FusedCol& fc, const types::Value& av) -> types::Value {
+                if (!fc.wrap) return av;
+                std::vector<ast::ExprPtr> args;
+                args.reserve(fc.wrap->func_args.size());
+                ExecContext evctx{ catalog_, "", {}, {} };
+                evctx.exec = this; evctx.outer = outer; evctx.ctes = ctes;
+                for (auto& a : fc.wrap->func_args) {
+                    if (!a) { args.push_back(nullptr); continue; }
+                    if (a.get() == fc.agg_node) args.push_back(ast::Expression::make_literal(av));
+                    else args.push_back(ast::Expression::make_literal(eval(*a, evctx)));
+                }
+                ExecContext ctx0{ catalog_, "", {}, {} };
+                ctx0.exec = this; ctx0.outer = outer; ctx0.ctes = ctes;
+                return eval_function(fc.wrap->func_name, args, fc.wrap->func_star_arg, ctx0);
+            };
             for (auto& g : grps) {
                 storage::Row row;
+                std::vector<types::Value> raws;
                 auto rctx = build_ctx(g.rep);
                 for (size_t ci = 0; ci < fused_cols.size(); ++ci) {
                     const auto& fc = fused_cols[ci];
-                    if (fc.kind == 0) { row.push_back(eval(*s.columns[ci].first, rctx)); continue; }
+                    if (fc.kind == 0) {
+                        auto v = eval(*s.columns[ci].first, rctx);
+                        raws.push_back(v);   // 占位,保持 raws 索引与 fused_cols 对齐
+                        row.push_back(v);
+                        continue;
+                    }
                     auto& a = g.accs[ci];
-                    if (fc.kind == 1 || fc.kind == 2) row.push_back(types::Value::make_int(a.c));
-                    else if (fc.kind == 3) row.push_back(a.c == 0 ? types::Value::make_null()
+                    types::Value av;
+                    if (fc.kind == 1 || fc.kind == 2) av = types::Value::make_int(a.c);
+                    else if (fc.kind == 3) av = (a.c == 0 ? types::Value::make_null()
                                              : (a.all_int ? types::Value::make_int(a.iacc)
                                                           : types::Value::make_double(a.acc)));
-                    else if (fc.kind == 4) row.push_back(a.c == 0 ? types::Value::make_null()
+                    else if (fc.kind == 4) av = (a.c == 0 ? types::Value::make_null()
                                              : types::Value::make_double(a.acc / static_cast<double>(a.c)));
-                    else row.push_back(a.first ? types::Value::make_null() : a.best);
+                    else av = (a.first ? types::Value::make_null() : a.best);
+                    raws.push_back(av);
+                    row.push_back(apply_wrap(fc, av));
                 }
                 fused_agg_rows.push_back(std::move(row));
                 fused_reps.push_back(std::move(g.rep));
+                fused_raw_aggs.push_back(std::move(raws));
             }
             fused_done = true;
             break;
@@ -2559,8 +2687,73 @@ ResultSet Executor::exec_select_body(const ast::SelectStmt& s, const ExecContext
         left_rows = std::move(new_left);
     }
 
-    // 聚合下推路径:结果已产出,补齐 ORDER BY / LIMIT 后直接返回
+    // 聚合下推路径:结果已产出,补齐 HAVING / ORDER BY / LIMIT 后直接返回
     if (fused_done) {
+        // P3: HAVING 过滤 —— 把聚合节点按签名换成该组已累加的纯聚合值,列别名换成输出列值
+        if (s.having && !fused_agg_rows.empty()) {
+            std::function<void(ast::Expression&, size_t)> resolve_having =
+                [&](ast::Expression& e, size_t gr) {
+                // 聚合节点 → 字面量(按签名匹配 fused_cols)
+                if (e.kind == ast::ExprKind::FunctionCall && !e.is_window && is_agg_func(e.func_name)) {
+                    std::string sg = agg_sig(e);
+                    for (size_t ci = 0; ci < fused_cols.size(); ++ci) {
+                        if (fused_cols[ci].sig == sg && gr < fused_raw_aggs.size() &&
+                            ci < fused_raw_aggs[gr].size()) {
+                            e.kind = ast::ExprKind::Literal;
+                            e.literal = fused_raw_aggs[gr][ci];
+                            e.func_args.clear();
+                            return;
+                        }
+                    }
+                    // 判据已保证 HAVING 聚合都能匹配;此处为防御性回退
+                    e.kind = ast::ExprKind::Literal;
+                    e.literal = types::Value::make_null();
+                    e.func_args.clear();
+                    return;
+                }
+                if (e.kind == ast::ExprKind::Column && e.table_name.empty()) {
+                    // SELECT 别名 → 输出列字面量
+                    for (size_t ci = 0; ci < s.columns.size(); ++ci) {
+                        if (!s.columns[ci].second.empty() &&
+                            _stricmp(s.columns[ci].second.c_str(), e.column_name.c_str()) == 0 &&
+                            gr < fused_agg_rows.size() && ci < fused_agg_rows[gr].size()) {
+                            e.kind = ast::ExprKind::Literal;
+                            e.literal = fused_agg_rows[gr][ci];
+                            return;
+                        }
+                    }
+                }
+                if (e.lhs) resolve_having(*e.lhs, gr);
+                if (e.rhs) resolve_having(*e.rhs, gr);
+                if (e.operand) resolve_having(*e.operand, gr);
+                for (auto& a : e.func_args) if (a) resolve_having(*a, gr);
+                if (e.kind == ast::ExprKind::Case) {
+                    if (e.case_base) resolve_having(*e.case_base, gr);
+                    for (auto& [w, r] : e.case_whens) {
+                        if (w) resolve_having(*w, gr);
+                        if (r) resolve_having(*r, gr);
+                    }
+                    if (e.case_else) resolve_having(*e.case_else, gr);
+                }
+            };
+            std::vector<storage::Row> kept_rows;
+            std::vector<storage::Row> kept_reps;
+            std::vector<std::vector<types::Value>> kept_raws;
+            for (size_t gr = 0; gr < fused_agg_rows.size(); ++gr) {
+                auto hexpr = s.having->clone();
+                resolve_having(*hexpr, gr);
+                ExecContext hctx{ catalog_, "", {}, {} };
+                hctx.exec = this; hctx.outer = outer; hctx.ctes = ctes;
+                if (to_bool(eval(*hexpr, hctx))) {
+                    kept_rows.push_back(std::move(fused_agg_rows[gr]));
+                    kept_reps.push_back(std::move(fused_reps[gr]));
+                    if (gr < fused_raw_aggs.size()) kept_raws.push_back(std::move(fused_raw_aggs[gr]));
+                }
+            }
+            fused_agg_rows = std::move(kept_rows);
+            fused_reps = std::move(kept_reps);
+            fused_raw_aggs = std::move(kept_raws);
+        }
         if (!s.order_by.empty() && fused_agg_rows.size() > 1) {
             struct FTerm { int out_idx = -1; const ast::Expression* expr = nullptr; bool asc = true; };
             std::vector<FTerm> fterms;

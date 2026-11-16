@@ -7,7 +7,7 @@
 
 ---
 
-## 0. 当前状态(2026-11-16,v2.0.8)
+## 0. 当前状态(2026-11-16,v2.0.9)
 
 > 下文 M1–M5 为原始规划、M6 各节含设计稿伪代码,均保留供追溯。**落地状态以本节与各节 ✅ 标记为准;实际目录与运行方式见 `README.md`,架构图见 `architecture.svg`。**
 
@@ -33,6 +33,7 @@
 | **MySQL 语义兼容修复(v2.0.6,2026-11-16)** | ✅ | 由独立 sqllogictest 套件(与本仓库同级的 `SQLTinyTest/testcase`)驱动:**FAIL 67→0**;SLT 1184 项 PASS 971→**1092** / GAP 146→**92** / FAIL **0**,协议套件 **42/42**,持久化 **15/15**。修复覆盖值语义、协议、SQL 校验、JOIN/窗口、元数据、内置函数六类,P0 语义批(`<=>`/CAST/CONVERT/会话函数/聚合扩展)已完成,详见下节 |
 | **P1-a 日期时间函数模块(v2.0.7)** | ✅ | `DATEDIFF`/`DATE_ADD`/`DATE_SUB`/`LAST_DAY`/`DAYOFWEEK`/`WEEK`/`DATE_FORMAT`/`STR_TO_DATE`/`UNIX_TIMESTAMP`/`FROM_UNIXTIME`/`CURTIME` + 无括号 `CURRENT_*` + INTERVAL 语法;SLT **1184 / PASS 1106 / GAP 78 / FAIL 0**,协议 42/42,持久化 15/15 |
 | **P1-b DML 方言 + DDL 核心(v2.0.8)** | ✅ | INSERT 方言(VALUE/SET/IGNORE/REPLACE/ON DUPLICATE)、UPDATE/DELETE ORDER BY LIMIT、多表 UPDATE、TRUNCATE、AUTO_INCREMENT 起始值/非主键自增、CTAS/LIKE/TEMPORARY/VIEW/INDEX/ALTER/RENAME、DDL 隐式提交;SLT **1184 / PASS 1132 / GAP 52 / FAIL 0** |
+| **聚合下推增强(v2.0.9)** | ✅ | 标量函数包裹聚合(ROUND(AVG))与 HAVING 下推;3 表 JOIN+聚合+HAVING 18.7s→~5s;SLT **1184 / PASS 1132 / GAP 52 / FAIL 0** |
 | M6 P4 | ⬜ | 复制与更大测试覆盖;认证(caching_sha2_password / SSL)仍未做 |
 
 ### 本轮交付(v1.1.0 客户端兼容性)
@@ -100,6 +101,19 @@
 - **顺带修复**:P0 引入的 1055 回归 —— `SELECT dept_name … GROUP BY d.dept_name` 的裸名/限定名现在视为同一列
 
 **验证**:SLT **1184 / PASS 1106 / GAP 78 / FAIL 0**(`03_datetime.slt` 45/45,14 条 `gap` 标记移除);协议 **42/42**;持久化 **15/15**;`compare_employees.py` **39/39 MATCH**。
+
+### 本轮交付(v2.0.9 聚合下推增强,2026-11-16)
+
+由 `benchmark/employees_latest.json` 的二级对比定位:TOP1 瓶颈是 3 表 JOIN + `ROUND(AVG(salary),2)` + `HAVING AVG(...)` 查询,18.7s(MySQL 1.05s,17.85x)。根因:聚合下推判据把"标量函数包裹聚合"与"HAVING"两类查询排除,回退到物化 284 万行 salaries 中间结果的慢路径。修复后该查询降到 ~5s(约 4x),TOP 瓶颈排名从第 1 降到第 4。
+
+- **判据扩展**(`executor.cpp` `exec_select_body`):
+  - 新增 `count_agg_nodes` / `agg_kind_of` / `agg_sig` helper;SELECT 列识别支持"唯一聚合节点被标量函数包裹"(如 `ROUND(AVG(x),2)`),记录 `wrap`/`agg_node`/`sig`
+  - 去掉 `!s.having` 限制;产出结果后用 `clone()` + 原地替换把 HAVING 的聚合节点按签名换成该组已累加的纯聚合值、列别名换成输出列值,再 eval 过滤
+  - HAVING 引用的聚合若不在 SELECT 投影中(`having_ok` 校验失败)则禁用下推,回退通用路径保证语义
+  - `apply_wrap` 把聚合结果替换进外层函数参数后套用标量函数
+- **bug 修复**:`fused_raw_aggs` 与 `fused_cols` 索引对齐(非聚合列也 push 占位,原实现导致 HAVING 取错列而返回空/崩溃);`Expression::clone()` 补拷 `is_window`/窗口字段
+
+**验证**:SLT **1184 / PASS 1132 / GAP 52 / FAIL 0**(无回归);compare_employees **39/39 MATCH**,目标查询 18.7s→~5s;HAVING 6 类边界(别名/多聚合/COUNT/WHERE混合/ROUND包裹/直接AVG)全部返回正确行;CTest 2 项既有 smoke 偏差与本次无关(HEAD 基线已确认)。
 
 ### 本轮交付(v2.0.8 P1-b DML 方言 + DDL 核心,2026-11-16)
 
@@ -352,13 +366,13 @@ employees 标准数据集(392 万行)实测:3 表 JOIN 求均薪 77s vs MySQL 6.
 | `test_sqlalchemy.py` | 33 PASS / 0 FAIL / 0 GAP(原 #5–#8 与 DESCRIBE/SHOW FULL TABLES 反射限制均已修复) |
 | **实测客户端** | DBX/dbExpress(Delphi)连接 + 打开表 + 浏览索引/列正常;类 Navicat 图形工具浏览表/索引/列正常;PyMySQL / mysql CLI 正常 |
 
-### 版本标识(v2.0.8)
+### 版本标识(v2.0.9)
 
 | 位置 | 内容 |
 |---|---|
-| `CMakeLists.txt` | `project(SQLTiny VERSION 2.0.8 LANGUAGES CXX)` |
-| `vcpkg.json` | `"version-string": "2.0.8"` |
-| `src/main.cpp` | 启动横幅 `SQLTiny v2.0.8 — MySQL wire protocol server` |
+| `CMakeLists.txt` | `project(SQLTiny VERSION 2.0.9 LANGUAGES CXX)` |
+| `vcpkg.json` | `"version-string": "2.0.9"` |
+| `src/main.cpp` | 启动横幅 `SQLTiny v2.0.9 — MySQL wire protocol server` |
 | `src/version.rc.in` | exe Windows 版本资源(经 configure_file 注入 CMake 版本),右键属性页显示产品名 / 版本 / 版权 |
 | `README.md` / `CODEPLAN.md` | 本版本变更清单与验证基线 |
 | 协议层 `@@version` / `VERSION()` | 仍为 `5.7.0-SQLTiny` —— MySQL 客户端兼容用伪装版本,**不是**产品版本,不随产品版本改动 |

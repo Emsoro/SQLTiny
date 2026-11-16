@@ -1,6 +1,6 @@
 # SQLTiny — Lightweight Embedded Database · MySQL Protocol Compatible
 
-> **Current version `v2.0.8` (2026-11-16)** · The version number is maintained in `CMakeLists.txt` (`project(SQLTiny VERSION 2.0.8)`), `vcpkg.json` (`version-string`) and the startup banner in `src/main.cpp`. The wire protocol still reports `5.7.0-SQLTiny` for MySQL client compatibility — that string is unrelated to the product version.
+> **Current version `v2.0.9` (2026-11-16)** · The version number is maintained in `CMakeLists.txt` (`project(SQLTiny VERSION 2.0.9)`), `vcpkg.json` (`version-string`) and the startup banner in `src/main.cpp`. The wire protocol still reports `5.7.0-SQLTiny` for MySQL client compatibility — that string is unrelated to the product version.
 
 **SQLTiny** is a lightweight relational database written from scratch in modern C++20, with its core design inspired by [HSQLDB](http://hsqldb.org/). It additionally exposes the **MySQL Wire Protocol**, so standard MySQL clients (`mysql` CLI, Navicat, DBeaver, Connector/J, PyMySQL, DBX/dbExpress) can connect directly.
 
@@ -34,6 +34,16 @@
 > 🔒 **Lock hierarchy**: Catalog.mu_ (DDL) → Table.mu_ shared_lock (concurrent SELECT readers) / unique_lock (exclusive DML) → RowLockMap (row-level conflict detection) → TransactionManager.writeLock_ (commit boundary) → WalManager.mu_ (WAL file I/O)
 >
 > 🧊 **MVCC**: SELECT takes no locks at all; `for_each_visible(querySCN, readerTxn)` filters by `createSCN/deleteSCN` and `pendingTxn`. Uncommitted rows are visible only to their owning transaction; `finalize_commit` publishes them at commit.
+
+---
+
+## 🆕 What's new in v2.0.9 (aggregate pushdown enhancement, 2026-11-16)
+
+Driven by the benchmark level-1/level-2 comparison: 3-table JOIN with `ROUND(AVG(...))` + `HAVING` dropped from **18.7s to ~5s** (~4x), no FAIL introduced.
+
+- **Pushdown criteria extended** (`executor.cpp`): scalar functions wrapping aggregates (`ROUND(AVG(x))`) and `HAVING` now push down; `HAVING` aggregates matched by signature to already-accumulated values; fallback to the generic path when a `HAVING` aggregate is not projected
+- Also fixed `Expression::clone()` missing `is_window`/window fields, and fused raw-aggregate index alignment
+- **Validation**: SLT **1184 / PASS 1132 / GAP 52 / FAIL 0** (no regression); compare_employees **39/39 MATCH**
 
 ---
 
@@ -435,6 +445,7 @@ SQL syntax: `SET SESSION TRANSACTION ISOLATION LEVEL <level>` (session default),
 | **MySQL semantic compatibility (v2.0.6)** | ✅ | SLT-driven FAIL 67→0, PASS 1092 / GAP 92 / FAIL 0; NULL semantics, error codes, RIGHT JOIN, window aggregates, metadata |
 | **P1-a date/time module (v2.0.7)** | ✅ | `DATEDIFF`, `DATE_ADD`/`DATE_SUB` with INTERVAL, `LAST_DAY`, `DAYOFWEEK`, `WEEK`, `DATE_FORMAT`, `STR_TO_DATE`, `UNIX_TIMESTAMP`, `FROM_UNIXTIME`, `CURTIME`, parenthesis-free `CURRENT_*`; SLT **PASS 1106 / GAP 78 / FAIL 0** |
 | **P1-b DML dialect + DDL core (v2.0.8)** | ✅ | INSERT dialect, UPDATE/DELETE ORDER BY LIMIT, multi-table UPDATE, TRUNCATE, AUTO_INCREMENT, CTAS/LIKE/TEMPORARY/VIEW/INDEX/ALTER/RENAME, DDL implicit commit; SLT **PASS 1132 / GAP 52 / FAIL 0** |
+| **Aggregate pushdown enhancement (v2.0.9)** | ✅ | Scalar-wrapped aggregates (ROUND(AVG)) + HAVING pushdown; 3-table JOIN+agg+HAVING 18.7s→~5s; SLT **PASS 1132 / GAP 52 / FAIL 0** |
 | **Upcoming** | 📋 | Wait queue / deadlock detection → stored procedures · caching_sha2_password / SSL · replication |
 
 ---
@@ -490,10 +501,10 @@ FROM users u INNER JOIN orders o ON o.user_id = u.id;
 | Artifact | Type | Description |
 |---|---|---|
 | `build/Debug/sqltiny.lib` | static library | Engine core, for in-process embedding |
-| `build/Debug/sqltiny_server.exe` | executable | MySQL protocol TCP server (v2.0.8) |
+| `build/Debug/sqltiny_server.exe` | executable | MySQL protocol TCP server (v2.0.9) |
 | `build/Release/sqltiny_server.exe` | executable (release) | Same, Release build is about **0.9 MB** in a single file (static CRT + static fmt, no DLL dependencies, copy-and-run); Debug build is about 4.8 MB |
 
-**`sqltiny_server.exe` file info (v2.0.8)**:
+**`sqltiny_server.exe` file info (v2.0.9)**:
 
 | Property | Value |
 |---|---|
