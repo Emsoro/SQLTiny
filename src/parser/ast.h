@@ -49,6 +49,7 @@ enum class ExprKind {
 enum class BinOp {
     Plus, Minus, Star, Slash, Percent,   // 算术
     Eq, Ne, Lt, Gt, Le, Ge,               // 比较
+    NullSafeEq,                           // <=> (NULL 安全等值)
     And, Or,                              // 逻辑
     Concat,                               // MySQL CONCAT / SQL ||
 };

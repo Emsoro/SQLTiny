@@ -11,12 +11,20 @@
 #include <mutex>
 #include <cstdio>
 #include <cstring>
+#include <cctype>
+#include <cerrno>
+#include <csignal>
+#include <string_view>
 #include <unordered_map>
 #include <iostream>
 
 #ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
 #pragma comment(lib, "ws2_32.lib")
 #else
 #include <unistd.h>
@@ -39,6 +47,61 @@ bool send_mysql_response(int fd, const executor::ResultSet& rs, uint8_t& seq,
                          bool deprecate_eof, uint16_t status_flags);
 
 namespace {
+
+// ============================================================
+// 优雅关闭 (SIGINT/SIGTERM + SHUTDOWN 语句)
+// ============================================================
+std::atomic<bool> g_shutdown_requested{false};
+std::atomic<int>  g_active_connections{0};
+
+void set_shutdown_flag(int /*sig*/) {
+    g_shutdown_requested.store(true, std::memory_order_relaxed);
+}
+
+#ifdef _WIN32
+BOOL WINAPI console_ctrl_handler(DWORD type) {
+    switch (type) {
+        case CTRL_C_EVENT:
+        case CTRL_BREAK_EVENT:
+        case CTRL_CLOSE_EVENT:
+        case CTRL_SHUTDOWN_EVENT:
+            set_shutdown_flag(0);
+            return TRUE;
+        default:
+            return FALSE;
+    }
+}
+#endif
+
+void install_shutdown_handlers() {
+#ifdef _WIN32
+    SetConsoleCtrlHandler(console_ctrl_handler, TRUE);
+#endif
+    std::signal(SIGINT, set_shutdown_flag);
+    std::signal(SIGTERM, set_shutdown_flag);
+}
+
+bool iequals_ascii(std::string_view a, std::string_view b) {
+    if (a.size() != b.size()) return false;
+    for (size_t i = 0; i < a.size(); ++i) {
+        if (std::tolower(static_cast<unsigned char>(a[i])) !=
+            std::tolower(static_cast<unsigned char>(b[i]))) return false;
+    }
+    return true;
+}
+
+/// 识别 MySQL 的 SHUTDOWN 语句(允许前导/尾随空白和一个结尾分号)
+bool is_shutdown_sql(const std::string& sql) {
+    size_t b = sql.find_first_not_of(" \t\r\n");
+    if (b == std::string::npos) return false;
+    size_t e = sql.find_last_not_of(" \t\r\n");
+    if (sql[e] == ';') {
+        if (e == b) return false;
+        e = sql.find_last_not_of(" \t\r\n", e - 1);
+        if (e == std::string::npos || e < b) return false;
+    }
+    return iequals_ascii(std::string_view(sql.data() + b, e - b + 1), "shutdown");
+}
 
 // ============================================================
 // 预编译语句 (COM_STMT_PREPARE / EXECUTE) 辅助
@@ -617,6 +680,15 @@ void handle_connection(int client_fd, const ServerConfig& cfg, uint32_t thread_i
             }
             case COM_QUERY: {
                 std::string sql(reinterpret_cast<const char*>(cmd_payload.data() + 1), cmd_payload.size() - 1);
+                if (is_shutdown_sql(sql)) {
+                    // 先把 OK 发给客户端,再让 accept 循环退出;main 随后做 checkpoint
+                    auto okp = encode_mysql_packet(
+                        encode_ok_packet(0, 0, status_flags(), 0, ""), seq++);
+                    dbg("[QUERY] SHUTDOWN\n  -> OK (server shutdown requested)\n");
+                    if (!send_all(client_fd, okp.data(), okp.size())) return;
+                    set_shutdown_flag(0);
+                    return;
+                }
                 auto result = session.execute(sql);
                 if (result.ok)
                     dbg(fmt::format("[QUERY] {}\n  -> ok rows={} cols={}\n", sql,
@@ -666,25 +738,58 @@ int run_mysql_server(const ServerConfig& cfg) {
     int listen_fd = make_listen_socket(cfg.port);
     if (listen_fd < 0) return 1;
 
+    install_shutdown_handlers();
     std::atomic<uint32_t> next_tid{1};
 
-    while (true) {
+    // accept 带 200ms 超时:收到 SIGINT/SIGTERM 或 SHUTDOWN 语句后能及时退出
+    while (!g_shutdown_requested.load(std::memory_order_relaxed)) {
+        fd_set readfds;
+        FD_ZERO(&readfds);
+        FD_SET(listen_fd, &readfds);
+        timeval tv{};
+        tv.tv_sec = 0;
+        tv.tv_usec = 200 * 1000;
+        int ready = ::select(listen_fd + 1, &readfds, nullptr, nullptr, &tv);
+        if (ready < 0) {
+#ifdef _WIN32
+            if (WSAGetLastError() == WSAEINTR) continue;
+#else
+            if (errno == EINTR) continue;
+#endif
+            if (g_shutdown_requested.load(std::memory_order_relaxed)) break;
+            fmt::print(stderr, "select failed\n");
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            continue;
+        }
+        if (ready == 0) continue;
+
         struct sockaddr_in addr;
         socklen_t addr_len = sizeof(addr);
         int client = ::accept(listen_fd, reinterpret_cast<struct sockaddr*>(&addr), &addr_len);
         if (client < 0) {
+            if (g_shutdown_requested.load(std::memory_order_relaxed)) break;
             fmt::print(stderr, "accept failed\n");
             continue;
         }
         uint32_t tid = next_tid.fetch_add(1);
         fmt::print("[conn] new client tid={}\n", tid);
+        g_active_connections.fetch_add(1, std::memory_order_relaxed);
         // detach 后台线程
         std::thread([client, cfg, tid]() {
             handle_connection(client, cfg, tid);
             close_fd(client);
+            g_active_connections.fetch_sub(1, std::memory_order_relaxed);
             fmt::print("[conn] closed tid={}\n", tid);
         }).detach();
     }
+
+    fmt::print("[server] shutdown requested — no longer accepting connections\n");
+    close_fd(listen_fd);
+
+    // 等存活连接收尾(最多 3s),避免 checkpoint 与写事务并发
+    for (int i = 0; i < 300 && g_active_connections.load(std::memory_order_relaxed) > 0; ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
     return 0;
 }
 

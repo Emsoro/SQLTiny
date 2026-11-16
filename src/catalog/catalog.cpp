@@ -227,9 +227,14 @@ std::vector<std::string> Catalog::table_names(const std::string& default_db) con
 }
 
 void Catalog::for_each_database(const std::function<void(const std::string&)>& cb) const {
-    std::lock_guard<std::mutex> lock(mu_);
+    // 先在锁内拷贝名单,回调在锁外执行 —— 回调通常会再调用
+    // for_each_table_in() 等加锁接口(例如 checkpoint 写快照),
+    // 持锁调用会造成 std::mutex 递归加锁(未定义行为)。
     std::vector<std::string> names;
-    for (auto& [name, _] : databases_) names.push_back(name);
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        for (auto& [name, _] : databases_) names.push_back(name);
+    }
     std::sort(names.begin(), names.end());
     for (auto& n : names) cb(n);
 }

@@ -20,6 +20,8 @@ class Executor;
 
 // 表达式层 free function(跨 cpp 可见,定义在 expr.cpp)
 bool to_bool(const types::Value& v);
+/// MySQL 比较语义:数值与字符串比较时把数字字符串按数值处理。
+int compare_mysql(const types::Value& a, const types::Value& b);
 
 // CTE / 派生表物化结果:name → 临时表(shared_ptr 便于跨作用域共享视图)
 using CteMap = std::map<std::string, std::shared_ptr<storage::Table>>;
@@ -73,6 +75,7 @@ struct ResultSet {
     std::vector<storage::Row> rows;            // 每行按 column_names 对齐
     int64_t affected_rows = 0;
     int64_t last_insert_id = 0;
+    int64_t found_rows = -1;   // FOUND_ROWS():仅表 SELECT/EXPLAIN 更新,-1 表示不更新
     bool    ok = true;
     std::string error_message;
     std::string sql_state = "00000";

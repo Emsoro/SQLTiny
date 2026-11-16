@@ -7,6 +7,7 @@
 #include <sstream>
 #include <ctime>
 #include <cstdio>
+#include <cstdlib>
 #include <cctype>
 #include <cstdint>
 #include <set>
@@ -23,6 +24,20 @@ bool to_bool(const types::Value& v) {
     if (v.is_double()) return v.v_double != 0.0;
     if (v.kind == types::Value::Kind::Bool) return v.v_bool;
     return !v.to_string().empty();
+}
+
+int compare_mysql(const types::Value& a0, const types::Value& b0) {
+    types::Value a = a0, b = b0;
+    auto coerce = [](types::Value& x, const types::Value& other) {
+        if (!x.is_string() || !other.is_numeric()) return;
+        int64_t iv = 0; double dv = 0;
+        if (x.try_to_int(iv))      x = types::Value::make_int(iv);
+        else if (x.try_to_double(dv)) x = types::Value::make_double(dv);
+        else                       x = types::Value::make_int(0);   // MySQL:非法字符串按 0
+    };
+    coerce(a, b);
+    coerce(b, a);
+    return a.compare(b);
 }
 
 static types::Value make_err() { return types::Value::make_null(); }
@@ -172,9 +187,23 @@ types::Value Executor::eval(const ast::Expression& e, const ExecContext& ctx) co
 
             auto r = eval(*e.rhs, ctx);
 
+            // NULL 安全等值 <=>：NULL 与 NULL 相等，NULL 与非 NULL 不等。
+            if (e.binop == ast::BinOp::NullSafeEq) {
+                if (l.is_null() || r.is_null())
+                    return types::Value::make_bool(l.is_null() && r.is_null());
+                return types::Value::make_bool(l.compare(r) == 0);
+            }
+
             // MySQL 隐式类型转换:数字字符串在算术/比较中按数值处理('1' = 1 → 真)。
             // 预编译语句把字符串参数绑定到整数列时依赖这一行为。
-            auto as_num = [](const types::Value& v, types::Value& out) -> bool {
+            // 算术里非数字字符串按 0 处理('abc' + 1 = 1)；比较里则视为 UNKNOWN。
+            const bool is_arith = e.binop == ast::BinOp::Plus ||
+                                  e.binop == ast::BinOp::Minus ||
+                                  e.binop == ast::BinOp::Star ||
+                                  e.binop == ast::BinOp::Slash ||
+                                  e.binop == ast::BinOp::Percent;
+            auto as_num = [](const types::Value& v, types::Value& out,
+                             bool invalid_as_zero) -> bool {
                 if (v.is_numeric()) { out = v; return true; }
                 if (v.kind == types::Value::Kind::Bool) {
                     out = types::Value::make_int(v.v_bool ? 1 : 0);
@@ -184,28 +213,62 @@ types::Value Executor::eval(const ast::Expression& e, const ExecContext& ctx) co
                     int64_t iv = 0; double dv = 0;
                     if (v.try_to_int(iv)) { out = types::Value::make_int(iv); return true; }
                     if (v.try_to_double(dv)) { out = types::Value::make_double(dv); return true; }
+                    if (invalid_as_zero) { out = types::Value::make_int(0); return true; }
                 }
                 return false;
             };
             bool num_str_mismatch = false;
-            if (l.is_string() && r.is_numeric()) {
+            if (is_arith) {
                 types::Value t;
-                if (as_num(l, t)) l = t; else num_str_mismatch = true;
+                if (l.is_string() && as_num(l, t, true)) l = t;
+                if (r.is_string() && as_num(r, t, true)) r = t;
+            } else if (l.is_string() && r.is_numeric()) {
+                types::Value t;
+                if (as_num(l, t, false)) l = t; else num_str_mismatch = true;
             } else if (r.is_string() && l.is_numeric()) {
                 types::Value t;
-                if (as_num(r, t)) r = t; else num_str_mismatch = true;
+                if (as_num(r, t, false)) r = t; else num_str_mismatch = true;
             }
 
             // 算术
             if (e.binop == ast::BinOp::Plus) {
-                if (l.is_int() && r.is_int()) return types::Value::make_int(l.v_int + r.v_int);
+                if (l.is_int() && r.is_int()) {
+                    // 溢出时 MySQL 提升为 DECIMAL;用无符号幅值精确输出。
+                    int64_t a = l.v_int, b = r.v_int;
+                    if ((b > 0 && a > INT64_MAX - b) ||
+                        (b < 0 && a < INT64_MIN - b)) {
+                        uint64_t ua = static_cast<uint64_t>(a);
+                        uint64_t ub = static_cast<uint64_t>(b);
+                        if (a >= 0 && b >= 0)
+                            return types::Value::make_string(
+                                std::to_string(ua + ub));
+                        uint64_t mag = (uint64_t{0} - ua) + (uint64_t{0} - ub);
+                        return types::Value::make_string(
+                            "-" + std::to_string(mag));
+                    }
+                    return types::Value::make_int(a + b);
+                }
                 if (l.is_numeric() && r.is_numeric()) {
                     double a, b; l.try_to_double(a); r.try_to_double(b);
                     return types::Value::make_double(a + b);
                 }
             }
             if (e.binop == ast::BinOp::Minus) {
-                if (l.is_int() && r.is_int()) return types::Value::make_int(l.v_int - r.v_int);
+                if (l.is_int() && r.is_int()) {
+                    int64_t a = l.v_int, b = r.v_int;
+                    if ((b < 0 && a > INT64_MAX + b) ||
+                        (b > 0 && a < INT64_MIN + b)) {
+                        uint64_t ua = static_cast<uint64_t>(a);
+                        uint64_t ub = static_cast<uint64_t>(b);
+                        if (b < 0) {
+                            uint64_t mag = ua + (uint64_t{0} - ub);
+                            return types::Value::make_string(std::to_string(mag));
+                        }
+                        uint64_t mag = (uint64_t{0} - ua) + ub;
+                        return types::Value::make_string("-" + std::to_string(mag));
+                    }
+                    return types::Value::make_int(a - b);
+                }
                 if (l.is_numeric() && r.is_numeric()) {
                     double a, b; l.try_to_double(a); r.try_to_double(b);
                     return types::Value::make_double(a - b);
@@ -389,6 +452,74 @@ types::Value Executor::eval_function(
         return eval_like(v, pat);
     }
 
+    // DIV 整除
+    if (lower == "__intdiv") {
+        if (args.size() < 2) return types::Value::make_null();
+        auto a = eval(*args[0], ctx);
+        auto b = eval(*args[1], ctx);
+        if (a.is_null() || b.is_null()) return types::Value::make_null();
+        int64_t ia = 0, ib = 0;
+        if (a.try_to_int(ia) && b.try_to_int(ib)) {
+            if (ib == 0) return types::Value::make_null();
+            return types::Value::make_int(ia / ib);
+        }
+        double da = 0, db = 0;
+        if (a.try_to_double(da) && b.try_to_double(db)) {
+            if (db == 0) return types::Value::make_null();
+            return types::Value::make_int(static_cast<int64_t>(std::trunc(da / db)));
+        }
+        return types::Value::make_null();
+    }
+
+    // CAST(expr AS type) / CONVERT(expr, type) —— parser 折叠为 __cast(expr, 'type')
+    if (lower == "__cast") {
+        if (args.size() < 2) return types::Value::make_null();
+        auto v = eval(*args[0], ctx);
+        if (v.is_null()) return types::Value::make_null();
+        auto tv = eval(*args[1], ctx);
+        std::string type = tv.is_string() ? tv.v_str : tv.to_string();
+        std::transform(type.begin(), type.end(), type.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+        auto raw = [](const types::Value& x) -> std::string {
+            if (x.is_string()) return x.v_str;
+            if (x.is_int())    return std::to_string(x.v_int);
+            if (x.is_double()) return fmt::to_string(x.v_double);
+            if (x.kind == types::Value::Kind::Bool) return x.v_bool ? "1" : "0";
+            return x.to_string();
+        };
+        if (type.find("SIGNED") != std::string::npos ||
+            type.find("UNSIGNED") != std::string::npos ||
+            type.find("INT") != std::string::npos) {
+            int64_t iv = 0;
+            if (v.try_to_int(iv)) return types::Value::make_int(iv);
+            if (v.is_string()) {
+                // MySQL 前缀解析:'12abc' AS SIGNED = 12;完全非法 = 0
+                const char* s = v.v_str.c_str();
+                char* end = nullptr;
+                long long x = std::strtoll(s, &end, 10);
+                return types::Value::make_int(end == s ? 0 : x);
+            }
+            double d = 0;
+            if (v.try_to_double(d)) return types::Value::make_int(static_cast<int64_t>(d));
+            return types::Value::make_int(0);
+        }
+        if (type.find("DECIMAL") != std::string::npos ||
+            type.find("NUMERIC") != std::string::npos ||
+            type.find("DOUBLE") != std::string::npos ||
+            type.find("FLOAT") != std::string::npos ||
+            type.find("REAL") != std::string::npos) {
+            double d = 0;
+            if (v.try_to_double(d)) return types::Value::make_double(d);
+            return types::Value::make_double(0);
+        }
+        if (type.find("CHAR") != std::string::npos ||
+            type.find("TEXT") != std::string::npos ||
+            type.find("BINARY") != std::string::npos) {
+            return types::Value::make_string(raw(v));
+        }
+        return v;
+    }
+
     // 普通函数
     if (lower == "version") {
         return types::Value::make_string("5.7.0-SQLTiny");
@@ -435,8 +566,14 @@ types::Value Executor::eval_function(
     if (lower == "abs") {
         if (args.empty()) return types::Value::make_null();
         auto v = eval(*args[0], ctx);
-        if (v.is_int()) return types::Value::make_int(std::abs(v.v_int));
+        if (v.is_null()) return types::Value::make_null();
+        if (v.is_int()) return types::Value::make_int(v.v_int < 0 ? -v.v_int : v.v_int);
         if (v.is_double()) return types::Value::make_double(std::fabs(v.v_double));
+        // MySQL 会把数字字符串按数值处理:ABS('-3') = 3
+        int64_t iv = 0;
+        if (v.try_to_int(iv)) return types::Value::make_int(iv < 0 ? -iv : iv);
+        double d = 0;
+        if (v.try_to_double(d)) return types::Value::make_double(std::fabs(d));
         return types::Value::make_null();
     }
     if (lower == "round") {
@@ -598,8 +735,20 @@ types::Value Executor::eval_function(
     }
     // ---- 连接/会话信息函数 ----
     if (lower == "connection_id") return types::Value::make_int(1);
-    if (lower == "last_insert_id") return types::Value::make_int(0);
-    if (lower == "row_count" || lower == "found_rows") return types::Value::make_int(0);
+    if (lower == "last_insert_id") {
+        // LAST_INSERT_ID(expr) 形式:设置并返回 expr
+        if (!args.empty()) {
+            auto v = eval(*args[0], ctx);
+            int64_t iv = 0;
+            if (v.try_to_int(iv) && session_) session_->setLastInsertId(iv);
+            return v;
+        }
+        return types::Value::make_int(session_ ? session_->lastInsertId() : 0);
+    }
+    if (lower == "row_count")
+        return types::Value::make_int(session_ ? session_->rowCount() : -1);
+    if (lower == "found_rows")
+        return types::Value::make_int(session_ ? session_->foundRows() : 0);
     if (lower == "session_user" || lower == "system_user" || lower == "current_role")
         return types::Value::make_string("root@localhost");
 

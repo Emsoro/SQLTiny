@@ -87,7 +87,7 @@ bool WalManager::do_checkpoint(catalog::Catalog& catalog) {
     uint64_t wal_offset = static_cast<uint64_t>(std::ftell(fh));
     std::fclose(fh);
 
-    // 2. 写 snapshot
+    // 2. 写 snapshot (先记下截断前偏移,用于 checkpoint 中途崩溃时回放)
     persist::WalSnapshot snap(snapshot_path());
     if (!snap.write(catalog, wal_offset)) return false;
 
@@ -106,6 +106,12 @@ bool WalManager::do_checkpoint(catalog::Catalog& catalog) {
     // 5. 重开 writer
     writer_ = std::make_unique<persist::WalWriter>(wal_path_);
     if (!writer_->open()) return false;
+
+    // 6. WAL 已截断,新记录的起点是 header 之后 —— snapshot 里的 wal_offset
+    //    必须同步归零,否则下次启动会跳过截断后追加的记录。
+    //    (若在第 3/4 步之间崩溃,第 2 步写下的 offset=N 快照仍包含完整数据)
+    if (!snap.write(catalog, 0)) return false;
+
     checkpoint_wal_offset_ = 0;
     checkpoint_pending_.store(false);
     fmt::print("[WAL] checkpoint done: WAL truncated, snapshot at {}\n", snapshot_path());
@@ -254,6 +260,10 @@ size_t WalManager::replay(catalog::Catalog& catalog, bool& out_truncated) {
         return 0;
     }
 
+    // 有 snapshot 时只回放 checkpoint 之后的增量,避免重复应用旧 DML。
+    // (offset 越界时 seek_to 会退回到 header 之后)
+    rd.seek_to(checkpoint_wal_offset_);
+
     // 打开后 catalog 已经有一个 default DB (Catalog 构造时初始化了 default)
     // 但我们先把它清掉 —— replay 从 CreateDatabase 重建
     // 实际上 default 是 Catalog 构造函数硬编码创建的,我们保留它,但 replay 里如果有 DROP default 则会 drop
@@ -363,9 +373,10 @@ size_t WalManager::replay(catalog::Catalog& catalog, bool& out_truncated) {
                 break;
             }
             case persist::RecordType::EndOfFile: {
-                // 干净关闭标记 — 不再应用后面的 record (理论上没有了)
+                // 干净关闭标记 —— 只是标记,不是终止符。
+                // checkpoint 截断 WAL 后,后续写入会追加在它后面,必须继续回放。
                 applied++;
-                goto done;
+                break;
             }
             default:
                 break;  // 未知 record type 跳过
@@ -373,7 +384,6 @@ size_t WalManager::replay(catalog::Catalog& catalog, bool& out_truncated) {
         applied++;
     }
 
-done:
     rd.close();
     return applied;
 }

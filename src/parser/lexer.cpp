@@ -321,6 +321,9 @@ Token Lexer::next() {
     }
 
     // 多字符运算符
+    if (c == '<' && peek_char(1) == '=' && peek_char(2) == '>') {
+        advance(3); return { TokenKind::NullSafeEq, "<=>", start_line, start_col };
+    }
     if (c == '<' && peek_char(1) == '=') { advance(2); return { TokenKind::Le,   "<=", start_line, start_col }; }
     if (c == '>' && peek_char(1) == '=') { advance(2); return { TokenKind::Ge,   ">=", start_line, start_col }; }
     if (c == '<' && peek_char(1) == '>') { advance(2); return { TokenKind::Ne,   "<>", start_line, start_col }; }

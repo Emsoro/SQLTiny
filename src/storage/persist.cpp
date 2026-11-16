@@ -347,12 +347,13 @@ bool WalWriter::open() {
         header_written_ = true;
     } else {
         header_written_ = true;
-        // 校验 header magic
+        // 校验 header magic;0 字节文件 / 非法 header 都截断重建
         WalHeader hdr;
         std::fseek(fh_, 0, SEEK_SET);
-        if (std::fread(&hdr, sizeof(hdr), 1, fh_) != 1) { std::fclose(fh_); fh_ = nullptr; return false; }
-        if (std::memcmp(hdr.magic, "SQTWAL", 6) != 0 || hdr.version != 1) {
-            // 不是合法 WAL — 截断重建
+        bool valid = (std::fread(&hdr, sizeof(hdr), 1, fh_) == 1) &&
+                     std::memcmp(hdr.magic, "SQTWAL", 6) == 0 && hdr.version == 1;
+        if (!valid) {
+            // 不是合法 WAL(包括 checkpoint 刚 truncate 出的 0 字节文件)— 重建并写 header
             std::fclose(fh_); fh_ = nullptr;
             fh_ = std::fopen(path_.c_str(), "w+b");
             if (!fh_) return false;
@@ -398,6 +399,15 @@ void WalReader::seek_to_beginning() {
     if (fh_) {
         std::fseek(fh_, sizeof(WalHeader), SEEK_SET);
     }
+}
+
+bool WalReader::seek_to(uint64_t offset) {
+    if (!fh_) return false;
+    std::fseek(fh_, 0, SEEK_END);
+    long fsz = std::ftell(fh_);
+    if (fsz < 0 || offset < sizeof(WalHeader) || offset > static_cast<uint64_t>(fsz))
+        offset = sizeof(WalHeader);
+    return std::fseek(fh_, static_cast<long>(offset), SEEK_SET) == 0;
 }
 
 std::optional<WalRecord> WalReader::read_next(bool* out_truncated) {

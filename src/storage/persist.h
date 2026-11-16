@@ -141,6 +141,10 @@ public:
     /// 回到头部 (重新 replay 用)
     void seek_to_beginning();
 
+    /// 跳到 WAL 中记录的绝对偏移(snapshot checkpoint 之后的增量起点)。
+    /// offset 不在合法范围内时退回到 header 之后。
+    bool seek_to(uint64_t offset);
+
 private:
     std::string path_;
     FILE*       fh_ = nullptr;

@@ -438,17 +438,10 @@ ResultSet Executor::exec_insert(const ast::InsertStmt& s) {
             }
         }
         affected++;
-        // 更新 last_insert_id(最后一个插入的 auto_increment 值)
-        for (auto& col_list : def.primary_key_cols) {
-            for (auto& cname : col_list) {
-                int idx = def.column_index(cname);
-                if (idx >= 0 && idx < static_cast<int>(row.size()) && row[idx].is_int()) {
-                    auto& cd = def.columns[idx];
-                    if (cd.is_auto_increment || (cd.is_primary_key && def.primary_key_cols.size() == 1)) {
-                        r.last_insert_id = row[idx].v_int;
-                    }
-                }
-            }
+        // 更新 last_insert_id:只反映自增列生成的值(显式主键不算)
+        for (size_t ci = 0; ci < row.size() && ci < def.columns.size(); ++ci) {
+            if (def.columns[ci].is_auto_increment && row[ci].is_int())
+                r.last_insert_id = row[ci].v_int;
         }
     }
 
@@ -1372,6 +1365,8 @@ ResultSet Executor::exec_select_body(const ast::SelectStmt& s, const ExecContext
                 static_cast<int64_t>(p.right_rows), extra);
         }
         r.affected_rows = static_cast<int64_t>(r.rows.size());
+        r.found_rows = s.from_tables.empty() ? -1
+                     : (tbl ? static_cast<int64_t>(tbl->row_count()) : -1);
         return r;
     }
 
@@ -1381,7 +1376,8 @@ ResultSet Executor::exec_select_body(const ast::SelectStmt& s, const ExecContext
         std::string low = n;
         std::transform(low.begin(), low.end(), low.begin(),
                        [](unsigned char c) { return std::tolower(c); });
-        return low == "count" || low == "sum" || low == "avg" || low == "min" || low == "max";
+        return low == "count" || low == "sum" || low == "avg" || low == "min" ||
+               low == "max" || low == "group_concat";
     };
     std::function<bool(const ast::Expression&)> contains_agg =
         [&](const ast::Expression& e) -> bool {
@@ -1892,12 +1888,12 @@ ResultSet Executor::exec_select_body(const ast::SelectStmt& s, const ExecContext
                     }
                 } else {
                     switch (p.op) {
-                        case ast::BinOp::Eq: pass = l.sql_equals(r); break;
-                        case ast::BinOp::Ne: pass = l.compare(r) != 0; break;
-                        case ast::BinOp::Lt: pass = l.compare(r) <  0; break;
-                        case ast::BinOp::Gt: pass = l.compare(r) >  0; break;
-                        case ast::BinOp::Le: pass = l.compare(r) <= 0; break;
-                        case ast::BinOp::Ge: pass = l.compare(r) >= 0; break;
+                        case ast::BinOp::Eq: pass = compare_mysql(l, r) == 0; break;
+                        case ast::BinOp::Ne: pass = compare_mysql(l, r) != 0; break;
+                        case ast::BinOp::Lt: pass = compare_mysql(l, r) <  0; break;
+                        case ast::BinOp::Gt: pass = compare_mysql(l, r) >  0; break;
+                        case ast::BinOp::Le: pass = compare_mysql(l, r) <= 0; break;
+                        case ast::BinOp::Ge: pass = compare_mysql(l, r) >= 0; break;
                         default: break;
                     }
                 }
@@ -2404,16 +2400,41 @@ ResultSet Executor::exec_select_body(const ast::SelectStmt& s, const ExecContext
             std::string low = ci_lower(fe.func_name);
             if (low == "count" && fe.func_star_arg)
                 return types::Value::make_int(static_cast<int64_t>(brows.size()));
+            if (low == "count" && fe.func_distinct && fe.func_args.size() > 1) {
+                // COUNT(DISTINCT a, b):按元组去重;任一列为 NULL 的行不计入。
+                std::unordered_set<std::string> seen;
+                for (auto& row : brows) {
+                    std::string key;
+                    bool has_null = false;
+                    for (auto& arg : fe.func_args) {
+                        auto v = eval(*arg, build_ctx(row));
+                        if (v.is_null()) { has_null = true; break; }
+                        key += v.to_string();
+                        key.push_back('\x01');
+                    }
+                    if (!has_null) seen.insert(std::move(key));
+                }
+                return types::Value::make_int(static_cast<int64_t>(seen.size()));
+            }
             if (fe.func_args.empty() || !fe.func_args[0]) return types::Value::make_null();
             double acc = 0; int64_t iacc = 0; int64_t c = 0;
             bool all_int = true, first = true;
             types::Value best;
+            std::string gcat;
+            bool gcat_any = false;
             std::unordered_set<std::string> dseen;
             for (auto& row : brows) {
                 auto v = eval(*fe.func_args[0], build_ctx(row));
                 if (v.is_null()) continue;
                 if (fe.func_distinct && !dseen.insert(v.to_string()).second) continue;
                 if (low == "count") { ++c; continue; }
+                if (low == "group_concat") {
+                    if (gcat_any) gcat.push_back(',');
+                    gcat += v.is_string() ? v.v_str : v.to_string();
+                    gcat_any = true;
+                    ++c;
+                    continue;
+                }
                 if (low == "min" || low == "max") {
                     if (first) { best = v; first = false; }
                     else {
@@ -2429,6 +2450,9 @@ ResultSet Executor::exec_select_body(const ast::SelectStmt& s, const ExecContext
                 ++c;
             }
             if (low == "count") return types::Value::make_int(c);
+            if (low == "group_concat")
+                return gcat_any ? types::Value::make_string(gcat)
+                                : types::Value::make_null();
             // SQL 标准:空集 SUM / AVG 返回 NULL (只有 COUNT 返回 0)
             if (c == 0) return types::Value::make_null();
             if (low == "avg") return types::Value::make_double(acc / static_cast<double>(c));
@@ -2797,6 +2821,8 @@ ResultSet Executor::exec_select_body(const ast::SelectStmt& s, const ExecContext
 
     r.rows = std::move(after_where);
     r.affected_rows = static_cast<int64_t>(r.rows.size());
+    r.found_rows = s.from_tables.empty() ? -1
+                 : static_cast<int64_t>(r.rows.size());
     return r;
 }
 

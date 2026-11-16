@@ -41,7 +41,7 @@
 
 ## 🆕 v2.0.6 更新内容（MySQL 语义兼容修复，2026-11-16）
 
-由独立 sqllogictest 测试集（与本仓库同级的 `SQLTinyTest/testcase`，36 个 `.slt`，按 MySQL 8.0 语义书写）驱动：首轮 **1184 项 / PASS 971 / GAP 146 / FAIL 67**，修复后 **PASS 1071 / GAP 113 / FAIL 0**；协议套件 **42/42**，持久化 **13 PASS / 2 GAP**。
+由独立 sqllogictest 测试集（与本仓库同级的 `SQLTinyTest/testcase`，36 个 `.slt`，按 MySQL 8.0 语义书写）驱动：首轮 **1184 项 / PASS 971 / GAP 146 / FAIL 67**，修复后 **PASS 1092 / GAP 92 / FAIL 0**；协议套件 **42/42**，持久化 **15/15**。
 
 ### 1. 值语义与表达式
 
@@ -85,9 +85,9 @@
 
 | 套件 | 结果 |
 |---|---|
-| sqllogictest（36 文件） | 1184 项 · **PASS 1071 · GAP 113 · FAIL 0** |
+| sqllogictest（36 文件） | 1184 项 · **PASS 1092 · GAP 92 · FAIL 0** |
 | `test_protocol.py` | **42 / 42 PASS** |
-| `test_persistence.py` | **13 PASS / 2 GAP / 0 FAIL**（缺优雅关闭 checkpoint） |
+| `test_persistence.py` | **15 PASS / 0 GAP / 0 FAIL**（优雅关闭 → checkpoint → 截断 WAL 已补齐） |
 
 ---
 
@@ -453,8 +453,8 @@ SQL 语法:`SET SESSION TRANSACTION ISOLATION LEVEL <级别>`(会话默认)、`S
 | **主键点查索引探测 (v2.0.3)** | ✅ | `WHERE PK首列=常量` 走 `for_each_by_pk_prefix`,不再全表扫描;逻辑删除历史自动回退全扫保证 MVCC 可见性;`employees` 点查 74ms→**0.13ms** · `salaries` 678ms→**0.17ms** |
 | **融合聚合 + UNION ALL (v2.0.4)** | ✅ | 单表聚合单遍扫描快路径:`SUM(salary)` 2.97s→**0.35s**、`WHERE salary>100000` 计行 0.774s→**0.248s**;UNION/UNION ALL(含去重、链式、尾部 ORDER BY/LIMIT)+ `ORDER BY 1` 位置序号;三端结果与 MySQL 对比验证 |
 | **复杂查询正确性 + 语法补全 (v2.0.5)** | ✅ | WITH/递归 CTE、标量子查询、EXISTS、FROM 派生表、COUNT(DISTINCT)、BETWEEN、`ROW_NUMBER() OVER`、日期函数;GROUP BY 别名与内嵌聚合修复;高基数分桶 O(n²)→O(1)、相关子查询去相关;`compare_employees.py` 39 条 **39/39 MATCH** |
-| **MySQL 语义兼容修复 (v2.0.6, 2026-11-16)** | ✅ | sqllogictest 套件驱动 **FAIL 67→0**;NULL 排序/三值逻辑、LIKE 大小写、BIGINT/表达式列类型、SQL 校验(1048/1054/1136/1366/1406/1242/1241/1111/1055/1222/3593)、RIGHT JOIN/逗号连接、窗口聚合、information_schema 主键元数据、字符串与数值函数;SLT **PASS 1071 / GAP 113 / FAIL 0**,协议 **42/42** |
-| **后续** | 📋 | 优雅关闭 checkpoint · 日期函数与关键字同名函数 · 等待队列/死锁检测 → 存储过程 · caching_sha2_password / SSL · 复制 |
+| **MySQL 语义兼容修复 (v2.0.6, 2026-11-16)** | ✅ | sqllogictest 套件驱动 **FAIL 67→0**;NULL 排序/三值逻辑、LIKE 大小写、BIGINT/表达式列类型、SQL 校验(1048/1054/1136/1366/1406/1242/1241/1111/1055/1222/3593)、RIGHT JOIN/逗号连接、窗口聚合、information_schema 主键元数据、字符串与数值函数;SLT **PASS 1092 / GAP 92 / FAIL 0**,协议 **42/42** |
+| **后续** | 📋 | 日期函数与关键字同名函数 · 等待队列/死锁检测 → 存储过程 · caching_sha2_password / SSL · 复制 |
 
 ---
 
@@ -613,7 +613,7 @@ test_stmt_prepare    7/7   PASS        预编译语句 binary protocol 全流程
 
 | 套件 | 结果 |
 |---|---|
-| `runner.py`（36 个 `.slt`，1184 项） | **PASS 1071 · GAP 113 · FAIL 0** |
+| `runner.py`（36 个 `.slt`，1184 项） | **PASS 1092 · GAP 92 · FAIL 0** |
 | `python/test_protocol.py` | **42 / 42 PASS** |
 | `python/test_persistence.py` | **13 PASS / 2 GAP / 0 FAIL**（缺优雅关闭 checkpoint 路径） |
 

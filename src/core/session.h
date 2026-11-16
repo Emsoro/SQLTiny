@@ -81,6 +81,12 @@ public:
     ///  REPEATABLE READ / SERIALIZABLE → 事务开始时的 SCN (快照隔离)
     uint64_t readSCN() const;
 
+    // ---- MySQL 会话级函数状态 ----
+    int64_t lastInsertId() const { return sql_last_insert_id_; }
+    void    setLastInsertId(int64_t v) { sql_last_insert_id_ = v; }
+    int64_t rowCount() const { return sql_row_count_; }
+    int64_t foundRows() const { return sql_found_rows_; }
+
     // ============================================================
     // M6 事务相关
     // ============================================================
@@ -122,6 +128,11 @@ private:
 
     executor::Executor exec_{ Database::instance().catalog() };
     uint64_t txn_id_ = 0;
+
+    // MySQL 会话函数:LAST_INSERT_ID() / ROW_COUNT() / FOUND_ROWS()
+    int64_t sql_last_insert_id_ = 0;
+    int64_t sql_row_count_ = -1;    // MySQL 初始/上一个 SELECT 为 -1
+    int64_t sql_found_rows_ = 0;
 };
 
 } // namespace sqltiny::core

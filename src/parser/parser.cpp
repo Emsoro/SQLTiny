@@ -340,6 +340,7 @@ ast::BinOp Parser::token_to_binop(TokenKind k) {
         case TokenKind::Ge: return ast::BinOp::Ge;
         case TokenKind::Eq: return ast::BinOp::Eq;
         case TokenKind::Ne: return ast::BinOp::Ne;
+        case TokenKind::NullSafeEq: return ast::BinOp::NullSafeEq;
         default: throw std::runtime_error("not a comparison");
     }
 }
@@ -350,7 +351,8 @@ ast::ExprPtr Parser::parse_comparison() {
     // 链式 A < B < C 这里不支持,只单对单
     if (t.kind == TokenKind::Lt || t.kind == TokenKind::Gt ||
         t.kind == TokenKind::Le || t.kind == TokenKind::Ge ||
-        t.kind == TokenKind::Eq || t.kind == TokenKind::Ne) {
+        t.kind == TokenKind::Eq || t.kind == TokenKind::Ne ||
+        t.kind == TokenKind::NullSafeEq) {
         consume();
         auto right = parse_additive();
         return ast::Expression::make_binary(token_to_binop(t.kind), std::move(left), std::move(right));
@@ -492,6 +494,15 @@ ast::ExprPtr Parser::parse_multiplicative() {
         } else if (match_consume(TokenKind::Percent)) {
             auto right = parse_unary();
             left = ast::Expression::make_binary(ast::BinOp::Percent, std::move(left), std::move(right));
+        } else if (match_consume(TokenKind::KwDiv)) {
+            // MySQL: a DIV b —— 整除(向零截断)
+            auto right = parse_unary();
+            auto e = std::make_unique<ast::Expression>();
+            e->kind = ast::ExprKind::FunctionCall;
+            e->func_name = "__intdiv";
+            e->func_args.push_back(std::move(left));
+            e->func_args.push_back(std::move(right));
+            left = std::move(e);
         } else {
             break;
         }
@@ -609,7 +620,7 @@ ast::ExprPtr Parser::parse_primary() {
         static const std::set<std::string> reserved = {
             // 表达式结构 / 子句边界
             "select", "from", "where", "and", "or", "not", "is", "in", "like",
-            "between", "as", "on", "join", "inner", "left", "right", "outer",
+            "between", "as", "on", "join", "inner", "outer",
             "full", "cross", "natural", "group", "by", "having", "order",
             "asc", "desc", "limit", "offset", "union", "intersect", "except",
             "case", "when", "then", "else", "end",
@@ -618,9 +629,9 @@ ast::ExprPtr Parser::parse_primary() {
             "drop", "table", "tables", "databases", "schemas", "use", "show",
             "describe", "explain", "primary", "foreign", "references",
             "constraint", "unique", "index", "check",
-            "if", "exists", "begin", "commit", "rollback", "savepoint",
+            "exists", "begin", "commit", "rollback", "savepoint",
             "release", "start", "transaction", "work", "to", "alter",
-            "add", "column", "truncate", "temporary",
+            "add", "column", "temporary",
         };
         std::string low;
         low.resize(t.text.size());
@@ -666,6 +677,32 @@ ast::ExprPtr Parser::parse_primary() {
 
 ast::ExprPtr Parser::parse_function_call(std::string name, int line, int col) {
     expect(TokenKind::LParen, "(");
+    std::string lname;
+    lname.resize(name.size());
+    std::transform(name.begin(), name.end(), lname.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    // CAST(expr AS type) / CONVERT(expr, type) —— AS / 类型名不是普通表达式,
+    // 单独解析,并折叠成 __cast(expr, 'type')。
+    if (lname == "cast" || lname == "convert") {
+        auto e = std::make_unique<ast::Expression>();
+        e->kind = ast::ExprKind::FunctionCall;
+        e->func_name = "__cast";
+        e->func_args.push_back(parse_expr());
+        if (lname == "cast") expect(TokenKind::KwAs, "AS");
+        else                expect(TokenKind::Comma, ",");
+        std::string type;
+        int depth = 0;
+        while (!(depth == 0 && (match(TokenKind::RParen) || match(TokenKind::Eof)))) {
+            Token tk = consume();
+            if (tk.kind == TokenKind::LParen) ++depth;
+            else if (tk.kind == TokenKind::RParen) --depth;
+            type += tk.text;
+        }
+        if (match(TokenKind::RParen)) consume();
+        e->func_args.push_back(
+            ast::Expression::make_literal(types::Value::make_string(type)));
+        return e;
+    }
     auto e = std::make_unique<ast::Expression>();
     e->kind = ast::ExprKind::FunctionCall;
     e->func_name = name;

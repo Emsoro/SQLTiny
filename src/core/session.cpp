@@ -337,6 +337,19 @@ executor::ResultSet Session::execute(const std::string& sql) {
                 return last;
             }
 
+            // MySQL 会话函数状态:
+            //   ROW_COUNT() —— SELECT 返回 -1,其余返回受影响行数
+            //   FOUND_ROWS() —— 仅表 SELECT/EXPLAIN 更新
+            //   LAST_INSERT_ID() —— 最近一次 INSERT 生成的自增值
+            if (kind == ast::StmtKind::Select) {
+                sql_row_count_ = -1;
+                if (last.found_rows >= 0) sql_found_rows_ = last.found_rows;
+            } else {
+                sql_row_count_ = last.affected_rows;
+                if (kind == ast::StmtKind::Insert && last.last_insert_id != 0)
+                    sql_last_insert_id_ = last.last_insert_id;
+            }
+
             // —— USE: 只改本会话的 current_database (M6 P1 #7: per-session db) ——
             if (kind == ast::StmtKind::Use) {
                 auto& name = st->use_->database_name;

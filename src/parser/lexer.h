@@ -30,6 +30,7 @@ enum class TokenKind : uint16_t {
     Le,              // <=
     Ge,              // >=
     Ne,              // <> / !=
+    NullSafeEq,      // <=> (NULL 安全等值)
     Assign,          // := (MySQL 用户变量)
     Dot,             // .
     Comma,           // ,
