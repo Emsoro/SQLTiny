@@ -1,6 +1,8 @@
 # SQLTiny — Lightweight Embedded Database · MySQL Protocol Compatible
 
-> **Current version `v2.1.0` (2026-11-16)** · The version number is maintained in `CMakeLists.txt` (`project(SQLTiny VERSION 2.1.0)`), `vcpkg.json` (`version-string`) and the startup banner in `src/main.cpp`. The wire protocol still reports `5.7.0-SQLTiny` for MySQL client compatibility — that string is unrelated to the product version.
+> **Current version `v2.2.0` (2026-11-17)** · The version number is maintained in `CMakeLists.txt` (`project(SQLTiny VERSION 2.2.0)`), `vcpkg.json` (`version-string`) and the startup banner in `src/main.cpp`. The wire protocol still reports `5.7.0-SQLTiny` for MySQL client compatibility — that string is unrelated to the product version.
+>
+> v2.2.0 adds **command-line import / dump export** (`--import` / `--dump`): load mysqldump-style scripts directly, or export a backup that can be re-imported. See "What's new in v2.2.0" below.
 
 **SQLTiny** is a lightweight relational database written from scratch in modern C++20, with its core design inspired by [HSQLDB](http://hsqldb.org/). It additionally exposes the **MySQL Wire Protocol**, so standard MySQL clients (`mysql` CLI, Navicat, DBeaver, Connector/J, PyMySQL, DBX/dbExpress) can connect directly.
 
@@ -34,6 +36,24 @@
 > 🔒 **Lock hierarchy**: Catalog.mu_ (DDL) → Table.mu_ shared_lock (concurrent SELECT readers) / unique_lock (exclusive DML) → RowLockMap (row-level conflict detection) → TransactionManager.writeLock_ (commit boundary) → WalManager.mu_ (WAL file I/O)
 >
 > 🧊 **MVCC**: SELECT takes no locks at all; `for_each_visible(querySCN, readerTxn)` filters by `createSCN/deleteSCN` and `pendingTxn`. Uncommitted rows are visible only to their owning transaction; `finalize_commit` publishes them at commit.
+
+---
+
+## 🆕 What's new in v2.2.0 (command-line import / dump, 2026-11-17)
+
+`sqltiny_server.exe` gains a batch mode: instead of starting the network server, it imports a SQL script into (or exports from) the database under `--data-dir`, then exits.
+
+**Import `--import FILE`**
+- Streams the script, supporting `--` / `#` line comments, `/* ... */` and MySQL `/*! ... */` conditional comments, single/double/backtick quoting with escapes, and `DELIMITER`
+- Skips mysqldump's `LOCK TABLES` / `UNLOCK TABLES`; accepts column-level `COLLATE` / `CHARACTER SET` / `ON UPDATE` and table-level `AUTO_INCREMENT=n` in any position
+- Commits statement by statement; `--import-continue-on-error` keeps going after failures, `--import-quiet` suppresses progress, `--import-then-serve` starts the server after importing
+
+**Export `--dump FILE`**
+- Emits `CREATE DATABASE IF NOT EXISTS` / `USE` / `DROP TABLE IF EXISTS` / `CREATE TABLE` (primary keys, defaults, AUTO_INCREMENT cursor) / multi-row `INSERT`
+- `--dump-database` / `--dump-table` filter databases and tables, `--dump-no-create` / `--dump-no-data` / `--dump-no-drop` trim the output, `--dump-batch-rows N` sets rows per INSERT
+- `--dump -` writes to stdout while engine and import/export logs go to stderr, so redirection yields pure SQL
+
+**Validation**: new `smoke_cli_io` **40 checks / 0 FAIL** (comments, escapes, `DELIMITER`, `LOCK TABLES` skipping, dump→import round trip, defaults / auto-increment cursor); manual verification of mysqldump-style import, `--dump -` redirection and `--import-then-serve`.
 
 ---
 
@@ -458,6 +478,7 @@ SQL syntax: `SET SESSION TRANSACTION ISOLATION LEVEL <level>` (session default),
 | **P1-b DML dialect + DDL core (v2.0.8)** | ✅ | INSERT dialect, UPDATE/DELETE ORDER BY LIMIT, multi-table UPDATE, TRUNCATE, AUTO_INCREMENT, CTAS/LIKE/TEMPORARY/VIEW/INDEX/ALTER/RENAME, DDL implicit commit; SLT **PASS 1132 / GAP 52 / FAIL 0** |
 | **Aggregate pushdown enhancement (v2.0.9)** | ✅ | Scalar-wrapped aggregates (ROUND(AVG)) + HAVING pushdown; 3-table JOIN+agg+HAVING 18.7s→~5s; SLT **PASS 1132 / GAP 52 / FAIL 0** |
 | **benchmark top-query optimizations (v2.1.0)** | ✅ | Single-table GROUP BY streaming aggregation, non-correlated scalar subquery constant folding, IN candidate hash index; rank1 10.3s→1.15s / rank2 8.17s→0.77s / rank20 0.67s→0.43s; SLT **PASS 1132 / GAP 52 / FAIL 0** |
+| **Command-line import / dump (v2.2.0)** | ✅ | `--import` loads SQL/mysqldump scripts (comments, `DELIMITER`, `LOCK TABLES` skipping, continue-on-error); `--dump` exports MySQL-style CREATE DATABASE/TABLE + multi-row INSERT (db/table filters, schema-only/data-only, batch size); `smoke_cli_io` 40/40 |
 | **Upcoming** | 📋 | Wait queue / deadlock detection → stored procedures · caching_sha2_password / SSL · replication |
 
 ---
@@ -513,10 +534,10 @@ FROM users u INNER JOIN orders o ON o.user_id = u.id;
 | Artifact | Type | Description |
 |---|---|---|
 | `build/Debug/sqltiny.lib` | static library | Engine core, for in-process embedding |
-| `build/Debug/sqltiny_server.exe` | executable | MySQL protocol TCP server (v2.1.0) |
+| `build/Debug/sqltiny_server.exe` | executable | MySQL protocol TCP server (v2.2.0) |
 | `build/Release/sqltiny_server.exe` | executable (release) | Same, Release build is about **0.9 MB** in a single file (static CRT + static fmt, no DLL dependencies, copy-and-run); Debug build is about 4.8 MB |
 
-**`sqltiny_server.exe` file info (v2.1.0)**:
+**`sqltiny_server.exe` file info (v2.2.0)**:
 
 | Property | Value |
 |---|---|
@@ -524,6 +545,7 @@ FROM users u INNER JOIN orders o ON o.user_id = u.id;
 | Default listen | `0.0.0.0:3306` (change with `--port`) |
 | Authentication | `mysql_native_password`; during development user=root with any password |
 | Persistence | `--data-dir` enables WAL (`sql.wal`) + snapshot (`sql.data`) |
+| Import / dump | `--import FILE` loads a SQL script; `--dump FILE` exports MySQL-style SQL (see CLI flags) |
 | Debugging | `--query-log FILE` logs the handshake and every raw command packet as hex (for client-compatibility diagnosis) |
 | Protocol disguise | Server version string `5.7.0-SQLTiny` (unrelated to the product version) |
 | `build/Debug/smoke_m1.exe` | smoke test | Value / AVL / Lexer — **3/3 PASS** |
@@ -647,6 +669,38 @@ sqltiny_server [--port <n>] [--user <name>] [--password <pwd>] [--data-dir <DIR>
                defaults: --port 3306 --user root
                --data-dir   omitted = in-memory mode (no persistence, data lost on restart)
                --query-log  logs handshake/auth/every raw command packet as hex plus results
+
+SQL import / dump (requires --data-dir, exits when done):
+               --import FILE                 import a SQL script
+               --import-continue-on-error    keep going after a failed statement
+               --import-quiet                suppress progress output
+               --import-then-serve           import, then start the MySQL server
+               --dump FILE                   write a MySQL-style SQL script (FILE `-` = stdout)
+               --dump-database NAME          dump only this database (repeatable)
+               --dump-table [db.]NAME        dump only this table (repeatable)
+               --dump-no-create              skip CREATE TABLE (data only)
+               --dump-no-data                skip INSERT (schema only)
+               --dump-no-drop                skip DROP TABLE IF EXISTS
+               --dump-batch-rows N           max rows per INSERT (default 1000)
+```
+
+**Import** accepts `--` / `#` line comments, `/* ... */` and MySQL `/*! ... */` conditional comments, single/double/backtick quoting with escapes, and `DELIMITER`. mysqldump's `LOCK TABLES` / `UNLOCK TABLES` are skipped automatically. Statements are committed as they run; use `--import-continue-on-error` to keep going after errors.
+
+**Dump** emits `CREATE DATABASE IF NOT EXISTS` / `USE` / `DROP TABLE IF EXISTS` / `CREATE TABLE` (primary key, defaults, AUTO_INCREMENT cursor) and multi-row `INSERT` statements, so the output can be re-imported into SQLTiny or MySQL.
+
+```powershell
+# import a dump / mysqldump / hand-written script
+.\build\Debug\sqltiny_server.exe --data-dir .\sqltiny_data --import .\dump.sql
+
+# back up every database
+.\build\Debug\sqltiny_server.exe --data-dir .\sqltiny_data --dump .\backup.sql
+
+# schema only, one table
+.\build\Debug\sqltiny_server.exe --data-dir .\sqltiny_data --dump .\shop_orders.sql `
+    --dump-database shop --dump-table orders --dump-no-data
+
+# import then serve
+.\build\Debug\sqltiny_server.exe --data-dir .\sqltiny_data --import .\dump.sql --import-then-serve --port 3306
 ```
 
 > **Development simplification**: `mysql_native_password` does not verify the password — user=root is let through.

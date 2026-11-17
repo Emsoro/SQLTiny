@@ -19,7 +19,7 @@ Database& Database::instance() {
 
 bool Database::open(const std::string& data_dir) {
     if (data_dir.empty()) {
-        fmt::print("[SQLTiny] data-dir not set — running in memory-only mode (no persistence)\n");
+        fmt::print(stderr, "[SQLTiny] data-dir not set — running in memory-only mode (no persistence)\n");
         wal_path_.clear();
         return true;
     }
@@ -36,7 +36,7 @@ bool Database::open(const std::string& data_dir) {
 
 void Database::shutdown() {
     if (wal_.enabled()) {
-        fmt::print("[SQLTiny] shutting down — checkpointing...\n");
+        fmt::print(stderr, "[SQLTiny] shutting down — checkpointing...\n");
         wal_.do_checkpoint(catalog_);
     }
     wal_.close();

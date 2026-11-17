@@ -42,7 +42,7 @@ bool WalSnapshot::write(const catalog::Catalog& catalog, uint64_t wal_offset, ui
         fmt::print(stderr, "[Snapshot] atomic replace failed\n");
         return false;
     }
-    fmt::print("[Snapshot] written OK: {}\n", path_);
+    fmt::print(stderr, "[Snapshot] written OK: {}\n", path_);
     return true;
 }
 

@@ -2,9 +2,9 @@
 
 > 🌐 语言: [English](./README.en.md) · **简体中文**
 
-> **当前版本 `v2.1.0`(2026-11-16)** · 版本号统一维护在 `CMakeLists.txt`(`project(SQLTiny VERSION 2.1.0)`)、`vcpkg.json`(`version-string`)与 `src/main.cpp` 启动横幅。协议层对外仍伪装为 `5.7.0-SQLTiny` 以兼容 MySQL 客户端,与产品版本无关。
+> **当前版本 `v2.2.0`(2026-11-17)** · 版本号统一维护在 `CMakeLists.txt`(`project(SQLTiny VERSION 2.2.0)`)、`vcpkg.json`(`version-string`)与 `src/main.cpp` 启动横幅。协议层对外仍伪装为 `5.7.0-SQLTiny` 以兼容 MySQL 客户端,与产品版本无关。
 >
-> v2.0.8 交付 **P1-b DML 方言 + DDL 核心**(由独立 sqllogictest 套件驱动,GAP 78→52),内容见下文「v2.0.8 更新内容」。
+> v2.2.0 交付 **命令行导入 / dump 导出**(`--import` / `--dump`),可直接灌入 mysqldump 脚本或导出可回灌的备份,内容见下文「v2.2.0 更新内容」。
 
 **SQLTiny** 是用现代 C++20 从零重写的轻量级关系型数据库,核心设计灵感来自 [HSQLDB](http://hsqldb.org/),额外暴露 **MySQL Wire Protocol**——标准 MySQL 客户端(`mysql` CLI、Navicat、DBeaver、Connector/J、PyMySQL、DBX/dbExpress)直接连接。
 
@@ -36,6 +36,24 @@
 > 🔒 **锁分层**: Catalog.mu_(DDL) → Table.mu_ shared_lock(SELECT 多读者并行) / unique_lock(DML 独占) → RowLockMap(行级冲突检测) → TransactionManager.writeLock_(提交边界) → WalManager.mu_(WAL 文件读写)
 >
 > 🧊 **MVCC**: SELECT 完全不加锁,`for_each_visible(querySCN, readerTxn)` 按 `createSCN/deleteSCN` 与 `pendingTxn` 过滤;未提交行只对所属事务可见,commit 才 `finalize_commit` 对外发布
+
+---
+
+## 🆕 v2.2.0 更新内容（命令行导入 / dump 导出，2026-11-17）
+
+`sqltiny_server.exe` 新增批处理模式：不启动网络服务，直接对 `--data-dir` 中的数据库执行 SQL 脚本导入或导出，执行完退出。
+
+**导入 `--import FILE`**
+- 流式切分 SQL 脚本，支持 `--` / `#` 行注释、`/* ... */` 与 MySQL `/*! ... */` 条件注释、单/双/反引号及转义、`DELIMITER` 自定义分隔符
+- 自动跳过 mysqldump 生成的 `LOCK TABLES` / `UNLOCK TABLES`；兼容列级 `COLLATE` / `CHARACTER SET` / `ON UPDATE` 与任意位置的表级 `AUTO_INCREMENT=n`
+- 逐条自动提交；`--import-continue-on-error` 单条失败后继续，`--import-quiet` 静默进度，`--import-then-serve` 导入完成后继续启动服务
+
+**导出 `--dump FILE`**
+- 输出 `CREATE DATABASE IF NOT EXISTS` / `USE` / `DROP TABLE IF EXISTS` / `CREATE TABLE`（主键、默认值、AUTO_INCREMENT 游标）/ 多行 `INSERT`
+- `--dump-database` / `--dump-table` 过滤库表，`--dump-no-create` / `--dump-no-data` / `--dump-no-drop` 裁剪内容，`--dump-batch-rows N` 控制每条 INSERT 行数
+- `--dump -` 写 stdout，引擎与导入导出日志改走 stderr，可直接重定向为纯 SQL 文件
+
+**验证**：新增 `smoke_cli_io` **40 checks / 0 FAIL**（注释、转义、`DELIMITER`、`LOCK TABLES` 跳过、dump→import 往返、默认值/自增游标）；手工验证 mysqldump 风格脚本导入、`--dump -` 重定向、`--import-then-serve` 服务启动。
 
 ---
 
@@ -547,6 +565,7 @@ SQL 语法:`SET SESSION TRANSACTION ISOLATION LEVEL <级别>`(会话默认)、`S
 | **P1-b DML 方言 + DDL 核心 (v2.0.8)** | ✅ | INSERT 方言(VALUE/SET/IGNORE/REPLACE/ON DUPLICATE)、UPDATE/DELETE ORDER BY LIMIT、多表 UPDATE、TRUNCATE、AUTO_INCREMENT 起始值/非主键自增、CTAS/LIKE/TEMPORARY/VIEW/INDEX/ALTER/RENAME、DDL 隐式提交;SLT **PASS 1132 / GAP 52 / FAIL 0** |
 | **聚合下推增强 (v2.0.9)** | ✅ | 标量函数包裹聚合(ROUND(AVG))与 HAVING 下推;3 表 JOIN+聚合+HAVING 查询 18.7s→~5s;SLT **PASS 1132 / GAP 52 / FAIL 0** |
 | **benchmark TOP 查询优化 (v2.1.0)** | ✅ | 单表 GROUP BY 流式聚合、非相关标量子查询常量折叠、IN 候选集 hash 索引;rank1 10.3s→1.15s / rank2 8.17s→0.77s / rank20 0.67s→0.43s;SLT **PASS 1132 / GAP 52 / FAIL 0** |
+| **命令行导入 / dump 导出 (v2.2.0)** | ✅ | `--import` 导入 SQL/mysqldump 脚本(注释、`DELIMITER`、`LOCK TABLES` 跳过、错误继续策略);`--dump` 导出 MySQL 风格建库/建表/多行 INSERT(库表过滤、只结构/只数据、批大小);`smoke_cli_io` 40/40 |
 | **后续** | 📋 | 等待队列/死锁检测 → 存储过程 · caching_sha2_password / SSL · 复制 |
 
 ---
@@ -604,10 +623,10 @@ FROM users u INNER JOIN orders o ON o.user_id = u.id;
 | 产物 | 类型 | 说明 |
 |---|---|---|
 | `build/Debug/sqltiny.lib` | 静态库 | 引擎核心,嵌入式进程内调用 |
-| `build/Debug/sqltiny_server.exe` | 可执行 | MySQL 协议 TCP 服务器(v2.1.0) |
+| `build/Debug/sqltiny_server.exe` | 可执行 | MySQL 协议 TCP 服务器(v2.2.0) |
 | `build/Release/sqltiny_server.exe` | 可执行(发布版) | 同上,Release 版约 **0.9 MB** 单文件(静态 CRT + fmt 静态链接,无 dll 依赖,可直接拷贝部署);Debug 版约 4.8 MB |
 
-**`sqltiny_server.exe` 文件信息(v2.1.0)**:
+**`sqltiny_server.exe` 文件信息(v2.2.0)**:
 
 | 属性 | 值 |
 |---|---|
@@ -615,6 +634,7 @@ FROM users u INNER JOIN orders o ON o.user_id = u.id;
 | 默认监听 | `0.0.0.0:3306`(可用 `--port` 改) |
 | 认证 | `mysql_native_password`,开发期 user=root、密码任意 |
 | 持久化 | `--data-dir` 指定目录后启用 WAL(`sql.wal`)+ Snapshot(`sql.data`) |
+| 导入/导出 | `--import FILE` 导入 SQL 脚本;`--dump FILE` 导出 MySQL 风格 SQL(dump 参数见「CLI 参数」) |
 | 调试 | `--query-log FILE` 记录握手/每条命令原始报文 hex(客户端兼容性定位用) |
 | 协议伪装 | 服务器版本字符串 `5.7.0-SQLTiny`(与产品版本号无关) |
 | `build/Debug/smoke_m1.exe` | 冒烟测试 | Value / AVL / Lexer — **3/3 PASS** |
@@ -628,6 +648,7 @@ FROM users u INNER JOIN orders o ON o.user_id = u.id;
 | `build/Debug/smoke_m6_session_db.exe` | 多库会话隔离 | 每连接 `USE` / 握手 database 互不干扰 — **PASS** |
 | `build/Debug/smoke_sql_keywords.exe` | 关键词 / 词法基础用例 | 180 个常用关键词 × 大小写不敏感、运算符、字面量、注释、行列号、词法错误、Parser 分发 — **649 PASS / 0 FAIL** |
 | `build/Debug/smoke_sql_syntax.exe` | 常用 SQL 语法端到端矩阵 | DDL/DML/SELECT 子句/谓词/函数/聚合分组排序分页/UNION/JOIN/事务/系统语句/错误码,未实现语法记 GAP — **160 PASS / 0 FAIL / 15 GAP** |
+| `build/Debug/smoke_cli_io.exe` | 命令行导入/导出 | 注释/条件注释、引号转义、`DELIMITER`、`LOCK TABLES` 跳过、dump 再导入往返、默认值/自增游标 — **40 checks / 0 FAIL** |
 | `build/Debug/dbx_probe.exe` | 客户端兼容性探针 | 进程内逐条跑 DBX/dbExpress 连接/元数据/事务阶段的典型 SQL — **58/58 PASS** |
 | `tests/benchmark/test_txn_vs_sqlite.py` | 事务行为对比 | SQLTiny vs SQLite 四级别 + WAL 重启 — **70/70 一致** |
 | `tests/functional/test_full_flow.py` | PyMySQL 全链路(双连接) | DDL/INSERT→SELECT*含NULL→WHERE/ORDER/聚合/HAVING→JOIN→UPDATE/DELETE→约束与错误码→事务/SAVEPOINT/autocommit→四隔离级别/40001→多库→清理 — **48 PASS / 0 GAP** |
@@ -660,6 +681,7 @@ ctest --test-dir build -C Debug --output-on-failure
 .\build\Debug\smoke_m6_session_db.exe
 .\build\Debug\smoke_sql_keywords.exe
 .\build\Debug\smoke_sql_syntax.exe
+.\build\Debug\smoke_cli_io.exe
 .\build\Debug\dbx_probe.exe
 
 # MySQL 协议端到端(复用上面已启动的 server)
@@ -678,9 +700,9 @@ python tests\functional\test_stmt_prepare.py    # COM_STMT_* 预编译协议(需
 python tests\stability\stress_stability.py --self-server --phase all   # 稳定性压测(自带 server)
 ```
 
-### 测试总览 (CTest 12/12 · Python 8 scripts)
+### 测试总览 (CTest 13/13 · Python 8 scripts)
 
-> `smoke_m25_e2e` 通过 TCP 连接 **3307**,需先启动 server;未启动 server 时 CTest 为 11/12。
+> `smoke_m25_e2e` 通过 TCP 连接 **3307**,需先启动 server;未启动 server 时 CTest 为 12/13。
 ```
 smoke_m1              3/3   PASS  Value / AVL / Lexer
 smoke_m2              5/5   PASS  CRUD / 聚合 / 表达式 / DDL edge / IS NULL
@@ -693,6 +715,7 @@ smoke_m6_hsqldb_matrix 73 PASS / 0 GAP   HSQLDB 语义矩阵 + JOIN 优化/EXPLA
 smoke_m6_session_db  PASS        多库会话级隔离(每连接 USE/握手 db 互不干扰)
 smoke_sql_keywords   649 PASS / 0 FAIL  常用关键词 + 词法/Parser 基础用例(180 词)
 smoke_sql_syntax     160 PASS / 0 FAIL / 15 GAP  常用 SQL 语法端到端矩阵(含待补语法 GAP 清单)
+smoke_cli_io         40/40  PASS     命令行导入/导出:注释/转义/DELIMITER/dump 往返/自增游标
 test_full_flow       48 PASS / 0 GAP    PyMySQL 全链路(双连接):DDL→DML→聚合→JOIN→事务→四隔离级别→多库→清理
 test_txn_vs_sqlite   70/70 对比        四隔离级别 + WAL 重启与 SQLite 逐项比对
 test_sqlalchemy      33 PASS / 0 FAIL / 0 GAP  15 组:Engine/Core/ORM/2.0 表达式/绑定/事务/relationship/类型映射/Inspector
@@ -761,6 +784,40 @@ sqltiny_server [--port <n>] [--user <name>] [--password <pwd>] [--data-dir <DIR>
                默认 --port 3306 --user root
                --data-dir   缺省 = 内存模式(无持久化,重启丢数据)
                --query-log  记录握手/认证/每条命令的原始报文 hex 及执行结果(调试客户端兼容性用)
+
+数据导入 / 导出(需要 --data-dir,执行完自动退出):
+               --import FILE                 从 SQL 脚本导入数据
+               --import-continue-on-error    单条语句失败后继续(默认遇错即停)
+               --import-quiet                不打印导入进度
+               --import-then-serve           导入完成后继续启动 MySQL 服务(不退出)
+               --dump FILE                   导出为 MySQL 风格 SQL 脚本(FILE 为 - 时写 stdout)
+               --dump-database NAME          仅导出指定库,可重复
+               --dump-table [db.]NAME        仅导出指定表,可重复
+               --dump-no-create              不输出 CREATE TABLE(只导数据)
+               --dump-no-data                不输出 INSERT(只导结构)
+               --dump-no-drop                不输出 DROP TABLE IF EXISTS
+               --dump-batch-rows N           每条 INSERT 最多 N 行(默认 1000)
+```
+
+**导入格式**:支持 `--` / `#` 行注释、`/* ... */` 与 MySQL `/*! ... */` 条件注释、单/双/反引号及转义、`DELIMITER` 自定义分隔符;自动跳过 mysqldump 生成的 `LOCK TABLES` / `UNLOCK TABLES`。导入按语句自动提交,出错时可用 `--import-continue-on-error` 继续。
+
+**导出格式**:输出 `CREATE DATABASE IF NOT EXISTS` / `USE` / `DROP TABLE IF EXISTS` / `CREATE TABLE`(含主键、默认值、AUTO_INCREMENT 游标)/ 多行 `INSERT`,可直接用 `--import` 重新导入 SQLTiny 或 MySQL。
+
+> **注意**:`--import` / `--dump` 直接读写 `sql.wal` / `sql.data`,执行前请先停止正在运行的 `sqltiny_server`,避免同一数据目录被两个进程同时写入。`--import-then-serve` 例外,它在同一进程内先导入再启动服务。
+
+```powershell
+# 1. 导入 SQL 脚本(dump / mysqldump / 手写 SQL 均可)
+.\build\Debug\sqltiny_server.exe --data-dir .\sqltiny_data --import .\dump.sql
+
+# 2. 全库导出(备份)
+.\build\Debug\sqltiny_server.exe --data-dir .\sqltiny_data --dump .\backup.sql
+
+# 3. 只导出 shop 库的 orders 表,只要结构
+.\build\Debug\sqltiny_server.exe --data-dir .\sqltiny_data --dump .\shop_orders.sql `
+    --dump-database shop --dump-table orders --dump-no-data
+
+# 4. 导入后直接提供 MySQL 服务
+.\build\Debug\sqltiny_server.exe --data-dir .\sqltiny_data --import .\dump.sql --import-then-serve --port 3306
 ```
 
 > **开发期简化**: `mysql_native_password` 不校验密码,只要 user=root 就放行。
@@ -872,6 +929,7 @@ SQLTiny/
 │   ├── storage/               B+ 树内存索引 + 表存储
 │   ├── catalog/               Catalog 多库化 (databases_[db].tables_)
 │   ├── core/                  Database / Session 入口
+│   ├── cli/                   命令行 SQL 脚本导入 / dump 导出
 │   ├── executor/              Executor + infer_type() 静态类型推断 + 内置函数
 │   └── net/                   MySQL Wire Protocol 编解码(field_type 动态推断) + TCP server + 预编译语句
 └── tests/
@@ -884,6 +942,7 @@ SQLTiny/
     ├── smoke_m6_isolation.cpp 四隔离级别 + 事务/保存点/冲突
     ├── smoke_m6_hsqldb_matrix.cpp  HSQLDB 可移植 SQL 语义矩阵
     ├── smoke_m6_session_db.cpp 多库会话级隔离(每连接 USE / 握手 db)
+    ├── smoke_cli_io.cpp       命令行 SQL 导入 / dump 导出往返
     ├── dbx_probe.cpp          DBX/dbExpress 客户端兼容性探针(58 断言)
     ├── test_stmt_prepare.py   预编译语句 binary protocol 测试(7 断言)
     ├── test_full_flow.py      PyMySQL 全链路(双连接,含事务/隔离级别)

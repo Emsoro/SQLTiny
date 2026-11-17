@@ -19,7 +19,7 @@ std::string WalManager::snapshot_path() const {
 bool WalManager::open(const std::string& wal_path, catalog::Catalog& catalog) {
     wal_path_ = wal_path;
     if (wal_path.empty()) {
-        fmt::print("[WAL] disabled (no data-dir specified)\n");
+        fmt::print(stderr, "[WAL] disabled (no data-dir specified)\n");
         return true;
     }
 
@@ -45,14 +45,14 @@ void WalManager::bootstrap(catalog::Catalog& catalog) {
     if (snap.file_exists() && snap.is_valid()) {
         rows_rebuilt = snap.read_and_rebuild(catalog, &snap_wal_offset);
         if (rows_rebuilt >= 0) {
-            fmt::print("[Snapshot] rebuilt OK: {} rows (wal_offset={})\n", rows_rebuilt, snap_wal_offset);
+            fmt::print(stderr, "[Snapshot] rebuilt OK: {} rows (wal_offset={})\n", rows_rebuilt, snap_wal_offset);
             checkpoint_wal_offset_ = snap_wal_offset;
         } else {
-            fmt::print("[Snapshot] CRC failed, ignoring — replay WAL from scratch\n");
+            fmt::print(stderr, "[Snapshot] CRC failed, ignoring — replay WAL from scratch\n");
             checkpoint_wal_offset_ = 0;
         }
     } else {
-        fmt::print("[Snapshot] no snapshot — replay WAL from scratch\n");
+        fmt::print(stderr, "[Snapshot] no snapshot — replay WAL from scratch\n");
         checkpoint_wal_offset_ = 0;
     }
 
@@ -66,12 +66,12 @@ void WalManager::bootstrap(catalog::Catalog& catalog) {
         // (replay 里 if_not_exists / if_exists 已经幂等,重复应用 DDL 不破坏)
         bool truncated = false;
         size_t applied = replay(catalog, truncated);
-        fmt::print("[WAL] post-snapshot replay: {} records applied {}\n",
+        fmt::print(stderr, "[WAL] post-snapshot replay: {} records applied {}\n",
                    applied, truncated ? "(truncated)" : "(clean)");
     } else {
         bool truncated = false;
         size_t applied = replay(catalog, truncated);
-        fmt::print("[WAL] replay from scratch: {} records applied {}\n",
+        fmt::print(stderr, "[WAL] replay from scratch: {} records applied {}\n",
                    applied, truncated ? "(truncated)" : "(clean)");
     }
 }
@@ -114,7 +114,7 @@ bool WalManager::do_checkpoint(catalog::Catalog& catalog) {
 
     checkpoint_wal_offset_ = 0;
     checkpoint_pending_.store(false);
-    fmt::print("[WAL] checkpoint done: WAL truncated, snapshot at {}\n", snapshot_path());
+    fmt::print(stderr, "[WAL] checkpoint done: WAL truncated, snapshot at {}\n", snapshot_path());
     return true;
 }
 
@@ -123,7 +123,7 @@ void WalManager::close() {
     persist::WalRecord eof{ persist::RecordType::EndOfFile, 0, {} };
     append(eof);
     writer_->close();
-    fmt::print("[WAL] closed cleanly\n");
+    fmt::print(stderr, "[WAL] closed cleanly\n");
 }
 
 // ============ Append helpers ============

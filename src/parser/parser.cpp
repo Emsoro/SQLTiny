@@ -1295,6 +1295,23 @@ ast::ColumnDef Parser::parse_column_def() {
             Token t = consume();
             if (t.kind == TokenKind::String) def.comment = t.text;
         }
+        // MySQL 列级只要出现这些选项就能被 mysqldump 带出来,引擎不实现但必须消费掉
+        else if (match_consume(TokenKind::KwCollate)) { (void)consume(); }
+        else if (match_consume(TokenKind::KwCharacter)) {
+            match_consume(TokenKind::KwSet);
+            (void)match_consume(TokenKind::Eq);
+            (void)consume();
+        }
+        else if (match_consume(TokenKind::KwCharset)) {
+            (void)match_consume(TokenKind::Eq);
+            (void)consume();
+        }
+        else if (match(TokenKind::KwOn)) {
+            consume(); // ON
+            expect(TokenKind::KwUpdate, "UPDATE");
+            auto e = parse_expr();
+            (void)e;
+        }
         else break;
     }
     return def;
@@ -1470,13 +1487,20 @@ ast::StmtPtr Parser::parse_create_table() {
     }
     stmt->columns = std::move(cols);
 
-    // 表选项:捕获 AUTO_INCREMENT=n,其余跳过
-    if (match(TokenKind::KwAutoIncrement)) {
-        consume();                          // AUTO_INCREMENT
-        match_consume(TokenKind::Eq);       // = (可省略)
-        stmt->auto_increment_start = consume().int_value;
+    // 表选项:捕获 AUTO_INCREMENT=n,其余跳过。
+    // mysqldump 常写成 ENGINE=InnoDB AUTO_INCREMENT=3 ...,不能假设 AUTO_INCREMENT 必须是第一个选项。
+    while (true) {
+        Token t = peek();
+        if (t.kind == TokenKind::Eof || t.kind == TokenKind::Error ||
+            t.kind == TokenKind::Semi) break;
+        if (t.kind == TokenKind::KwAutoIncrement) {
+            consume();
+            match_consume(TokenKind::Eq);
+            if (match(TokenKind::Number)) stmt->auto_increment_start = consume().int_value;
+        } else {
+            consume();
+        }
     }
-    skip_ddl_options();   // ENGINE= / DEFAULT CHARSET= / COLLATE= 等表选项
 
     auto r = std::make_unique<ast::Statement>();
     r->kind = ast::StmtKind::CreateTable;
