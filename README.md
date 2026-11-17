@@ -643,7 +643,7 @@ FROM users u INNER JOIN orders o ON o.user_id = u.id;
 | `build/Debug/smoke_m4.exe` | 冒烟测试 | CREATE/DROP DB / USE / SHOW / SET 占位 — **6/6 PASS** |
 | `build/Debug/smoke_m5_wal.exe` | 冒烟测试 | WAL Replay + CRC 校验 + Checkpoint 恢复 — **28/28 PASS** |
 | `build/Debug/smoke_m25_e2e.exe` | E2E 测试 | Winsock 直连 server — **13/13 PASS** |
-| `build/Debug/smoke_m6_isolation.exe` | 隔离级别测试 | 四级别 + 事务/保存点/冲突 — **451/451 PASS** |
+| `build/Debug/smoke_m6_isolation.exe` | 隔离级别测试 | 四级别 + 事务/保存点/冲突 — **493/493 PASS** |
 | `build/Debug/smoke_m6_hsqldb_matrix.exe` | HSQLDB 语义矩阵 + JOIN 优化回归 | NULL 三值 / 空集聚合 / JOIN 基数(Hash Join、EXPLAIN) / 语句原子性 / 多库隔离 — **73 PASS / 0 GAP** |
 | `build/Debug/smoke_m6_session_db.exe` | 多库会话隔离 | 每连接 `USE` / 握手 database 互不干扰 — **PASS** |
 | `build/Debug/smoke_sql_keywords.exe` | 关键词 / 词法基础用例 | 180 个常用关键词 × 大小写不敏感、运算符、字面量、注释、行列号、词法错误、Parser 分发 — **649 PASS / 0 FAIL** |
@@ -710,7 +710,7 @@ smoke_m3              4/4   PASS  GROUP BY / HAVING / 子查询 IN / INSERT SELE
 smoke_m4              6/6   PASS  CREATE/DROP DB / USE / SHOW
 smoke_m5_wal         28/28  PASS  WAL Replay + CRC + Checkpoint + 启动恢复
 smoke_m25_e2e        13/13  PASS  MySQL wire C++ client E2E
-smoke_m6_isolation  451/451 PASS  四隔离级别 + 事务 / 保存点 / 冲突
+smoke_m6_isolation  493/493 PASS  四隔离级别 + 事务 / 保存点 / 冲突(系统变量 MySQL 口径:@@autocommit=1/0、隔离级别不提升)
 smoke_m6_hsqldb_matrix 73 PASS / 0 GAP   HSQLDB 语义矩阵 + JOIN 优化/EXPLAIN 回归
 smoke_m6_session_db  PASS        多库会话级隔离(每连接 USE/握手 db 互不干扰)
 smoke_sql_keywords   649 PASS / 0 FAIL  常用关键词 + 词法/Parser 基础用例(180 词)

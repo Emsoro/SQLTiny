@@ -114,7 +114,7 @@
 - **dump 生成**：遍历 catalog 输出 `CREATE DATABASE IF NOT EXISTS` / `USE` / `DROP TABLE IF EXISTS` / `CREATE TABLE`（主键、默认值、AUTO_INCREMENT 游标）/ 多行 `INSERT`；`--dump-database` / `--dump-table` 过滤，`--dump-no-create` / `--dump-no-data` / `--dump-no-drop` 裁剪，`--dump-batch-rows` 控制单条 INSERT 行数；文本值按 MySQL 规则转义
 - **stdout 纯净**：引擎与导入/dump 日志统一改到 stderr（`Session`、`WalManager`、`Snapshot`），`--dump -` 可安全重定向为纯 SQL 文件
 
-**验证**：`smoke_cli_io` **40 checks / 0 FAIL**（注释/条件注释、引号转义、`DELIMITER`、`LOCK TABLES` 跳过、dump→import 往返、默认值与自增游标）；手工验证 mysqldump 风格脚本导入、`--dump -` 重定向、`--import-then-serve` 服务启动。全量构建通过；`ctest` 中 `smoke_cli_io` 通过，`smoke_m25_e2e`（需先启动 3307 server）与 `smoke_m6_isolation`（`@@autocommit` 显示格式，HEAD 基线已有）为既有偏差。
+**验证**：`smoke_cli_io` **40 checks / 0 FAIL**（注释/条件注释、引号转义、`DELIMITER`、`LOCK TABLES` 跳过、dump→import 往返、默认值与自增游标）；手工验证 mysqldump 风格脚本导入、`--dump -` 重定向、`--import-then-serve` 服务启动。`smoke_m6_isolation` 的系统变量断言改为 MySQL 口径（`@@autocommit`=1/0、隔离级别原样返回），用真实 MySQL 8.4（3306）逐项对比后 **493/493 PASS**；全量构建通过，`ctest` 仅 `smoke_m25_e2e`（需先启动 3307 server）在未启动服务时失败。
 
 ### 本轮交付(v2.1.0 benchmark TOP 查询优化,2026-11-16)
 
@@ -373,7 +373,7 @@ employees 标准数据集(392 万行)实测:3 表 JOIN 求均薪 77s vs MySQL 6.
 | `test_persistence.py` | **13 PASS / 2 GAP / 0 FAIL** — WAL 回放、强杀恢复、未提交不恢复、DROP TABLE 持久化;缺优雅关闭 checkpoint |
 | `smoke_sql_keywords` | 649 PASS / 0 FAIL — 180 个常用关键词大小写不敏感、运算符、字面量、注释、行列号、词法错误、Parser 分发 |
 | `smoke_sql_syntax` | 160 PASS / 0 FAIL / 15 GAP — 常用 SQL 语法端到端矩阵(未实现语法记 GAP) |
-| `smoke_m6_isolation` | 451/451 PASS — 四级别、脏读、快照、冲突、autocommit、SAVEPOINT、DML 回滚 |
+| `smoke_m6_isolation` | 493/493 PASS — 四级别、脏读、快照、冲突、autocommit、SAVEPOINT、DML 回滚;系统变量按 MySQL 口径(`@@autocommit` 返回 1/0、隔离级别原样返回不提升),已用真实 MySQL 8.4(3306) 逐项对比(`tests/debug/compare_session_vars.py`) |
 | `smoke_m6_hsqldb_matrix` | 73 PASS / 0 FAIL / 0 GAP — HSQLDB 语义矩阵 + JOIN 优化/EXPLAIN 回归(§8.4 #1–#4 已修复) |
 | `smoke_m6_session_db` | PASS — 多库会话级隔离(每个连接的 `USE`/握手 db 互不干扰,验证 §8.4 #6/#7 修复) |
 | `dbx_probe` | 58/58 PASS — 进程内 `Session::execute` 跑 DBX/dbExpress 连接/元数据/事务阶段的典型 SQL(含 SHOW/information_schema) |
@@ -1131,7 +1131,7 @@ SQLTiny 第一版可以简化:
 | C03 | DML / 表达式 / NULL / 全链路 | `smoke_m2.cpp`、`test_full_flow.py`、`test_vs_sqlite.py` | CRUD、WHERE/ORDER/LIMIT、聚合、内置函数、NULL 列、LIKE、错误码;`test_full_flow.py` 另跨 C02/C06/C08 覆盖 DDL、事务、四隔离级别、多库 | ✅ 48 PASS / 0 GAP、全场景一致 |
 | C04 | 聚合 / 子查询 / JOIN | `smoke_m3.cpp` | GROUP BY / HAVING / 子查询 IN / `INSERT…SELECT` / 各类 JOIN | ✅ |
 | C05 | HSQLDB 可移植 SQL 语义矩阵 | `smoke_m6_hsqldb_matrix.cpp` | A NULL 三值、B 空集聚合、C JOIN 基数(含 Hash Join / EXPLAIN 回归)、D 主键与语句原子性、E 多库隔离、F 事务内可见性 | ✅ 73 PASS / 0 GAP |
-| C06 | 事务 / 四隔离级别 / MVCC | `smoke_m6_isolation.cpp`、`test_txn_vs_sqlite.py` | 四级别提升、无脏读、不可重复读、40001 冲突、autocommit、SAVEPOINT、DML 回滚、WAL 重启 | ✅ 451/451、70/70 对比 |
+| C06 | 事务 / 四隔离级别 / MVCC | `smoke_m6_isolation.cpp`、`test_txn_vs_sqlite.py` | 四级别提升、无脏读、不可重复读、40001 冲突、autocommit、SAVEPOINT、DML 回滚、WAL 重启 | ✅ 493/493、70/70 对比 |
 | C07 | WAL / 快照 / 恢复 | `smoke_m5_wal.cpp`、`test_wal_recovery.py` | Replay、CRC 截断、Checkpoint、重启后数据与 UPDATE/DELETE 状态 | ✅ |
 | C08 | MySQL 协议 / 客户端兼容 | `smoke_m25_e2e.cpp`、`test_sqlalchemy.py` | 握手与 packet、COM_QUERY、OK/EOF/ERR;SQLAlchemy 15 组:Engine、Core DDL/CRUD、聚合、ORM、2.0 风格 select/insert/update/delete、`text():param`、Session rollback、relationship 级联、`engine.begin()` 事务块、类型映射(DateTime/Boolean/Float)、Inspector(`DESCRIBE`/`SHOW FULL TABLES` 已支持) | ✅ 33 PASS / 0 FAIL / 0 GAP |
 | C09 | 并发 / 性能 / 稳定性 | `test_concurrency.py`、`test_perf_vs_sqlite.py`、`stress_stability.py` | 5 线程 15s 读写一致性、大数据量 INSERT + JOIN 对比、10 条复杂查询计时、并发 soak + 事务冲突不变量(无丢写/幻行)、`kill -9` 崩溃恢复(WAL replay 原子性)、RSS 内存稳定 | ✅ 无 crash / PASS |

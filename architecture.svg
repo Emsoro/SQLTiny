@@ -259,7 +259,7 @@
 
 <rect x="610" y="966" width="300" height="76" rx="7" fill="#E7EDFF" stroke="#3D63D8"/>
 <text x="626" y="990" font-size="12" font-weight="bold" fill="#14213D">smoke_m6_isolation</text>
-<text x="626" y="1009" font-size="10.5" fill="#4C5F82">451/451 PASS — 4 levels, savepoints,</text>
+<text x="626" y="1009" font-size="10.5" fill="#4C5F82">493/493 PASS — 4 levels, savepoints,</text>
 <text x="626" y="1025" font-size="10.5" fill="#4C5F82">conflicts, autocommit, WAL restart</text>
 <rect x="926" y="966" width="300" height="76" rx="7" fill="#DDF4EF" stroke="#0E8F7E"/>
 <text x="942" y="990" font-size="12" font-weight="bold" fill="#14213D">test_txn_vs_sqlite</text>

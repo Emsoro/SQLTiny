@@ -554,7 +554,7 @@ FROM users u INNER JOIN orders o ON o.user_id = u.id;
 | `build/Debug/smoke_m4.exe` | smoke test | CREATE/DROP DB / USE / SHOW / SET placeholder — **6/6 PASS** |
 | `build/Debug/smoke_m5_wal.exe` | smoke test | WAL replay + CRC verification + checkpoint recovery — **28/28 PASS** |
 | `build/Debug/smoke_m25_e2e.exe` | E2E test | Winsock direct connection to the server — **13/13 PASS** |
-| `build/Debug/smoke_m6_isolation.exe` | isolation test | Four levels + transactions/savepoints/conflicts — **451/451 PASS** |
+| `build/Debug/smoke_m6_isolation.exe` | isolation test | Four levels + transactions/savepoints/conflicts — **493/493 PASS** |
 | `build/Debug/smoke_m6_hsqldb_matrix.exe` | HSQLDB semantics matrix + JOIN optimization regression | NULL three-valued logic / empty-set aggregates / JOIN cardinality (Hash Join, EXPLAIN) / statement atomicity / multi-database isolation — **73 PASS / 0 GAP** |
 | `build/Debug/smoke_m6_session_db.exe` | multi-database session isolation | per-connection `USE` / handshake database do not interfere — **PASS** |
 | `build/Debug/dbx_probe.exe` | client compatibility probe | runs typical DBX/dbExpress connect/metadata/transaction SQL in-process — **58/58 PASS** |
@@ -615,7 +615,7 @@ smoke_m3              4/4   PASS  GROUP BY / HAVING / subquery IN / INSERT SELEC
 smoke_m4              6/6   PASS  CREATE/DROP DB / USE / SHOW
 smoke_m5_wal         28/28  PASS  WAL replay + CRC + checkpoint + startup recovery
 smoke_m25_e2e        13/13  PASS  MySQL wire C++ client E2E
-smoke_m6_isolation  451/451 PASS  four isolation levels + transactions / savepoints / conflicts
+smoke_m6_isolation  493/493 PASS  four isolation levels + transactions / savepoints / conflicts
 smoke_m6_hsqldb_matrix 73 PASS / 0 GAP   SQL semantics matrix + JOIN optimization/EXPLAIN regression
 smoke_m6_session_db  PASS        multi-database session isolation (per-connection USE / handshake db)
 test_full_flow       48 PASS / 0 GAP    PyMySQL full flow (two connections)
