@@ -12,12 +12,23 @@
         "VCPKG_TARGET_TRIPLET": "x64-windows-static",
         "CMAKE_MSVC_RUNTIME_LIBRARY": "MultiThreaded$<$<CONFIG:Debug>:Debug>"
       }
+    },
+    {
+      "name": "windows-asan",
+      "inherits": "windows-vcpkg",
+      "binaryDir": "${sourceDir}/build-asan",
+      "cacheVariables": {
+        "SQLTINY_ASAN": "ON",
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo"
+      }
     }
   ],
   "buildPresets": [
-    { "name": "windows-vcpkg", "configurePreset": "windows-vcpkg" }
+    { "name": "windows-vcpkg", "configurePreset": "windows-vcpkg" },
+    { "name": "windows-asan", "configurePreset": "windows-asan", "configuration": "RelWithDebInfo" }
   ],
   "testPresets": [
-    { "name": "windows-vcpkg", "configurePreset": "windows-vcpkg", "output": { "outputOnFailure": true } }
+    { "name": "windows-vcpkg", "configurePreset": "windows-vcpkg", "output": { "outputOnFailure": true } },
+    { "name": "windows-asan", "configurePreset": "windows-asan", "configuration": "RelWithDebInfo", "output": { "outputOnFailure": true } }
   ]
 }

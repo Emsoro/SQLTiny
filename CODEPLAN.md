@@ -7,7 +7,7 @@
 
 ---
 
-## 0. 当前状态(2026-11-17,v2.2.0)
+## 0. 当前状态(2026-11-21,v2.2.1)
 
 > 下文 M1–M5 为原始规划、M6 各节含设计稿伪代码,均保留供追溯。**落地状态以本节与各节 ✅ 标记为准;实际目录与运行方式见 `README.md`,架构图见 `architecture.svg`。**
 
@@ -36,6 +36,7 @@
 | **聚合下推增强(v2.0.9)** | ✅ | 标量函数包裹聚合(ROUND(AVG))与 HAVING 下推;3 表 JOIN+聚合+HAVING 18.7s→~5s;SLT **1184 / PASS 1132 / GAP 52 / FAIL 0** |
 | **benchmark TOP 查询优化(v2.1.0)** | ✅ | 单表 GROUP BY 流式聚合、非相关标量子查询常量折叠、IN 候选集 hash 索引;rank1 10.3s→1.15s / rank2 8.17s→0.77s / rank20 0.67s→0.43s;SLT **1184 / PASS 1132 / GAP 52 / FAIL 0** |
 | **命令行导入 / dump 导出(v2.2.0)** | ✅ | `sqltiny_server --import FILE` 导入 SQL/mysqldump 脚本(注释、`DELIMITER`、`LOCK TABLES` 跳过、错误继续策略);`--dump FILE` 导出 MySQL 风格建库/建表/多行 INSERT(dump 库/表过滤、只结构/只数据、INSERT 批大小);`smoke_cli_io` 40/40 |
+| **ASan 构建 + 模糊测试支撑(v2.2.1)** | ✅ | 可选 `windows-asan` preset(`/fsanitize=address`,无需 Clang/LLVM)、ASan 运行时 DLL 自动部署、fmt STL 注解冲突规避;ASan 下 SLT 1184/PASS 1133/GAP 51/FAIL 0、协议 42/42、持久化 15/15;同级 `SQLTinySLT` 接入 Hypothesis 状态化 fuzz(100+ examples,0 崩溃/协议失步/oracle 失败) |
 | M6 P4 | ⬜ | 复制与更大测试覆盖;认证(caching_sha2_password / SSL)仍未做 |
 
 ### 本轮交付(v1.1.0 客户端兼容性)
@@ -390,18 +391,18 @@ employees 标准数据集(392 万行)实测:3 表 JOIN 求均薪 77s vs MySQL 6.
 | `test_sqlalchemy.py` | 33 PASS / 0 FAIL / 0 GAP(原 #5–#8 与 DESCRIBE/SHOW FULL TABLES 反射限制均已修复) |
 | **实测客户端** | DBX/dbExpress(Delphi)连接 + 打开表 + 浏览索引/列正常;类 Navicat 图形工具浏览表/索引/列正常;PyMySQL / mysql CLI 正常 |
 
-### 版本标识(v2.2.0)
+### 版本标识(v2.2.1)
 
 | 位置 | 内容 |
 |---|---|
-| `CMakeLists.txt` | `project(SQLTiny VERSION 2.2.0 LANGUAGES CXX)` |
-| `vcpkg.json` | `"version-string": "2.2.0"` |
-| `src/main.cpp` | 启动横幅 `SQLTiny v2.2.0 — MySQL wire protocol server` |
+| `CMakeLists.txt` | `project(SQLTiny VERSION 2.2.1 LANGUAGES CXX)` |
+| `vcpkg.json` | `"version-string": "2.2.1"` |
+| `src/main.cpp` | 启动横幅 `SQLTiny v2.2.1 — MySQL wire protocol server` |
 | `src/version.rc.in` | exe Windows 版本资源(经 configure_file 注入 CMake 版本),右键属性页显示产品名 / 版本 / 版权 |
 | `README.md` / `CODEPLAN.md` | 本版本变更清单与验证基线 |
 | 协议层 `@@version` / `VERSION()` | 仍为 `5.7.0-SQLTiny` —— MySQL 客户端兼容用伪装版本,**不是**产品版本,不随产品版本改动 |
 
-> v1.1.0 统一了此前分散的版本号(启动横幅 `v1.0`、manifest `0.1.0`、CMake 未声明),交付 Prepared Statement、information_schema、SHOW 扩展与 EOF 帧兼容。**v1.1.2** 在此基础上交付 DBeaver / Database Client 实测兼容修复(DDL 选项跳过、SHOW TABLES WHERE/LIKE 过滤、`REFERENTIAL_CONSTRAINTS` 虚拟表、系统变量补齐、双引号与裸关键字别名、`INSTR/LOCATE/POSITION` 函数)。**v1.2.0** 交付 JOIN 性能优化(Hash Join + 预建列索引 + 成本估算 + `EXPLAIN`),INNER/LEFT JOIN 约 77x / 62x 提速,详见 README「v1.2.0 更新内容」。**v1.2.5** 交付大表 JOIN 主键索引利用(PK 前缀索引探测 + WHERE 谓词下推)与 SUM(DECIMAL) 列类型一致性修复,employees 3 表 JOIN 77s→23.8s、单员工⋈薪酬 28s→2.3s,详见 README「v1.2.5 更新内容」。**v2.0.0** 主键索引整体升级 B+ 树,索引级点查 +19% / 前缀扫描 +24% / 全量遍历 7.6x,端到端 employees JOIN 18.99s→18.42s(Release 基线),详见 README「v2.0.0 更新内容」。**v2.0.1** 优化 3 表 JOIN 执行性能(ExecContext 零拷贝、idx_probe 跳过右表物化、聚合下推到 PK 前缀探测),employees 3 表 JOIN 18.25s→1.97s(9.3x),与 MySQL 差距 11.7x→1.25x,详见 README「v2.0.1 更新内容」。**v2.0.2** 扩展聚合下推覆盖面(WHERE 按表侧拆分、哈希等值 JOIN 也下推、子查询/CASE 不下推加固),高薪员工数 2.76s→0.94s、2 表哈希计行 0.37s→0.13s,详见 README「v2.0.2 更新内容」。**v2.0.3** 让主键点查走索引前缀探测(`WHERE PK首列=同族字面量`),并以 `dead_rows_` / `has_dead_rows()` 在存在逻辑删除历史时回退全表扫描以保 MVCC 可见性,employees 点查 74ms→0.13ms、salaries 678ms→0.17ms,详见 README「v2.0.3 更新内容」。**v2.0.4** 增加单表聚合单遍扫描快路径(`SUM(salary)` 2.97s→0.35s、`WHERE salary>100000` 计行 0.774s→0.248s)并实现 UNION / UNION ALL(去重、链式、尾部 ORDER BY/LIMIT)与 `ORDER BY 1` 位置序号,详见 README「v2.0.4 更新内容」。**v2.0.5** 补齐复杂查询能力与正确性:WITH/递归 CTE、标量子查询、EXISTS、FROM 派生表、COUNT(DISTINCT)、BETWEEN、`ROW_NUMBER() OVER`、YEAR/MONTH/DAY 等,GROUP BY 别名与内嵌聚合修复;性能上 GROUP BY 高基数分桶 O(n²)→O(1)、相关子查询外层列等值走 PK 前缀探测、递归 CTE 改增量工作集,`compare_employees.py` 扩至 39 条并达 **39/39 MATCH**,详见 README「v2.0.5 更新内容」。**v2.0.6** 由外部 sqllogictest 套件驱动,把 SQL 语义与报错对齐 MySQL:NULL 排序/三值逻辑、LIKE 大小写、BIGINT 与表达式列类型、SQL 校验(1048/1054/1136/1366/1406/1242/1241/1111/1055/1222/3593)、RIGHT JOIN/逗号连接、窗口聚合、information_schema 主键元数据、字符串与数值函数;SLT **1184 项 PASS 1092 / GAP 92 / FAIL 0**,协议 **42/42**,详见 README「v2.0.6 更新内容」。**v2.0.7** 完成 P1-a 日期时间模块:`INTERVAL` 语法、14 个日期/时间函数与无括号 `CURRENT_*`、DATETIME 减法,SLT **PASS 1106 / GAP 78 / FAIL 0**,协议 42/42、持久化 15/15、`compare_employees` 39/39,详见 README「v2.0.7 更新内容」。**v2.2.0** 新增命令行导入 / dump 导出:`sqltiny_server --import FILE` 可直接灌入 SQL/mysqldump 脚本(注释、`DELIMITER`、`LOCK TABLES` 跳过、错误继续策略),`--dump FILE` 导出可回灌的 MySQL 风格建库/建表/多行 `INSERT`(库表过滤、只结构/只数据、批大小、`-` 写 stdout),详见 README「v2.2.0 更新内容」。
+> v1.1.0 统一了此前分散的版本号(启动横幅 `v1.0`、manifest `0.1.0`、CMake 未声明),交付 Prepared Statement、information_schema、SHOW 扩展与 EOF 帧兼容。**v1.1.2** 在此基础上交付 DBeaver / Database Client 实测兼容修复(DDL 选项跳过、SHOW TABLES WHERE/LIKE 过滤、`REFERENTIAL_CONSTRAINTS` 虚拟表、系统变量补齐、双引号与裸关键字别名、`INSTR/LOCATE/POSITION` 函数)。**v1.2.0** 交付 JOIN 性能优化(Hash Join + 预建列索引 + 成本估算 + `EXPLAIN`),INNER/LEFT JOIN 约 77x / 62x 提速,详见 README「v1.2.0 更新内容」。**v1.2.5** 交付大表 JOIN 主键索引利用(PK 前缀索引探测 + WHERE 谓词下推)与 SUM(DECIMAL) 列类型一致性修复,employees 3 表 JOIN 77s→23.8s、单员工⋈薪酬 28s→2.3s,详见 README「v1.2.5 更新内容」。**v2.0.0** 主键索引整体升级 B+ 树,索引级点查 +19% / 前缀扫描 +24% / 全量遍历 7.6x,端到端 employees JOIN 18.99s→18.42s(Release 基线),详见 README「v2.0.0 更新内容」。**v2.0.1** 优化 3 表 JOIN 执行性能(ExecContext 零拷贝、idx_probe 跳过右表物化、聚合下推到 PK 前缀探测),employees 3 表 JOIN 18.25s→1.97s(9.3x),与 MySQL 差距 11.7x→1.25x,详见 README「v2.0.1 更新内容」。**v2.0.2** 扩展聚合下推覆盖面(WHERE 按表侧拆分、哈希等值 JOIN 也下推、子查询/CASE 不下推加固),高薪员工数 2.76s→0.94s、2 表哈希计行 0.37s→0.13s,详见 README「v2.0.2 更新内容」。**v2.0.3** 让主键点查走索引前缀探测(`WHERE PK首列=同族字面量`),并以 `dead_rows_` / `has_dead_rows()` 在存在逻辑删除历史时回退全表扫描以保 MVCC 可见性,employees 点查 74ms→0.13ms、salaries 678ms→0.17ms,详见 README「v2.0.3 更新内容」。**v2.0.4** 增加单表聚合单遍扫描快路径(`SUM(salary)` 2.97s→0.35s、`WHERE salary>100000` 计行 0.774s→0.248s)并实现 UNION / UNION ALL(去重、链式、尾部 ORDER BY/LIMIT)与 `ORDER BY 1` 位置序号,详见 README「v2.0.4 更新内容」。**v2.0.5** 补齐复杂查询能力与正确性:WITH/递归 CTE、标量子查询、EXISTS、FROM 派生表、COUNT(DISTINCT)、BETWEEN、`ROW_NUMBER() OVER`、YEAR/MONTH/DAY 等,GROUP BY 别名与内嵌聚合修复;性能上 GROUP BY 高基数分桶 O(n²)→O(1)、相关子查询外层列等值走 PK 前缀探测、递归 CTE 改增量工作集,`compare_employees.py` 扩至 39 条并达 **39/39 MATCH**,详见 README「v2.0.5 更新内容」。**v2.0.6** 由外部 sqllogictest 套件驱动,把 SQL 语义与报错对齐 MySQL:NULL 排序/三值逻辑、LIKE 大小写、BIGINT 与表达式列类型、SQL 校验(1048/1054/1136/1366/1406/1242/1241/1111/1055/1222/3593)、RIGHT JOIN/逗号连接、窗口聚合、information_schema 主键元数据、字符串与数值函数;SLT **1184 项 PASS 1092 / GAP 92 / FAIL 0**,协议 **42/42**,详见 README「v2.0.6 更新内容」。**v2.0.7** 完成 P1-a 日期时间模块:`INTERVAL` 语法、14 个日期/时间函数与无括号 `CURRENT_*`、DATETIME 减法,SLT **PASS 1106 / GAP 78 / FAIL 0**,协议 42/42、持久化 15/15、`compare_employees` 39/39,详见 README「v2.0.7 更新内容」。**v2.2.0** 新增命令行导入 / dump 导出:`sqltiny_server --import FILE` 可直接灌入 SQL/mysqldump 脚本(注释、`DELIMITER`、`LOCK TABLES` 跳过、错误继续策略),`--dump FILE` 导出可回灌的 MySQL 风格建库/建表/多行 `INSERT`(库表过滤、只结构/只数据、批大小、`-` 写 stdout),详见 README「v2.2.0 更新内容」。**v2.2.1** 新增 MSVC AddressSanitizer 构建(`windows-asan` preset,无需 Clang/LLVM),配套 ASan 运行时 DLL 自动部署与 fmt 注解冲突规避;ASan 下 SLT 1184/PASS 1133/GAP 51/FAIL 0、协议 42/42、持久化 15/15,并支撑同级 `SQLTinySLT` 的 Hypothesis 状态化模糊测试,详见 README「v2.2.1 更新内容」。
 
 ---
 

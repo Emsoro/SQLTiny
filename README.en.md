@@ -1,8 +1,8 @@
 # SQLTiny — Lightweight Embedded Database · MySQL Protocol Compatible
 
-> **Current version `v2.2.0` (2026-11-17)** · The version number is maintained in `CMakeLists.txt` (`project(SQLTiny VERSION 2.2.0)`), `vcpkg.json` (`version-string`) and the startup banner in `src/main.cpp`. The wire protocol still reports `5.7.0-SQLTiny` for MySQL client compatibility — that string is unrelated to the product version.
+> **Current version `v2.2.1` (2026-11-21)** · The version number is maintained in `CMakeLists.txt` (`project(SQLTiny VERSION 2.2.1)`), `vcpkg.json` (`version-string`) and the startup banner in `src/main.cpp`. The wire protocol still reports `5.7.0-SQLTiny` for MySQL client compatibility — that string is unrelated to the product version.
 >
-> v2.2.0 adds **command-line import / dump export** (`--import` / `--dump`): load mysqldump-style scripts directly, or export a backup that can be re-imported. See "What's new in v2.2.0" below.
+> v2.2.1 adds an optional **MSVC AddressSanitizer build** (`windows-asan` preset) and backs the stateful Hypothesis fuzzing in the sibling test suite. See "What's new in v2.2.1" below.
 
 **SQLTiny** is a lightweight relational database written from scratch in modern C++20, with its core design inspired by [HSQLDB](http://hsqldb.org/). It additionally exposes the **MySQL Wire Protocol**, so standard MySQL clients (`mysql` CLI, Navicat, DBeaver, Connector/J, PyMySQL, DBX/dbExpress) can connect directly.
 
@@ -24,6 +24,7 @@
 | 🗃️ **Multi-database catalog** | CREATE/DROP/USE DATABASE with per-database table registries |
 | ⚡ **B+ tree in-memory index** | Primary key index is a hand-written B+ tree (since v2.0.0); point lookup O(logₙ) · leaf-chain ordered scan |
 | 🪶 **Lightweight** | Single database file, millisecond startup, only dependency is fmtlib; **statically linked** (`x64-windows-static`), no `fmt.dll` or VC runtime DLL required |
+| 🧪 **ASan build** | Optional `windows-asan` preset (MSVC `/fsanitize=address`, no Clang/LLVM) for overflow/crash detection and fuzzing |
 
 ---
 
@@ -36,6 +37,19 @@
 > 🔒 **Lock hierarchy**: Catalog.mu_ (DDL) → Table.mu_ shared_lock (concurrent SELECT readers) / unique_lock (exclusive DML) → RowLockMap (row-level conflict detection) → TransactionManager.writeLock_ (commit boundary) → WalManager.mu_ (WAL file I/O)
 >
 > 🧊 **MVCC**: SELECT takes no locks at all; `for_each_visible(querySCN, readerTxn)` filters by `createSCN/deleteSCN` and `pendingTxn`. Uncommitted rows are visible only to their owning transaction; `finalize_commit` publishes them at commit.
+
+---
+
+## 🆕 What's new in v2.2.1 (MSVC ASan build, 2026-11-21)
+
+No SQL semantics or protocol behavior changes; adds an optional **MSVC AddressSanitizer** build and backs the stateful Hypothesis fuzzing in the external test suite.
+
+- **`windows-asan` preset**: no Clang/LLVM required; `SQLTINY_ASAN=ON` adds `/fsanitize=address /Zi` to every target, output under `build-asan/RelWithDebInfo/`
+- **Runtime DLL deployment**: POST_BUILD copies `clang_rt.asan_dynamic-x86_64.dll` next to every executable, so Python scripts can spawn build outputs without touching `PATH`
+- **fmt annotation workaround**: the prebuilt `fmt.lib` is not ASan-instrumented; `_DISABLE_VECTOR_ANNOTATION` / `_DISABLE_STRING_ANNOTATION` avoid LNK2038 while keeping heap/stack overflow detection
+- **Validation baseline** (ASan server): SLT **1184 / PASS 1133 / GAP 51 / FAIL 0**, protocol **42/42**, persistence **15/15**; the sibling `SQLTinySLT` Hypothesis fuzzer runs 100+ examples / ~6000 statements with **0 crashes / 0 protocol desyncs / 0 oracle failures**
+
+Boundary: UBSan and libFuzzer coverage instrumentation are Clang-only and unavailable under MSVC; ASan covers memory errors and crashes.
 
 ---
 
@@ -529,15 +543,27 @@ FROM users u INNER JOIN orders o ON o.user_id = u.id;
 
 `EXPLAIN` only builds the plan and never scans data; when the right join column is a single-column primary key it reports `type=eq_ref`, `key=PRIMARY`. Non-equality ON shows `Using nested loop (cost ...)`. Full implementation notes are in `CODEPLAN.md` §M6 P2.
 
+### ASan build (for fuzzing)
+
+MSVC ships AddressSanitizer; no Clang/LLVM needed:
+
+```powershell
+cmake --preset windows-asan
+cmake --build --preset windows-asan --target sqltiny_server
+# output: build-asan\RelWithDebInfo\sqltiny_server.exe
+```
+
+`SQLTINY_ASAN=ON` adds `/fsanitize=address` to all targets; CMake copies the ASan runtime DLL next to each executable. The prebuilt fmt STL container annotations are disabled via `_DISABLE_VECTOR_ANNOTATION` / `_DISABLE_STRING_ANNOTATION` (heap/stack overflow detection unaffected). The Hypothesis + ASan fuzzer lives in the sibling `SQLTinySLT/fuzz`. libFuzzer coverage instrumentation and UBSan are Clang-only and thus unavailable here.
+
 ### Build artifacts
 
 | Artifact | Type | Description |
 |---|---|---|
 | `build/Debug/sqltiny.lib` | static library | Engine core, for in-process embedding |
-| `build/Debug/sqltiny_server.exe` | executable | MySQL protocol TCP server (v2.2.0) |
+| `build/Debug/sqltiny_server.exe` | executable | MySQL protocol TCP server (v2.2.1) |
 | `build/Release/sqltiny_server.exe` | executable (release) | Same, Release build is about **0.9 MB** in a single file (static CRT + static fmt, no DLL dependencies, copy-and-run); Debug build is about 4.8 MB |
 
-**`sqltiny_server.exe` file info (v2.2.0)**:
+**`sqltiny_server.exe` file info (v2.2.1)**:
 
 | Property | Value |
 |---|---|

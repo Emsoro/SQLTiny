@@ -2,9 +2,9 @@
 
 > 🌐 语言: [English](./README.en.md) · **简体中文**
 
-> **当前版本 `v2.2.0`(2026-11-17)** · 版本号统一维护在 `CMakeLists.txt`(`project(SQLTiny VERSION 2.2.0)`)、`vcpkg.json`(`version-string`)与 `src/main.cpp` 启动横幅。协议层对外仍伪装为 `5.7.0-SQLTiny` 以兼容 MySQL 客户端,与产品版本无关。
+> **当前版本 `v2.2.1`(2026-11-21)** · 版本号统一维护在 `CMakeLists.txt`(`project(SQLTiny VERSION 2.2.1)`)、`vcpkg.json`(`version-string`)与 `src/main.cpp` 启动横幅。协议层对外仍伪装为 `5.7.0-SQLTiny` 以兼容 MySQL 客户端,与产品版本无关。
 >
-> v2.2.0 交付 **命令行导入 / dump 导出**(`--import` / `--dump`),可直接灌入 mysqldump 脚本或导出可回灌的备份,内容见下文「v2.2.0 更新内容」。
+> v2.2.1 新增 **MSVC AddressSanitizer 构建**(`windows-asan` preset),并支撑同级测试集的 Hypothesis 状态化模糊测试,内容见下文「v2.2.1 更新内容」。
 
 **SQLTiny** 是用现代 C++20 从零重写的轻量级关系型数据库,核心设计灵感来自 [HSQLDB](http://hsqldb.org/),额外暴露 **MySQL Wire Protocol**——标准 MySQL 客户端(`mysql` CLI、Navicat、DBeaver、Connector/J、PyMySQL、DBX/dbExpress)直接连接。
 
@@ -24,6 +24,7 @@
 | 🗃️ **多库 Catalog** | CREATE/DROP/USE DATABASE,库级独立表注册 |
 | ⚡ **B+ 树内存索引** | 主键索引为自研 B+ 树(v2.0.0 起),点查 O(logₙ) · 叶子链顺序扫描 |
 | 🪶 **轻量** | 单库文件,启动毫秒级,依赖仅 fmtlib;**静态编译**(`x64-windows-static`),产物不依赖 `fmt.dll` / VC 运行时 DLL |
+| 🧪 **ASan 构建** | 可选 `windows-asan` preset(MSVC `/fsanitize=address`,无需 Clang/LLVM),用于越界/崩溃检测与模糊测试 |
 
 ---
 
@@ -36,6 +37,19 @@
 > 🔒 **锁分层**: Catalog.mu_(DDL) → Table.mu_ shared_lock(SELECT 多读者并行) / unique_lock(DML 独占) → RowLockMap(行级冲突检测) → TransactionManager.writeLock_(提交边界) → WalManager.mu_(WAL 文件读写)
 >
 > 🧊 **MVCC**: SELECT 完全不加锁,`for_each_visible(querySCN, readerTxn)` 按 `createSCN/deleteSCN` 与 `pendingTxn` 过滤;未提交行只对所属事务可见,commit 才 `finalize_commit` 对外发布
+
+---
+
+## 🆕 v2.2.1 更新内容（MSVC ASan 构建，2026-11-21）
+
+不改变 SQL 语义与协议行为;新增可选的 **MSVC AddressSanitizer** 构建,并支撑外部逻辑测试套件中的 Hypothesis 有状态模糊测试。
+
+- **`windows-asan` preset**:无需 Clang/LLVM,`SQLTINY_ASAN=ON` 为全部目标加 `/fsanitize=address /Zi`,产物在独立的 `build-asan/RelWithDebInfo/`
+- **运行时 DLL 自动部署**:POST_BUILD 把 `clang_rt.asan_dynamic-x86_64.dll` 拷到每个 exe 旁,Python 脚本可直接 spawn 构建产物,无需修改 `PATH`
+- **fmt 注解冲突规避**:预编译 `fmt.lib` 未开启 ASan,通过 `_DISABLE_VECTOR_ANNOTATION` / `_DISABLE_STRING_ANNOTATION` 消除 LNK2038;堆/栈越界检测不受影响
+- **验证基线**(ASan server):SLT **1184 / PASS 1133 / GAP 51 / FAIL 0**,协议 **42/42**,持久化 **15/15**;同级 `SQLTinySLT` 的 Hypothesis 模糊测试 100+ examples / 约 6000 语句,**0 崩溃 / 0 协议失步 / 0 oracle 失败**
+
+边界:UBSan 与 libFuzzer 覆盖率插桩是 Clang 专属,MSVC 下不可用;ASan 只做内存错误与崩溃检测。
 
 ---
 
@@ -586,6 +600,21 @@ cmake --build build --config Release
 
 > **排障**:若 Debug 版运行时报 `Debug Assertion Failed: __acrt_first_block == header`(`debug_heap.cpp:996`),说明 `build/` 缓存的 triplet/CRT 与配置不一致(两套 CRT 堆并存,跨堆 `free`)。删除 `build/` 后用上面的 preset 重新配置并全量重建即可,不要直接 `cmake -S . -B build`。
 
+### ASan 构建（模糊测试用）
+
+MSVC 自带 AddressSanitizer,不需要 Clang/LLVM:
+
+```powershell
+cmake --preset windows-asan
+cmake --build --preset windows-asan --target sqltiny_server
+# 产物: build-asan\RelWithDebInfo\sqltiny_server.exe
+```
+
+`SQLTINY_ASAN=ON` 为所有目标加 `/fsanitize=address`;ASan 运行时 DLL 由 CMake 自动拷到 exe 同目录。
+与预编译 fmt 的 STL 容器注解冲突通过 `_DISABLE_VECTOR_ANNOTATION` / `_DISABLE_STRING_ANNOTATION` 规避,
+堆/栈越界检测不受影响。对应的模糊测试模块见同级 `SQLTinySLT/fuzz`(Hypothesis + ASan)。
+libFuzzer 覆盖率插桩与 UBSan 是 Clang 专属,MSVC 下不可用。
+
 ```powershell
 python tests\benchmark\compare_employees.py        # employees MySQL vs SQLTiny 测评,结果存 benchmark/employees_*
 python tests\benchmark\test_perf_vs_sqlite.py --mode both   # SQLite 性能对比,结果存 benchmark/perf_sqlite_*
@@ -623,10 +652,10 @@ FROM users u INNER JOIN orders o ON o.user_id = u.id;
 | 产物 | 类型 | 说明 |
 |---|---|---|
 | `build/Debug/sqltiny.lib` | 静态库 | 引擎核心,嵌入式进程内调用 |
-| `build/Debug/sqltiny_server.exe` | 可执行 | MySQL 协议 TCP 服务器(v2.2.0) |
+| `build/Debug/sqltiny_server.exe` | 可执行 | MySQL 协议 TCP 服务器(v2.2.1) |
 | `build/Release/sqltiny_server.exe` | 可执行(发布版) | 同上,Release 版约 **0.9 MB** 单文件(静态 CRT + fmt 静态链接,无 dll 依赖,可直接拷贝部署);Debug 版约 4.8 MB |
 
-**`sqltiny_server.exe` 文件信息(v2.2.0)**:
+**`sqltiny_server.exe` 文件信息(v2.2.1)**:
 
 | 属性 | 值 |
 |---|---|
