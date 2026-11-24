@@ -1002,6 +1002,29 @@ ResultSet Executor::execute_sub(const ast::Statement& stmt, const ExecContext* o
     return r;
 }
 
+bool Executor::exists_subquery(const ast::Expression& e, const ExecContext& ctx) {
+    if (!e.subquery_stmt || !e.subquery_stmt->select_) return false;
+    const auto& sel = *e.subquery_stmt->select_;
+    // 保守判据:无连接/聚合/分组/排序/去重/分页/集合运算的简单查询才走首行即停;
+    // 其余回退原 subquery_rows 完整求值,保持语义。
+    bool simple = sel.joins.empty() && sel.group_by.empty() && !sel.having &&
+                  !sel.distinct && sel.order_by.empty() && !sel.offset && !sel.limit &&
+                  sel.set_op == ast::SelectSetOp::None && !sel.set_right;
+    if (!simple) {
+        const auto* rows = subquery_rows(e, ctx);
+        return rows && !rows->empty();
+    }
+    bool used = false;
+    bool old_probe = exists_probe_, old_found = exists_found_;
+    exists_probe_ = true;
+    exists_found_ = false;
+    execute_sub(*e.subquery_stmt, &ctx, &used, ctx.ctes);
+    bool found = exists_found_;
+    exists_probe_ = old_probe;
+    exists_found_ = old_found;
+    return found;
+}
+
 const std::vector<storage::Row>* Executor::subquery_rows(const ast::Expression& e,
                                                          const ExecContext& ctx) const {
     auto it = sq_cache_.find(&e);
@@ -1960,6 +1983,7 @@ ResultSet Executor::exec_select_body(const ast::SelectStmt& s, const ExecContext
         const ast::Expression* wrap = nullptr; // 包裹聚合的标量函数(如 ROUND),为 nullptr 表示顶层聚合
         const ast::Expression* agg_node = nullptr; // 聚合函数节点
         std::string sig;                       // 聚合签名(供 HAVING 匹配)
+        int arg_off = -1;                      // 裸列聚合参数的右表行内偏移,-1 表示需 eval
     };
     std::vector<FusedCol> fused_cols;
     std::map<std::string, int> right_col_index;   // 右表列名 -> 行内局部下标
@@ -2052,6 +2076,15 @@ ResultSet Executor::exec_select_body(const ast::SelectStmt& s, const ExecContext
                             }
                             fc.arg = an->func_args[0].get();
                             fc.kind = agg_kind_of(*an);
+                            // 裸列参数直接记行内偏移: 284 万次匹配免去 ExecContext 构造 + eval
+                            if (fc.arg->kind == ast::ExprKind::Column) {
+                                const auto& c = *fc.arg;
+                                std::string rk = c.table_name.empty() ? c.column_name
+                                                 : c.table_name + "." + c.column_name;
+                                auto rit = right_col_index.find(rk);
+                                if (rit == right_col_index.end()) rit = right_col_index.find(c.column_name);
+                                if (rit != right_col_index.end()) fc.arg_off = rit->second;
+                            }
                         }
                         if (fc.kind == 0) { ok = false; break; }
                         fc.agg_node = an;
@@ -2142,6 +2175,10 @@ ResultSet Executor::exec_select_body(const ast::SelectStmt& s, const ExecContext
     // 隐式转换,跨类型下推会漏行,故此处置信域保守。
     const types::Value* pk_eq_lit = nullptr;
     types::Value pk_lit_storage;   // 外层列求值结果的存放处(相关子查询去相关用)
+    // 整数 PK 上界范围下推:emp_no <= 10010 之类只扫描索引前缀区间(284 万 → ~1 万行)
+    const types::Value* pk_range_hi = nullptr;
+    bool pk_range_inclusive_hi = false;
+    types::Value pk_range_hi_storage;
     if (s.where && !tbl->def().primary_key_cols.empty() &&
         !tbl->def().primary_key_cols.front().empty()) {
         int pk_off = tbl->def().column_index(tbl->def().primary_key_cols.front().front());
@@ -2195,6 +2232,29 @@ ResultSet Executor::exec_select_body(const ast::SelectStmt& s, const ExecContext
                 pk_lit_storage = std::move(lit_val);
                 pk_eq_lit = &pk_lit_storage;
                 break;
+            }
+            // 等值谓词不存在时识别整数 PK 的上界(< / <=); 下界留给 WHERE 复核,
+            // 保证不因隐式转换漏行,同时范围扫描本身仍大幅剪枝。
+            if (!pk_eq_lit && types::is_integer(pk_type)) {
+                for (auto* c : eq_conj) {
+                    if (!c || c->kind != ast::ExprKind::BinaryOp) continue;
+                    if (c->binop != ast::BinOp::Le && c->binop != ast::BinOp::Lt) continue;
+                    const ast::Expression* col = nullptr;
+                    const ast::Expression* other = nullptr;
+                    if (c->lhs && c->lhs->kind == ast::ExprKind::Column && c->rhs &&
+                        c->rhs->kind == ast::ExprKind::Literal) {
+                        col = c->lhs.get(); other = c->rhs.get();
+                    }
+                    if (!col || !other || !other->literal.is_int()) continue;
+                    std::string ck = col->table_name.empty()
+                        ? col->column_name : (col->table_name + "." + col->column_name);
+                    auto it = base_col_index.find(ck);
+                    if (it == base_col_index.end() || it->second != pk_off) continue;
+                    pk_range_hi_storage = other->literal;
+                    pk_range_hi = &pk_range_hi_storage;
+                    pk_range_inclusive_hi = (c->binop == ast::BinOp::Le);
+                    break;
+                }
             }
         }
     }
@@ -2462,21 +2522,32 @@ ResultSet Executor::exec_select_body(const ast::SelectStmt& s, const ExecContext
     // 原通用路径先把所有行物化到 after_where,再按 key 分桶(每桶存整行),最后逐桶 eval_agg。
     // salaries GROUP BY emp_no(284 万行 / 30 万组)因此要用 6s+。这里在条件满足时
     // 一次扫描直接累加,把每组的聚合状态压缩到一个小结构体。
+    // ORDER BY 只引用输出列时也可流式聚合(输出后按输出列排序即可)
+    bool stream_order_ok = true;
+    for (auto& [oe, _] : s.order_by)
+        if (order_output_index(*oe) < 0) { stream_order_ok = false; break; }
     bool stream_group = has_agg && s.joins.empty() && !s.group_by.empty() &&
-                        !s.having && !s.distinct && s.order_by.empty() &&
+                        !s.having && !s.distinct && stream_order_ok &&
                         !s.offset && !s.limit && !pk_probe_ok;
     if (stream_group) {
-        // GROUP BY 必须全是简单列引用
+        // GROUP BY:简单列引用走裸列偏移;CASE 表达式(含 SELECT 别名解析后的同指针)
+        // 走逐行 eval 生成分组键 —— salaries 的 CASE band 分组不再物化 284 万行
         std::vector<int> gkey_off;
+        std::vector<const ast::Expression*> gkey_expr;
         for (auto* ge : group_exprs) {
-            if (!ge || ge->kind != ast::ExprKind::Column) { stream_group = false; break; }
-            std::string key = ge->table_name.empty() ? ge->column_name
-                                                      : ge->table_name + "." + ge->column_name;
-            auto it = base_col_index.find(key);
-            if (it == base_col_index.end() || it->second < 0 || it->second >= total_cols) {
-                stream_group = false; break;
-            }
-            gkey_off.push_back(it->second);
+            if (!ge) { stream_group = false; break; }
+            if (ge->kind == ast::ExprKind::Column) {
+                std::string key = ge->table_name.empty() ? ge->column_name
+                                                          : ge->table_name + "." + ge->column_name;
+                auto it = base_col_index.find(key);
+                if (it == base_col_index.end() || it->second < 0 || it->second >= total_cols) {
+                    stream_group = false; break;
+                }
+                gkey_off.push_back(it->second);
+            } else if (ge->kind == ast::ExprKind::Case && !contains_agg(*ge)) {
+                gkey_off.push_back(-1);
+            } else { stream_group = false; break; }
+            gkey_expr.push_back(ge);
         }
         // SELECT 列:分组列 / 简单聚合(count,sum,avg,min,max,单列参数) / 常量
         struct SAcc {
@@ -2487,12 +2558,20 @@ ResultSet Executor::exec_select_body(const ast::SelectStmt& s, const ExecContext
             // 累加态
             int64_t cnt = 0; int64_t iacc = 0; double acc = 0; bool all_int = true;
             bool first = true; types::Value best;
+            const ast::Expression* expr = nullptr;  // kind=8:分组表达式(CASE 等)
+            storage::Row rep;                       // 组代表行,输出时对表达式求值
         };
         std::vector<SAcc> saccs;
         if (stream_group) {
             for (auto& [e, _] : s.columns) {
                 if (!e) { stream_group = false; break; }
                 SAcc a;
+                // SELECT 列与 GROUP BY 表达式同指针(别名解析):保留表达式,输出时求值
+                bool is_gexpr = false;
+                for (auto* ge : gkey_expr)
+                    if (e.get() == ge) { SAcc g; g.kind = 8; g.expr = e.get();
+                                         saccs.push_back(std::move(g)); is_gexpr = true; break; }
+                if (is_gexpr) continue;
                 if (e->kind == ast::ExprKind::Literal) { a.kind = 5; a.constant = e->literal; }
                 else if (e->kind == ast::ExprKind::Column) {
                     // 必须是 GROUP BY 列之一(用裸列名匹配)
@@ -2561,8 +2640,14 @@ ResultSet Executor::exec_select_body(const ast::SelectStmt& s, const ExecContext
         if (stream_group) {
             auto group_key = [&](const storage::Row& row) -> std::string {
                 std::string k;
-                for (int off : gkey_off) {
-                    k += (off < static_cast<int>(row.size()) ? row[off].to_string() : "NULL");
+                for (size_t i = 0; i < gkey_off.size(); ++i) {
+                    if (gkey_off[i] >= 0)
+                        k += (gkey_off[i] < static_cast<int>(row.size())
+                              ? row[gkey_off[i]].to_string() : "NULL");
+                    else {
+                        auto ctx = build_ctx(row);
+                        k += eval(*gkey_expr[i], ctx).to_string();
+                    }
                     k += '\x01';
                 }
                 return k;
@@ -2593,9 +2678,12 @@ ResultSet Executor::exec_select_body(const ast::SelectStmt& s, const ExecContext
                 if (!pass_preds(row)) return true;
                 std::string k = group_key(row);
                 auto& accs = groups[k];
-                if (accs.empty()) accs = saccs;   // 新组:复制初始累加器模板
+                if (accs.empty()) {
+                    accs = saccs;   // 新组:复制初始累加器模板
+                    for (auto& a : accs) if (a.kind == 8) a.rep = row;   // 保留组代表行
+                }
                 for (auto& a : accs) {
-                    if (a.kind == 5) continue;                       // 常量列
+                    if (a.kind == 5 || a.kind == 8) continue;         // 常量 / 分组表达式
                     if (a.kind == 1) { ++a.cnt; continue; }          // COUNT(*)
                     if (a.off >= static_cast<int>(row.size())) continue;
                     const types::Value& v = row[a.off];
@@ -2627,6 +2715,10 @@ ResultSet Executor::exec_select_body(const ast::SelectStmt& s, const ExecContext
                 out.reserve(accs.size());
                 for (auto& a : accs) {
                     if (a.kind == 0) out.push_back(a.best);          // 分组列:该组代表值
+                    else if (a.kind == 8) {
+                        auto ctx = build_ctx(a.rep);
+                        out.push_back(eval(*a.expr, ctx));
+                    }
                     else if (a.kind == 5) out.push_back(a.constant);
                     else if (a.kind == 1 || a.kind == 6) out.push_back(types::Value::make_int(a.cnt));
                     else if (a.kind == 2) {
@@ -2638,32 +2730,79 @@ ResultSet Executor::exec_select_body(const ast::SelectStmt& s, const ExecContext
                 }
                 r.rows.push_back(std::move(out));
             }
+            // ORDER BY 只引用输出列:对少量分组结果排序(替代原来的全量物化排序)
+            if (!s.order_by.empty() && r.rows.size() > 1) {
+                std::vector<size_t> ord(r.rows.size());
+                for (size_t i = 0; i < ord.size(); ++i) ord[i] = i;
+                std::stable_sort(ord.begin(), ord.end(), [&](size_t ia, size_t ib) {
+                    for (auto& [oe, asc] : s.order_by) {
+                        int oi = order_output_index(*oe);
+                        if (oi < 0 || oi >= static_cast<int>(r.rows[ia].size())) continue;
+                        int c = r.rows[ia][oi].compare(r.rows[ib][oi]);
+                        if (c != 0) return asc ? c < 0 : c > 0;
+                    }
+                    return false;
+                });
+                std::vector<storage::Row> sorted;
+                sorted.reserve(ord.size());
+                for (size_t i : ord) sorted.push_back(std::move(r.rows[i]));
+                r.rows = std::move(sorted);
+            }
             r.affected_rows = static_cast<int64_t>(r.rows.size());
             return r;
         }
     }
 
+    // EXISTS 判空时命中第一行即可停止扫描(回调返回 false)
+    auto scan_row = [&](int64_t, const storage::Row& row) -> bool {
+        left_rows.push_back(row);
+        if (exists_probe_) {
+            // 下推谓词可能不完整(相关列/非下推条件):用完整 WHERE 验证当前行再决定,
+            // 否则会把"首行"误判为命中(例如 titles.emp_no=e.emp_no AND title='X')。
+            auto ctx = build_ctx(row);
+            if (s.where && !to_bool(eval(*s.where, ctx))) return true;
+            exists_found_ = true; return false;
+        }
+        return true;
+    };
     if (pk_probe_ok) {
         // 索引探测:只访问首列匹配的键(谓词仍逐行复核,保证与全扫语义一致)
-        tbl->for_each_by_pk_prefix(*pk_eq_lit, sqscn, [&](int64_t, const storage::Row& row) {
+        tbl->for_each_by_pk_prefix(*pk_eq_lit, sqscn, [&](int64_t id, const storage::Row& row) {
             for (auto* c : pushdown_conjuncts) {
                 auto ctx = build_ctx(row);
                 if (!to_bool(eval(*c, ctx))) return true;
             }
-            left_rows.push_back(row);
-            return true;
+            return scan_row(id, row);
         }, rtxn);
+    } else if (pk_range_hi) {
+        // 整数 PK 上界:沿 B+Tree 有序叶子链扫描 [INT64_MIN, hi],避免全表过滤
+        tbl->for_each_by_pk_range(
+            types::Value::make_int(std::numeric_limits<int64_t>::min()),
+            *pk_range_hi, pk_range_inclusive_hi, sqscn,
+            [&](int64_t id, const storage::Row& row) {
+                for (auto* c : pushdown_conjuncts) {
+                    auto ctx = build_ctx(row);
+                    if (!to_bool(eval(*c, ctx))) return true;
+                }
+                return scan_row(id, row);
+            }, rtxn);
     } else if (pushdown_conjuncts.empty()) {
-        tbl->for_each_visible(sqscn, [&](int64_t, const storage::Row& row) { left_rows.push_back(row); return true; }, rtxn);
+        tbl->for_each_visible(sqscn, scan_row, rtxn);
     } else {
         // 下推谓词预过滤:只把通过主表局部条件的行送入 JOIN
-        tbl->for_each_visible(sqscn, [&](int64_t, const storage::Row& row) {
+        tbl->for_each_visible(sqscn, [&](int64_t id, const storage::Row& row) {
             auto ctx = build_ctx(row);
             for (auto* c : pushdown_conjuncts)
                 if (!to_bool(eval(*c, ctx))) return true;   // 预过滤掉,继续扫描
-            left_rows.push_back(row);
-            return true;
+            return scan_row(id, row);
         }, rtxn);
+    }
+
+    // EXISTS 快速路径:只需判空,命中一行后跳过投影/排序直接返回单行
+    if (exists_probe_ && exists_found_) {
+        r.rows.push_back({ types::Value::make_int(1) });
+        r.affected_rows = 1;
+        return r;
     }
 
     bool fused_done = false;                      // 聚合下推已直接产出结果
@@ -2746,7 +2885,8 @@ ResultSet Executor::exec_select_body(const ast::SelectStmt& s, const ExecContext
                         auto& a = gp->accs[ci];
                         if (fc.kind == 1) { ++a.c; continue; }          // COUNT(*)
                         if (!fc.arg) continue;
-                        auto v = eval(*fc.arg, build_right_ctx(r));
+                        auto v = (fc.arg_off >= 0 && fc.arg_off < static_cast<int>(r.size()))
+                                 ? r[fc.arg_off] : eval(*fc.arg, build_right_ctx(r));
                         if (v.is_null()) continue;
                         if (fc.kind == 2) ++a.c;                       // COUNT(col)
                         else if (fc.kind == 3 || fc.kind == 4) {       // SUM / AVG
@@ -3538,6 +3678,22 @@ ResultSet Executor::exec_select_body(const ast::SelectStmt& s, const ExecContext
         }
     }
 
+    // DISTINCT 下推: ORDER BY 全部引用输出列时先去重再排序。
+    // 原实现先对 44 万行全排序再去重成 7 行; 下推后只对 7 行排序。
+    bool distinct_pre = s.distinct;
+    if (distinct_pre) {
+        for (auto& [oe, _] : s.order_by)
+            if (order_output_index(*oe) < 0) { distinct_pre = false; break; }
+    }
+    if (distinct_pre) {
+        std::vector<storage::Row> dedup;
+        std::unordered_set<std::string> seen;
+        seen.reserve(projected.size());
+        for (auto& row : projected)
+            if (seen.insert(row_dedup_key(row)).second) dedup.push_back(std::move(row));
+        projected = std::move(dedup);
+    }
+
     // ORDER BY:输出列位置/别名取投影值,其余表达式在原始行上求值
     if (!s.order_by.empty() && projected.size() > 1) {
         struct OTerm { int out_idx = -1; const ast::Expression* expr = nullptr; bool asc = true; };
@@ -3577,8 +3733,8 @@ ResultSet Executor::exec_select_body(const ast::SelectStmt& s, const ExecContext
         projected = std::move(sorted);
     }
 
-    // DISTINCT
-    if (s.distinct) {
+    // DISTINCT(ORDER BY 引用了非输出列时保持"排序后去重"的语义)
+    if (s.distinct && !distinct_pre) {
         std::vector<storage::Row> dedup;
         std::unordered_set<std::string> seen;
         seen.reserve(projected.size());

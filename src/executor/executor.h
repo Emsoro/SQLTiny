@@ -104,6 +104,10 @@ public:
     void bind_session(core::Session* s) { session_ = s; }
     core::Session* bound_session() const { return session_; }
 
+    /// EXISTS 快速路径:子查询只需判定"是否存在一行",命中保守判据时
+    /// 扫描到第一行即停并跳过投影/排序,避免每行完整 exec_select_body。
+    bool exists_subquery(const ast::Expression& e, const ExecContext& ctx);
+
     /// information_schema 虚拟表解析:TABLES / COLUMNS。
     /// 不是虚拟表返回 nullptr。每次调用都重新物化(数据很小)。
     std::unique_ptr<storage::Table> build_information_schema_table(
@@ -187,6 +191,8 @@ private:
     mutable uint16_t    eval_errno_ = 0;             // 表达式层错误码(默认 1064)
     mutable std::string eval_sql_state_ = "42000";   // 表达式层 SQLSTATE
     mutable int exec_depth_ = 0;
+    bool exists_probe_ = false;   // 当前 exec_select_body 只需判空
+    bool exists_found_ = false;   // 判空扫描是否已命中一行
 };
 
 } // namespace sqltiny::executor

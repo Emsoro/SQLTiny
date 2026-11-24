@@ -97,7 +97,7 @@ int main(int argc, char** argv) {
     const bool dump_to_stdout = dump_requested && dump_file == "-";
     FILE* info = dump_to_stdout ? stderr : stdout;
 
-    fmt::print(info, "SQLTiny v2.2.1 — MySQL wire protocol server\n");
+    fmt::print(info, "SQLTiny v2.2.2 — MySQL wire protocol server\n");
     fmt::print(info, "  port:     {}\n", cfg.port);
     fmt::print(info, "  user:     {}\n", cfg.user);
     fmt::print(info, "  password: {}\n", cfg.password.empty() ? "<any>" : "<set>");

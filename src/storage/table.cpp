@@ -205,6 +205,27 @@ void Table::for_each_by_pk_prefix(const types::Value& first_pk_value, uint64_t q
     });
 }
 
+void Table::for_each_by_pk_range(const types::Value& lo, types::Value hi,
+                                 bool inclusive_hi, uint64_t querySCN,
+                                 const RowCallback& cb, uint64_t readerTxn) const {
+    if (!pk_index_) return;
+    // 复合主键的 Key 含多组件,单组件上界 Key(hi) 会把 (hi, ...) 整组排除。
+    // 整数首列用 [lo, hi+1) 开区间覆盖整组;非整数仅用于单列 PK 调用方。
+    types::Value upper = hi;
+    if (inclusive_hi && hi.is_int() && hi.v_int < std::numeric_limits<int64_t>::max()) {
+        upper = types::Value::make_int(hi.v_int + 1);
+        inclusive_hi = false;
+    }
+    std::shared_lock<std::shared_mutex> lock(mu_);
+    pk_index_->range_scan(Key(lo), Key(upper), [&](const Key&, int64_t rid) {
+        auto vit = versions_.find(rid);
+        if (vit != versions_.end() && !row_visible(vit->second, querySCN, readerTxn)) return true;
+        auto it = row_map_.find(rid);
+        if (it == row_map_.end()) return true;
+        return cb(rid, it->second);
+    }, inclusive_hi);
+}
+
 std::vector<int64_t> Table::all_row_ids(uint64_t querySCN, uint64_t readerTxn) const {
     std::shared_lock<std::shared_mutex> lock(mu_);
     std::vector<int64_t> out;

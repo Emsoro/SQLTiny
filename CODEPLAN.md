@@ -7,7 +7,7 @@
 
 ---
 
-## 0. 当前状态(2026-11-21,v2.2.1)
+## 0. 当前状态(2026-11-24,v2.2.2)
 
 > 下文 M1–M5 为原始规划、M6 各节含设计稿伪代码,均保留供追溯。**落地状态以本节与各节 ✅ 标记为准;实际目录与运行方式见 `README.md`,架构图见 `architecture.svg`。**
 
@@ -37,6 +37,7 @@
 | **benchmark TOP 查询优化(v2.1.0)** | ✅ | 单表 GROUP BY 流式聚合、非相关标量子查询常量折叠、IN 候选集 hash 索引;rank1 10.3s→1.15s / rank2 8.17s→0.77s / rank20 0.67s→0.43s;SLT **1184 / PASS 1132 / GAP 52 / FAIL 0** |
 | **命令行导入 / dump 导出(v2.2.0)** | ✅ | `sqltiny_server --import FILE` 导入 SQL/mysqldump 脚本(注释、`DELIMITER`、`LOCK TABLES` 跳过、错误继续策略);`--dump FILE` 导出 MySQL 风格建库/建表/多行 INSERT(dump 库/表过滤、只结构/只数据、INSERT 批大小);`smoke_cli_io` 40/40 |
 | **ASan 构建 + 模糊测试支撑(v2.2.1)** | ✅ | 可选 `windows-asan` preset(`/fsanitize=address`,无需 Clang/LLVM)、ASan 运行时 DLL 自动部署、fmt STL 注解冲突规避;ASan 下 SLT 1184/PASS 1133/GAP 51/FAIL 0、协议 42/42、持久化 15/15;同级 `SQLTinySLT` 接入 Hypothesis 状态化 fuzz(100+ examples,0 崩溃/协议失步/oracle 失败) |
+| **benchmark TOP5 查询优化(v2.2.2,2026-11-24)** | ✅ | Release 同条件对比 v2.2.1:CASE 流式分组 7.02s→2.59s、EXISTS 首行即停 4.11s→4.12s(持平)、融合 JOIN 裸列直取 4.26s→3.63s、DISTINCT 提前去重 2.00s→0.81s、PK 上界范围扫描 1.62s→0.02s;复杂类总耗时 18.90s→10.92s(-42%);compare_employees **39/39 MATCH**、SLT **1184 / PASS 1132 / GAP 52 / FAIL 0** |
 | M6 P4 | ⬜ | 复制与更大测试覆盖;认证(caching_sha2_password / SSL)仍未做 |
 
 ### 本轮交付(v1.1.0 客户端兼容性)
@@ -391,13 +392,13 @@ employees 标准数据集(392 万行)实测:3 表 JOIN 求均薪 77s vs MySQL 6.
 | `test_sqlalchemy.py` | 33 PASS / 0 FAIL / 0 GAP(原 #5–#8 与 DESCRIBE/SHOW FULL TABLES 反射限制均已修复) |
 | **实测客户端** | DBX/dbExpress(Delphi)连接 + 打开表 + 浏览索引/列正常;类 Navicat 图形工具浏览表/索引/列正常;PyMySQL / mysql CLI 正常 |
 
-### 版本标识(v2.2.1)
+### 版本标识(v2.2.2)
 
 | 位置 | 内容 |
 |---|---|
-| `CMakeLists.txt` | `project(SQLTiny VERSION 2.2.1 LANGUAGES CXX)` |
-| `vcpkg.json` | `"version-string": "2.2.1"` |
-| `src/main.cpp` | 启动横幅 `SQLTiny v2.2.1 — MySQL wire protocol server` |
+| `CMakeLists.txt` | `project(SQLTiny VERSION 2.2.2 LANGUAGES CXX)` |
+| `vcpkg.json` | `"version-string": "2.2.2"` |
+| `src/main.cpp` | 启动横幅 `SQLTiny v2.2.2 — MySQL wire protocol server` |
 | `src/version.rc.in` | exe Windows 版本资源(经 configure_file 注入 CMake 版本),右键属性页显示产品名 / 版本 / 版权 |
 | `README.md` / `CODEPLAN.md` | 本版本变更清单与验证基线 |
 | 协议层 `@@version` / `VERSION()` | 仍为 `5.7.0-SQLTiny` —— MySQL 客户端兼容用伪装版本,**不是**产品版本,不随产品版本改动 |

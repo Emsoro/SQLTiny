@@ -1,6 +1,6 @@
 {
   "meta": {
-    "timestamp": "2026-11-16T22:14:27",
+    "timestamp": "2026-11-24T18:28:56",
     "kind": "employees(MySQL 3306 vs SQLTiny 3307)",
     "python": "3.11.9",
     "mysql": {
@@ -25,8 +25,8 @@
     "mismatch": 0,
     "st_err": 0,
     "other_err": 0,
-    "my_t": 7.0027,
-    "st_t": 21.4617
+    "my_t": 10.9339,
+    "st_t": 21.4856
   },
   "categories": {
     "基础": {
@@ -36,8 +36,8 @@
       "mismatch": 0,
       "st_err": 0,
       "other_err": 0,
-      "my_t": 3.3892,
-      "st_t": 6.3807
+      "my_t": 5.5556,
+      "st_t": 7.014
     },
     "嵌套": {
       "total": 10,
@@ -46,8 +46,8 @@
       "mismatch": 0,
       "st_err": 0,
       "other_err": 0,
-      "my_t": 0.7506,
-      "st_t": 4.2835
+      "my_t": 1.0809,
+      "st_t": 5.2831
     },
     "WITH": {
       "total": 4,
@@ -56,8 +56,8 @@
       "mismatch": 0,
       "st_err": 0,
       "other_err": 0,
-      "my_t": 0.4039,
-      "st_t": 1.2085
+      "my_t": 0.5389,
+      "st_t": 1.3569
     },
     "复杂": {
       "total": 11,
@@ -66,38 +66,18 @@
       "mismatch": 0,
       "st_err": 0,
       "other_err": 0,
-      "my_t": 2.459,
-      "st_t": 9.5889
+      "my_t": 3.7585,
+      "st_t": 7.8315
     }
   },
   "comparison": {
     "totals": {
-      "mysql_s": 7.0027,
-      "sqltiny_s": 21.4617,
-      "ratio": 3.06,
-      "delta_s": 14.4589
+      "mysql_s": 10.9339,
+      "sqltiny_s": 21.4856,
+      "ratio": 1.97,
+      "delta_s": 10.5517
     },
     "level1_categories": [
-      {
-        "category": "复杂",
-        "accuracy": {
-          "total": 11,
-          "match": 11,
-          "known_diff": 0,
-          "mismatch": 0,
-          "st_err": 0,
-          "other_err": 0
-        },
-        "mysql_total_s": 2.459,
-        "sqltiny_total_s": 9.5889,
-        "mysql_avg_ms": 223.55,
-        "sqltiny_avg_ms": 871.72,
-        "ratio": 3.9,
-        "delta_s": 7.1298,
-        "contribution_pct": 49.3,
-        "rank_by_delta": 1,
-        "rank_by_ratio": 2
-      },
       {
         "category": "嵌套",
         "accuracy": {
@@ -108,15 +88,35 @@
           "st_err": 0,
           "other_err": 0
         },
-        "mysql_total_s": 0.7506,
-        "sqltiny_total_s": 4.2835,
-        "mysql_avg_ms": 75.06,
-        "sqltiny_avg_ms": 428.35,
-        "ratio": 5.71,
-        "delta_s": 3.533,
-        "contribution_pct": 24.4,
-        "rank_by_delta": 2,
+        "mysql_total_s": 1.0809,
+        "sqltiny_total_s": 5.2831,
+        "mysql_avg_ms": 108.09,
+        "sqltiny_avg_ms": 528.31,
+        "ratio": 4.89,
+        "delta_s": 4.2023,
+        "contribution_pct": 39.8,
+        "rank_by_delta": 1,
         "rank_by_ratio": 1
+      },
+      {
+        "category": "复杂",
+        "accuracy": {
+          "total": 11,
+          "match": 11,
+          "known_diff": 0,
+          "mismatch": 0,
+          "st_err": 0,
+          "other_err": 0
+        },
+        "mysql_total_s": 3.7585,
+        "sqltiny_total_s": 7.8315,
+        "mysql_avg_ms": 341.68,
+        "sqltiny_avg_ms": 711.96,
+        "ratio": 2.08,
+        "delta_s": 4.073,
+        "contribution_pct": 38.6,
+        "rank_by_delta": 2,
+        "rank_by_ratio": 3
       },
       {
         "category": "基础",
@@ -128,13 +128,13 @@
           "st_err": 0,
           "other_err": 0
         },
-        "mysql_total_s": 3.3892,
-        "sqltiny_total_s": 6.3807,
-        "mysql_avg_ms": 242.09,
-        "sqltiny_avg_ms": 455.77,
-        "ratio": 1.88,
-        "delta_s": 2.9915,
-        "contribution_pct": 20.7,
+        "mysql_total_s": 5.5556,
+        "sqltiny_total_s": 7.014,
+        "mysql_avg_ms": 396.83,
+        "sqltiny_avg_ms": 501.0,
+        "ratio": 1.26,
+        "delta_s": 1.4583,
+        "contribution_pct": 13.8,
         "rank_by_delta": 3,
         "rank_by_ratio": 4
       },
@@ -148,35 +148,18 @@
           "st_err": 0,
           "other_err": 0
         },
-        "mysql_total_s": 0.4039,
-        "sqltiny_total_s": 1.2085,
-        "mysql_avg_ms": 100.97,
-        "sqltiny_avg_ms": 302.13,
-        "ratio": 2.99,
-        "delta_s": 0.8046,
-        "contribution_pct": 5.6,
+        "mysql_total_s": 0.5389,
+        "sqltiny_total_s": 1.3569,
+        "mysql_avg_ms": 134.72,
+        "sqltiny_avg_ms": 339.24,
+        "ratio": 2.52,
+        "delta_s": 0.8181,
+        "contribution_pct": 7.8,
         "rank_by_delta": 4,
-        "rank_by_ratio": 3
+        "rank_by_ratio": 2
       }
     ],
     "level2_queries": [
-      {
-        "category": "复杂",
-        "query": "SELECT CASE WHEN salary < 50000 THEN '1_low' WHEN salary < 90000 THEN '2_mid' ELSE '3_high' END AS band, COUNT(*) AS c FROM salaries GROUP BY band ORDER BY band",
-        "pattern": [
-          "AGG",
-          "GROUP_BY"
-        ],
-        "result": "MATCH",
-        "mysql_s": 0.666455,
-        "sqltiny_s": 3.551143,
-        "ratio": 5.33,
-        "delta_s": 2.8847,
-        "delta_pct_of_total": 20.0,
-        "rank_by_delta": 1,
-        "rank_by_ratio": 7,
-        "optimization_priority": 3.4
-      },
       {
         "category": "嵌套",
         "query": "SELECT COUNT(*) FROM employees e WHERE EXISTS (SELECT 1 FROM titles t WHERE t.emp_no=e.emp_no AND t.title='Senior Engineer')",
@@ -185,14 +168,14 @@
           "AGG"
         ],
         "result": "MATCH",
-        "mysql_s": 0.166322,
-        "sqltiny_s": 1.638282,
-        "ratio": 9.85,
-        "delta_s": 1.472,
-        "delta_pct_of_total": 10.2,
-        "rank_by_delta": 2,
+        "mysql_s": 0.233111,
+        "sqltiny_s": 2.086354,
+        "ratio": 8.95,
+        "delta_s": 1.8532,
+        "delta_pct_of_total": 17.6,
+        "rank_by_delta": 1,
         "rank_by_ratio": 2,
-        "optimization_priority": 2.0
+        "optimization_priority": 1.4
       },
       {
         "category": "复杂",
@@ -204,46 +187,31 @@
           "HAVING"
         ],
         "result": "MATCH",
-        "mysql_s": 1.06244,
-        "sqltiny_s": 2.216678,
-        "ratio": 2.09,
-        "delta_s": 1.1542,
-        "delta_pct_of_total": 8.0,
+        "mysql_s": 1.299169,
+        "sqltiny_s": 2.281095,
+        "ratio": 1.76,
+        "delta_s": 0.9819,
+        "delta_pct_of_total": 9.3,
+        "rank_by_delta": 2,
+        "rank_by_ratio": 12,
+        "optimization_priority": 6.0
+      },
+      {
+        "category": "基础",
+        "query": "SELECT COUNT(*) FROM employees e JOIN dept_emp de ON e.emp_no=de.emp_no JOIN departments d ON de.dept_no=d.dept_no WHERE d.dept_name='Development'",
+        "pattern": [
+          "JOIN",
+          "AGG"
+        ],
+        "result": "MATCH",
+        "mysql_s": 0.163826,
+        "sqltiny_s": 1.078703,
+        "ratio": 6.58,
+        "delta_s": 0.9149,
+        "delta_pct_of_total": 8.7,
         "rank_by_delta": 3,
-        "rank_by_ratio": 14,
-        "optimization_priority": 7.4
-      },
-      {
-        "category": "复杂",
-        "query": "SELECT DISTINCT title FROM titles ORDER BY title LIMIT 3 OFFSET 2",
-        "pattern": [
-          "DISTINCT"
-        ],
-        "result": "MATCH",
-        "mysql_s": 0.096553,
-        "sqltiny_s": 0.933371,
-        "ratio": 9.67,
-        "delta_s": 0.8368,
-        "delta_pct_of_total": 5.8,
-        "rank_by_delta": 4,
         "rank_by_ratio": 3,
-        "optimization_priority": 3.6
-      },
-      {
-        "category": "复杂",
-        "query": "SELECT emp_no, from_date, salary, ROW_NUMBER() OVER (PARTITION BY emp_no ORDER BY from_date DESC) AS rn FROM salaries WHERE emp_no <= 10010 ORDER BY emp_no, rn",
-        "pattern": [
-          "WINDOW"
-        ],
-        "result": "MATCH",
-        "mysql_s": 0.0,
-        "sqltiny_s": 0.801103,
-        "ratio": null,
-        "delta_s": 0.8011,
-        "delta_pct_of_total": 5.5,
-        "rank_by_delta": 5,
-        "rank_by_ratio": 39,
-        "optimization_priority": 18.6
+        "optimization_priority": 3.0
       },
       {
         "category": "WITH",
@@ -255,49 +223,48 @@
           "GROUP_BY"
         ],
         "result": "MATCH",
-        "mysql_s": 0.2995,
-        "sqltiny_s": 1.06852,
-        "ratio": 3.57,
-        "delta_s": 0.769,
-        "delta_pct_of_total": 5.3,
-        "rank_by_delta": 6,
-        "rank_by_ratio": 10,
-        "optimization_priority": 7.6
+        "mysql_s": 0.42663,
+        "sqltiny_s": 1.196955,
+        "ratio": 2.81,
+        "delta_s": 0.7703,
+        "delta_pct_of_total": 7.3,
+        "rank_by_delta": 4,
+        "rank_by_ratio": 9,
+        "optimization_priority": 6.0
       },
       {
-        "category": "基础",
-        "query": "SELECT COUNT(*) FROM employees e JOIN dept_emp de ON e.emp_no=de.emp_no JOIN departments d ON de.dept_no=d.dept_no WHERE d.dept_name='Development'",
+        "category": "复杂",
+        "query": "SELECT YEAR(hire_date) AS y, COUNT(*) AS c FROM employees GROUP BY y ORDER BY y",
         "pattern": [
-          "JOIN",
-          "AGG"
-        ],
-        "result": "MATCH",
-        "mysql_s": 0.099384,
-        "sqltiny_s": 0.79734,
-        "ratio": 8.02,
-        "delta_s": 0.698,
-        "delta_pct_of_total": 4.8,
-        "rank_by_delta": 7,
-        "rank_by_ratio": 4,
-        "optimization_priority": 5.8
-      },
-      {
-        "category": "基础",
-        "query": "SELECT d.dept_name, AVG(s.salary) FROM departments d JOIN dept_emp de ON d.dept_no=de.dept_no JOIN salaries s ON de.emp_no=s.emp_no GROUP BY d.dept_name ORDER BY d.dept_name",
-        "pattern": [
-          "JOIN",
           "AGG",
           "GROUP_BY"
         ],
         "result": "MATCH",
-        "mysql_s": 1.72149,
-        "sqltiny_s": 2.360297,
-        "ratio": 1.37,
-        "delta_s": 0.6388,
-        "delta_pct_of_total": 4.4,
-        "rank_by_delta": 8,
-        "rank_by_ratio": 21,
-        "optimization_priority": 13.2
+        "mysql_s": 0.142868,
+        "sqltiny_s": 0.823764,
+        "ratio": 5.77,
+        "delta_s": 0.6809,
+        "delta_pct_of_total": 6.5,
+        "rank_by_delta": 5,
+        "rank_by_ratio": 5,
+        "optimization_priority": 5.0
+      },
+      {
+        "category": "复杂",
+        "query": "SELECT CASE WHEN salary < 50000 THEN '1_low' WHEN salary < 90000 THEN '2_mid' ELSE '3_high' END AS band, COUNT(*) AS c FROM salaries GROUP BY band ORDER BY band",
+        "pattern": [
+          "AGG",
+          "GROUP_BY"
+        ],
+        "result": "MATCH",
+        "mysql_s": 0.901825,
+        "sqltiny_s": 1.531977,
+        "ratio": 1.7,
+        "delta_s": 0.6302,
+        "delta_pct_of_total": 6.0,
+        "rank_by_delta": 6,
+        "rank_by_ratio": 13,
+        "optimization_priority": 8.8
       },
       {
         "category": "基础",
@@ -308,115 +275,30 @@
           "GROUP_BY"
         ],
         "result": "MATCH",
-        "mysql_s": 0.509702,
-        "sqltiny_s": 1.074961,
-        "ratio": 2.11,
-        "delta_s": 0.5653,
-        "delta_pct_of_total": 3.9,
-        "rank_by_delta": 9,
-        "rank_by_ratio": 13,
-        "optimization_priority": 10.6
-      },
-      {
-        "category": "基础",
-        "query": "SELECT gender, COUNT(*) FROM employees GROUP BY gender ORDER BY gender",
-        "pattern": [
-          "AGG",
-          "GROUP_BY"
-        ],
-        "result": "MATCH",
-        "mysql_s": 0.06561,
-        "sqltiny_s": 0.467303,
-        "ratio": 7.12,
-        "delta_s": 0.4017,
-        "delta_pct_of_total": 2.8,
-        "rank_by_delta": 10,
-        "rank_by_ratio": 5,
-        "optimization_priority": 8.0
-      },
-      {
-        "category": "基础",
-        "query": "SELECT title, COUNT(*) FROM titles GROUP BY title ORDER BY title",
-        "pattern": [
-          "AGG",
-          "GROUP_BY"
-        ],
-        "result": "MATCH",
-        "mysql_s": 0.158464,
-        "sqltiny_s": 0.534311,
-        "ratio": 3.37,
-        "delta_s": 0.3758,
-        "delta_pct_of_total": 2.6,
-        "rank_by_delta": 11,
+        "mysql_s": 0.674665,
+        "sqltiny_s": 1.280181,
+        "ratio": 1.9,
+        "delta_s": 0.6055,
+        "delta_pct_of_total": 5.7,
+        "rank_by_delta": 7,
         "rank_by_ratio": 11,
-        "optimization_priority": 11.0
-      },
-      {
-        "category": "嵌套",
-        "query": "SELECT emp_no, first_name, last_name FROM employees WHERE emp_no IN (SELECT emp_no FROM dept_manager WHERE dept_no='d005') ORDER BY emp_no",
-        "pattern": [
-          "SUBQUERY"
-        ],
-        "result": "MATCH",
-        "mysql_s": 0.0,
-        "sqltiny_s": 0.366676,
-        "ratio": null,
-        "delta_s": 0.3667,
-        "delta_pct_of_total": 2.5,
-        "rank_by_delta": 12,
-        "rank_by_ratio": 32,
-        "optimization_priority": 20.0
-      },
-      {
-        "category": "嵌套",
-        "query": "SELECT COUNT(*) FROM employees WHERE emp_no IN (SELECT emp_no FROM dept_manager)",
-        "pattern": [
-          "SUBQUERY",
-          "AGG"
-        ],
-        "result": "MATCH",
-        "mysql_s": 0.0,
-        "sqltiny_s": 0.35892,
-        "ratio": null,
-        "delta_s": 0.3589,
-        "delta_pct_of_total": 2.5,
-        "rank_by_delta": 13,
-        "rank_by_ratio": 31,
-        "optimization_priority": 20.2
-      },
-      {
-        "category": "嵌套",
-        "query": "SELECT COUNT(*) FROM employees WHERE emp_no NOT IN (SELECT emp_no FROM dept_manager)",
-        "pattern": [
-          "SUBQUERY",
-          "AGG"
-        ],
-        "result": "MATCH",
-        "mysql_s": 0.032862,
-        "sqltiny_s": 0.387622,
-        "ratio": 11.8,
-        "delta_s": 0.3548,
-        "delta_pct_of_total": 2.5,
-        "rank_by_delta": 14,
-        "rank_by_ratio": 1,
-        "optimization_priority": 8.8
+        "optimization_priority": 8.6
       },
       {
         "category": "复杂",
-        "query": "SELECT YEAR(hire_date) AS y, COUNT(*) AS c FROM employees GROUP BY y ORDER BY y",
+        "query": "SELECT DISTINCT title FROM titles ORDER BY title LIMIT 3 OFFSET 2",
         "pattern": [
-          "AGG",
-          "GROUP_BY"
+          "DISTINCT"
         ],
         "result": "MATCH",
-        "mysql_s": 0.06662,
-        "sqltiny_s": 0.419076,
-        "ratio": 6.29,
-        "delta_s": 0.3525,
-        "delta_pct_of_total": 2.4,
-        "rank_by_delta": 15,
+        "mysql_s": 0.222731,
+        "sqltiny_s": 0.781845,
+        "ratio": 3.51,
+        "delta_s": 0.5591,
+        "delta_pct_of_total": 5.3,
+        "rank_by_delta": 8,
         "rank_by_ratio": 6,
-        "optimization_priority": 11.4
+        "optimization_priority": 7.2
       },
       {
         "category": "复杂",
@@ -427,14 +309,64 @@
           "HAVING"
         ],
         "result": "MATCH",
-        "mysql_s": 0.117822,
-        "sqltiny_s": 0.466778,
-        "ratio": 3.96,
-        "delta_s": 0.349,
-        "delta_pct_of_total": 2.4,
-        "rank_by_delta": 16,
-        "rank_by_ratio": 9,
-        "optimization_priority": 13.2
+        "mysql_s": 0.109699,
+        "sqltiny_s": 0.644516,
+        "ratio": 5.88,
+        "delta_s": 0.5348,
+        "delta_pct_of_total": 5.1,
+        "rank_by_delta": 9,
+        "rank_by_ratio": 4,
+        "optimization_priority": 7.0
+      },
+      {
+        "category": "嵌套",
+        "query": "SELECT COUNT(*) FROM employees WHERE emp_no NOT IN (SELECT emp_no FROM dept_manager)",
+        "pattern": [
+          "SUBQUERY",
+          "AGG"
+        ],
+        "result": "MATCH",
+        "mysql_s": 0.058606,
+        "sqltiny_s": 0.551813,
+        "ratio": 9.42,
+        "delta_s": 0.4932,
+        "delta_pct_of_total": 4.7,
+        "rank_by_delta": 10,
+        "rank_by_ratio": 1,
+        "optimization_priority": 6.4
+      },
+      {
+        "category": "嵌套",
+        "query": "SELECT COUNT(*) FROM employees WHERE emp_no IN (SELECT emp_no FROM dept_manager)",
+        "pattern": [
+          "SUBQUERY",
+          "AGG"
+        ],
+        "result": "MATCH",
+        "mysql_s": 0.0,
+        "sqltiny_s": 0.489712,
+        "ratio": null,
+        "delta_s": 0.4897,
+        "delta_pct_of_total": 4.6,
+        "rank_by_delta": 11,
+        "rank_by_ratio": 31,
+        "optimization_priority": 19.0
+      },
+      {
+        "category": "嵌套",
+        "query": "SELECT emp_no, first_name, last_name FROM employees WHERE emp_no IN (SELECT emp_no FROM dept_manager WHERE dept_no='d005') ORDER BY emp_no",
+        "pattern": [
+          "SUBQUERY"
+        ],
+        "result": "MATCH",
+        "mysql_s": 0.0,
+        "sqltiny_s": 0.439144,
+        "ratio": null,
+        "delta_s": 0.4391,
+        "delta_pct_of_total": 4.2,
+        "rank_by_delta": 12,
+        "rank_by_ratio": 32,
+        "optimization_priority": 20.0
       },
       {
         "category": "嵌套",
@@ -445,30 +377,13 @@
         ],
         "result": "MATCH",
         "mysql_s": 0.0,
-        "sqltiny_s": 0.317723,
+        "sqltiny_s": 0.411969,
         "ratio": null,
-        "delta_s": 0.3177,
-        "delta_pct_of_total": 2.2,
-        "rank_by_delta": 17,
+        "delta_s": 0.412,
+        "delta_pct_of_total": 3.9,
+        "rank_by_delta": 13,
         "rank_by_ratio": 34,
-        "optimization_priority": 23.8
-      },
-      {
-        "category": "嵌套",
-        "query": "SELECT COUNT(*) FROM salaries WHERE salary > (SELECT AVG(salary) FROM salaries)",
-        "pattern": [
-          "SUBQUERY",
-          "AGG"
-        ],
-        "result": "MATCH",
-        "mysql_s": 0.484125,
-        "sqltiny_s": 0.770033,
-        "ratio": 1.59,
-        "delta_s": 0.2859,
-        "delta_pct_of_total": 2.0,
-        "rank_by_delta": 18,
-        "rank_by_ratio": 19,
-        "optimization_priority": 18.4
+        "optimization_priority": 21.4
       },
       {
         "category": "复杂",
@@ -479,14 +394,14 @@
           "AGG"
         ],
         "result": "MATCH",
-        "mysql_s": 0.166308,
-        "sqltiny_s": 0.434741,
-        "ratio": 2.61,
-        "delta_s": 0.2684,
-        "delta_pct_of_total": 1.9,
-        "rank_by_delta": 19,
-        "rank_by_ratio": 12,
-        "optimization_priority": 16.2
+        "mysql_s": 0.179028,
+        "sqltiny_s": 0.556279,
+        "ratio": 3.11,
+        "delta_s": 0.3773,
+        "delta_pct_of_total": 3.6,
+        "rank_by_delta": 14,
+        "rank_by_ratio": 7,
+        "optimization_priority": 11.2
       },
       {
         "category": "复杂",
@@ -497,14 +412,49 @@
           "UNION"
         ],
         "result": "MATCH",
-        "mysql_s": 0.066458,
-        "sqltiny_s": 0.284602,
-        "ratio": 4.28,
-        "delta_s": 0.2181,
-        "delta_pct_of_total": 1.5,
-        "rank_by_delta": 20,
+        "mysql_s": 0.185981,
+        "sqltiny_s": 0.552395,
+        "ratio": 2.97,
+        "delta_s": 0.3664,
+        "delta_pct_of_total": 3.5,
+        "rank_by_delta": 15,
         "rank_by_ratio": 8,
-        "optimization_priority": 15.2
+        "optimization_priority": 12.2
+      },
+      {
+        "category": "嵌套",
+        "query": "SELECT COUNT(*) FROM salaries WHERE salary > (SELECT AVG(salary) FROM salaries)",
+        "pattern": [
+          "SUBQUERY",
+          "AGG"
+        ],
+        "result": "MATCH",
+        "mysql_s": 0.687797,
+        "sqltiny_s": 1.054084,
+        "ratio": 1.53,
+        "delta_s": 0.3663,
+        "delta_pct_of_total": 3.5,
+        "rank_by_delta": 16,
+        "rank_by_ratio": 15,
+        "optimization_priority": 15.6
+      },
+      {
+        "category": "基础",
+        "query": "SELECT d.dept_name, AVG(s.salary) FROM departments d JOIN dept_emp de ON d.dept_no=de.dept_no JOIN salaries s ON de.emp_no=s.emp_no GROUP BY d.dept_name ORDER BY d.dept_name",
+        "pattern": [
+          "JOIN",
+          "AGG",
+          "GROUP_BY"
+        ],
+        "result": "MATCH",
+        "mysql_s": 2.265383,
+        "sqltiny_s": 2.509561,
+        "ratio": 1.11,
+        "delta_s": 0.2442,
+        "delta_pct_of_total": 2.3,
+        "rank_by_delta": 17,
+        "rank_by_ratio": 20,
+        "optimization_priority": 18.2
       },
       {
         "category": "嵌套",
@@ -515,95 +465,13 @@
         ],
         "result": "MATCH",
         "mysql_s": 0.0,
-        "sqltiny_s": 0.200663,
+        "sqltiny_s": 0.161387,
         "ratio": null,
-        "delta_s": 0.2007,
-        "delta_pct_of_total": 1.4,
-        "rank_by_delta": 21,
+        "delta_s": 0.1614,
+        "delta_pct_of_total": 1.5,
+        "rank_by_delta": 18,
         "rank_by_ratio": 33,
-        "optimization_priority": 25.8
-      },
-      {
-        "category": "复杂",
-        "query": "SELECT COUNT(*) FROM salaries WHERE salary BETWEEN 60000 AND 70000",
-        "pattern": [
-          "AGG",
-          "BETWEEN"
-        ],
-        "result": "MATCH",
-        "mysql_s": 0.216381,
-        "sqltiny_s": 0.384308,
-        "ratio": 1.78,
-        "delta_s": 0.1679,
-        "delta_pct_of_total": 1.2,
-        "rank_by_delta": 22,
-        "rank_by_ratio": 17,
-        "optimization_priority": 20.0
-      },
-      {
-        "category": "基础",
-        "query": "SELECT COUNT(*) FROM salaries WHERE salary > 100000",
-        "pattern": [
-          "AGG"
-        ],
-        "result": "MATCH",
-        "mysql_s": 0.192028,
-        "sqltiny_s": 0.304203,
-        "ratio": 1.58,
-        "delta_s": 0.1122,
-        "delta_pct_of_total": 0.8,
-        "rank_by_delta": 23,
-        "rank_by_ratio": 20,
-        "optimization_priority": 21.8
-      },
-      {
-        "category": "复杂",
-        "query": "SELECT a.emp_no, a.dept_no AS d1, b.dept_no AS d2 FROM dept_emp a JOIN dept_emp b ON a.emp_no=b.emp_no AND a.dept_no < b.dept_no WHERE a.emp_no <= 10100 ORDER BY a.emp_no LIMIT 20",
-        "pattern": [
-          "JOIN"
-        ],
-        "result": "MATCH",
-        "mysql_s": 0.0,
-        "sqltiny_s": 0.097081,
-        "ratio": null,
-        "delta_s": 0.0971,
-        "delta_pct_of_total": 0.7,
-        "rank_by_delta": 24,
-        "rank_by_ratio": 38,
-        "optimization_priority": 29.6
-      },
-      {
-        "category": "嵌套",
-        "query": "SELECT e.emp_no, e.first_name, (SELECT MAX(s.salary) FROM salaries s WHERE s.emp_no=e.emp_no) AS max_sal FROM employees e WHERE e.emp_no <= 10010 ORDER BY e.emp_no",
-        "pattern": [
-          "SUBQUERY",
-          "AGG"
-        ],
-        "result": "MATCH",
-        "mysql_s": 0.0,
-        "sqltiny_s": 0.083444,
-        "ratio": null,
-        "delta_s": 0.0834,
-        "delta_pct_of_total": 0.6,
-        "rank_by_delta": 25,
-        "rank_by_ratio": 35,
-        "optimization_priority": 29.0
-      },
-      {
-        "category": "嵌套",
-        "query": "SELECT e.emp_no FROM employees e WHERE e.emp_no <= 10050 AND e.emp_no IN (SELECT de.emp_no FROM dept_emp de WHERE de.emp_no=e.emp_no AND de.dept_no='d005') ORDER BY e.emp_no",
-        "pattern": [
-          "SUBQUERY"
-        ],
-        "result": "MATCH",
-        "mysql_s": 0.0,
-        "sqltiny_s": 0.083425,
-        "ratio": null,
-        "delta_s": 0.0834,
-        "delta_pct_of_total": 0.6,
-        "rank_by_delta": 26,
-        "rank_by_ratio": 36,
-        "optimization_priority": 30.0
+        "optimization_priority": 24.0
       },
       {
         "category": "基础",
@@ -614,30 +482,30 @@
           "GROUP_BY"
         ],
         "result": "MATCH",
-        "mysql_s": 0.083,
-        "sqltiny_s": 0.163842,
-        "ratio": 1.97,
-        "delta_s": 0.0808,
+        "mysql_s": 0.205534,
+        "sqltiny_s": 0.270699,
+        "ratio": 1.32,
+        "delta_s": 0.0652,
         "delta_pct_of_total": 0.6,
-        "rank_by_delta": 27,
-        "rank_by_ratio": 16,
-        "optimization_priority": 22.6
+        "rank_by_delta": 19,
+        "rank_by_ratio": 17,
+        "optimization_priority": 18.2
       },
       {
         "category": "基础",
-        "query": "SELECT SUM(salary) FROM salaries",
+        "query": "SELECT COUNT(*) FROM salaries WHERE salary > 100000",
         "pattern": [
           "AGG"
         ],
         "result": "MATCH",
-        "mysql_s": 0.230099,
-        "sqltiny_s": 0.307061,
-        "ratio": 1.33,
-        "delta_s": 0.077,
-        "delta_pct_of_total": 0.5,
-        "rank_by_delta": 28,
-        "rank_by_ratio": 22,
-        "optimization_priority": 25.6
+        "mysql_s": 0.400768,
+        "sqltiny_s": 0.44407,
+        "ratio": 1.11,
+        "delta_s": 0.0433,
+        "delta_pct_of_total": 0.4,
+        "rank_by_delta": 20,
+        "rank_by_ratio": 19,
+        "optimization_priority": 19.6
       },
       {
         "category": "WITH",
@@ -650,14 +518,14 @@
           "GROUP_BY"
         ],
         "result": "MATCH",
-        "mysql_s": 0.032935,
-        "sqltiny_s": 0.066699,
-        "ratio": 2.03,
-        "delta_s": 0.0338,
-        "delta_pct_of_total": 0.2,
-        "rank_by_delta": 29,
-        "rank_by_ratio": 15,
-        "optimization_priority": 23.4
+        "mysql_s": 0.04533,
+        "sqltiny_s": 0.076669,
+        "ratio": 1.69,
+        "delta_s": 0.0313,
+        "delta_pct_of_total": 0.3,
+        "rank_by_delta": 21,
+        "rank_by_ratio": 14,
+        "optimization_priority": 18.2
       },
       {
         "category": "基础",
@@ -666,64 +534,14 @@
           "AGG"
         ],
         "result": "MATCH",
-        "mysql_s": 0.028942,
-        "sqltiny_s": 0.048357,
-        "ratio": 1.67,
-        "delta_s": 0.0194,
-        "delta_pct_of_total": 0.1,
-        "rank_by_delta": 30,
-        "rank_by_ratio": 18,
-        "optimization_priority": 25.2
-      },
-      {
-        "category": "基础",
-        "query": "SELECT COUNT(*) FROM employees",
-        "pattern": [
-          "AGG"
-        ],
-        "result": "MATCH",
-        "mysql_s": 0.0,
-        "sqltiny_s": 0.016466,
-        "ratio": null,
-        "delta_s": 0.0165,
-        "delta_pct_of_total": 0.1,
-        "rank_by_delta": 31,
-        "rank_by_ratio": 29,
-        "optimization_priority": 30.2
-      },
-      {
-        "category": "基础",
-        "query": "SELECT AVG(salary) FROM salaries",
-        "pattern": [
-          "AGG"
-        ],
-        "result": "MATCH",
-        "mysql_s": 0.253776,
-        "sqltiny_s": 0.270007,
-        "ratio": 1.06,
-        "delta_s": 0.0162,
-        "delta_pct_of_total": 0.1,
-        "rank_by_delta": 32,
-        "rank_by_ratio": 24,
-        "optimization_priority": 28.8
-      },
-      {
-        "category": "嵌套",
-        "query": "SELECT x.dept_no, x.c FROM (SELECT dept_no, COUNT(*) AS c FROM dept_emp GROUP BY dept_no) x ORDER BY x.dept_no",
-        "pattern": [
-          "SUBQUERY",
-          "AGG",
-          "GROUP_BY"
-        ],
-        "result": "MATCH",
-        "mysql_s": 0.067272,
-        "sqltiny_s": 0.076745,
-        "ratio": 1.14,
-        "delta_s": 0.0095,
-        "delta_pct_of_total": 0.1,
-        "rank_by_delta": 33,
-        "rank_by_ratio": 23,
-        "optimization_priority": 29.0
+        "mysql_s": 0.050256,
+        "sqltiny_s": 0.075936,
+        "ratio": 1.51,
+        "delta_s": 0.0257,
+        "delta_pct_of_total": 0.2,
+        "rank_by_delta": 22,
+        "rank_by_ratio": 16,
+        "optimization_priority": 19.6
       },
       {
         "category": "WITH",
@@ -736,37 +554,52 @@
           "GROUP_BY"
         ],
         "result": "MATCH",
-        "mysql_s": 0.07044,
-        "sqltiny_s": 0.072492,
-        "ratio": 1.03,
-        "delta_s": 0.0021,
-        "delta_pct_of_total": 0.0,
-        "rank_by_delta": 34,
-        "rank_by_ratio": 25,
-        "optimization_priority": 30.4
-      },
-      {
-        "category": "基础",
-        "query": "SELECT * FROM employees WHERE emp_no=10001",
-        "pattern": [
-          "SCAN"
-        ],
-        "result": "MATCH",
-        "mysql_s": 0.0,
-        "sqltiny_s": 0.0,
-        "ratio": null,
-        "delta_s": 0.0,
-        "delta_pct_of_total": 0.0,
-        "rank_by_delta": 35,
-        "rank_by_ratio": 30,
-        "optimization_priority": 33.0
+        "mysql_s": 0.066936,
+        "sqltiny_s": 0.083325,
+        "ratio": 1.24,
+        "delta_s": 0.0164,
+        "delta_pct_of_total": 0.2,
+        "rank_by_delta": 23,
+        "rank_by_ratio": 18,
+        "optimization_priority": 21.0
       },
       {
         "category": "复杂",
-        "query": "SELECT dept_no FROM departments WHERE dept_no <= 'd004' UNION SELECT dept_no FROM departments WHERE dept_no >= 'd006' ORDER BY dept_no",
+        "query": "SELECT emp_no, from_date, salary, ROW_NUMBER() OVER (PARTITION BY emp_no ORDER BY from_date DESC) AS rn FROM salaries WHERE emp_no <= 10010 ORDER BY emp_no, rn",
         "pattern": [
-          "SUBQUERY",
-          "UNION"
+          "WINDOW"
+        ],
+        "result": "MATCH",
+        "mysql_s": 0.0,
+        "sqltiny_s": 0.012766,
+        "ratio": null,
+        "delta_s": 0.0128,
+        "delta_pct_of_total": 0.1,
+        "rank_by_delta": 24,
+        "rank_by_ratio": 39,
+        "optimization_priority": 30.0
+      },
+      {
+        "category": "嵌套",
+        "query": "SELECT e.emp_no FROM employees e WHERE e.emp_no <= 10050 AND e.emp_no IN (SELECT de.emp_no FROM dept_emp de WHERE de.emp_no=e.emp_no AND de.dept_no='d005') ORDER BY e.emp_no",
+        "pattern": [
+          "SUBQUERY"
+        ],
+        "result": "MATCH",
+        "mysql_s": 0.001151,
+        "sqltiny_s": 0.002509,
+        "ratio": 2.18,
+        "delta_s": 0.0014,
+        "delta_pct_of_total": 0.0,
+        "rank_by_delta": 25,
+        "rank_by_ratio": 10,
+        "optimization_priority": 19.0
+      },
+      {
+        "category": "基础",
+        "query": "SELECT e.first_name, e.last_name, s.salary, s.from_date FROM employees e JOIN salaries s ON e.emp_no=s.emp_no WHERE e.emp_no=10001 ORDER BY s.from_date",
+        "pattern": [
+          "JOIN"
         ],
         "result": "MATCH",
         "mysql_s": 0.0,
@@ -774,9 +607,9 @@
         "ratio": null,
         "delta_s": 0.0,
         "delta_pct_of_total": 0.0,
-        "rank_by_delta": 36,
-        "rank_by_ratio": 37,
-        "optimization_priority": 36.4
+        "rank_by_delta": 26,
+        "rank_by_ratio": 30,
+        "optimization_priority": 27.6
       },
       {
         "category": "WITH",
@@ -788,30 +621,115 @@
           "UNION"
         ],
         "result": "MATCH",
-        "mysql_s": 0.001017,
-        "sqltiny_s": 0.000802,
-        "ratio": 0.79,
-        "delta_s": -0.0002,
+        "mysql_s": 0.0,
+        "sqltiny_s": 0.0,
+        "ratio": null,
+        "delta_s": 0.0,
         "delta_pct_of_total": 0.0,
-        "rank_by_delta": 37,
-        "rank_by_ratio": 27,
-        "optimization_priority": 33.0
+        "rank_by_delta": 27,
+        "rank_by_ratio": 36,
+        "optimization_priority": 30.6
+      },
+      {
+        "category": "复杂",
+        "query": "SELECT dept_no FROM departments WHERE dept_no <= 'd004' UNION SELECT dept_no FROM departments WHERE dept_no >= 'd006' ORDER BY dept_no",
+        "pattern": [
+          "SUBQUERY",
+          "UNION"
+        ],
+        "result": "MATCH",
+        "mysql_s": 0.001537,
+        "sqltiny_s": 0.0,
+        "ratio": 0.0,
+        "delta_s": -0.0015,
+        "delta_pct_of_total": 0.0,
+        "rank_by_delta": 28,
+        "rank_by_ratio": 37,
+        "optimization_priority": 31.6
       },
       {
         "category": "基础",
-        "query": "SELECT e.first_name, e.last_name, s.salary, s.from_date FROM employees e JOIN salaries s ON e.emp_no=s.emp_no WHERE e.emp_no=10001 ORDER BY s.from_date",
+        "query": "SELECT * FROM employees WHERE emp_no=10001",
+        "pattern": [
+          "SCAN"
+        ],
+        "result": "MATCH",
+        "mysql_s": 0.001733,
+        "sqltiny_s": 0.0,
+        "ratio": 0.0,
+        "delta_s": -0.0017,
+        "delta_pct_of_total": 0.0,
+        "rank_by_delta": 29,
+        "rank_by_ratio": 29,
+        "optimization_priority": 29.0
+      },
+      {
+        "category": "嵌套",
+        "query": "SELECT e.emp_no, e.first_name, (SELECT MAX(s.salary) FROM salaries s WHERE s.emp_no=e.emp_no) AS max_sal FROM employees e WHERE e.emp_no <= 10010 ORDER BY e.emp_no",
+        "pattern": [
+          "SUBQUERY",
+          "AGG"
+        ],
+        "result": "MATCH",
+        "mysql_s": 0.005299,
+        "sqltiny_s": 0.0,
+        "ratio": 0.0,
+        "delta_s": -0.0053,
+        "delta_pct_of_total": 0.0,
+        "rank_by_delta": 30,
+        "rank_by_ratio": 35,
+        "optimization_priority": 32.0
+      },
+      {
+        "category": "复杂",
+        "query": "SELECT a.emp_no, a.dept_no AS d1, b.dept_no AS d2 FROM dept_emp a JOIN dept_emp b ON a.emp_no=b.emp_no AND a.dept_no < b.dept_no WHERE a.emp_no <= 10100 ORDER BY a.emp_no LIMIT 20",
         "pattern": [
           "JOIN"
         ],
         "result": "MATCH",
-        "mysql_s": 0.002017,
-        "sqltiny_s": 0.001648,
-        "ratio": 0.82,
-        "delta_s": -0.0004,
+        "mysql_s": 0.007052,
+        "sqltiny_s": 0.0,
+        "ratio": 0.0,
+        "delta_s": -0.0071,
         "delta_pct_of_total": 0.0,
-        "rank_by_delta": 38,
-        "rank_by_ratio": 26,
-        "optimization_priority": 33.2
+        "rank_by_delta": 31,
+        "rank_by_ratio": 38,
+        "optimization_priority": 33.8
+      },
+      {
+        "category": "嵌套",
+        "query": "SELECT x.dept_no, x.c FROM (SELECT dept_no, COUNT(*) AS c FROM dept_emp GROUP BY dept_no) x ORDER BY x.dept_no",
+        "pattern": [
+          "SUBQUERY",
+          "AGG",
+          "GROUP_BY"
+        ],
+        "result": "MATCH",
+        "mysql_s": 0.094908,
+        "sqltiny_s": 0.086167,
+        "ratio": 0.91,
+        "delta_s": -0.0087,
+        "delta_pct_of_total": 0.0,
+        "rank_by_delta": 32,
+        "rank_by_ratio": 22,
+        "optimization_priority": 28.0
+      },
+      {
+        "category": "基础",
+        "query": "SELECT gender, COUNT(*) FROM employees GROUP BY gender ORDER BY gender",
+        "pattern": [
+          "AGG",
+          "GROUP_BY"
+        ],
+        "result": "MATCH",
+        "mysql_s": 0.102971,
+        "sqltiny_s": 0.093536,
+        "ratio": 0.91,
+        "delta_s": -0.0094,
+        "delta_pct_of_total": 0.0,
+        "rank_by_delta": 33,
+        "rank_by_ratio": 21,
+        "optimization_priority": 28.2
       },
       {
         "category": "基础",
@@ -820,47 +738,115 @@
           "AGG"
         ],
         "result": "MATCH",
-        "mysql_s": 0.044714,
-        "sqltiny_s": 0.034938,
-        "ratio": 0.78,
-        "delta_s": -0.0098,
+        "mysql_s": 0.079461,
+        "sqltiny_s": 0.050485,
+        "ratio": 0.64,
+        "delta_s": -0.029,
+        "delta_pct_of_total": 0.0,
+        "rank_by_delta": 34,
+        "rank_by_ratio": 26,
+        "optimization_priority": 30.8
+      },
+      {
+        "category": "复杂",
+        "query": "SELECT COUNT(*) FROM salaries WHERE salary BETWEEN 60000 AND 70000",
+        "pattern": [
+          "AGG",
+          "BETWEEN"
+        ],
+        "result": "MATCH",
+        "mysql_s": 0.708625,
+        "sqltiny_s": 0.646906,
+        "ratio": 0.91,
+        "delta_s": -0.0617,
+        "delta_pct_of_total": 0.0,
+        "rank_by_delta": 35,
+        "rank_by_ratio": 23,
+        "optimization_priority": 30.2
+      },
+      {
+        "category": "基础",
+        "query": "SELECT SUM(salary) FROM salaries",
+        "pattern": [
+          "AGG"
+        ],
+        "result": "MATCH",
+        "mysql_s": 0.643368,
+        "sqltiny_s": 0.562952,
+        "ratio": 0.88,
+        "delta_s": -0.0804,
+        "delta_pct_of_total": 0.0,
+        "rank_by_delta": 36,
+        "rank_by_ratio": 24,
+        "optimization_priority": 31.2
+      },
+      {
+        "category": "基础",
+        "query": "SELECT COUNT(*) FROM employees",
+        "pattern": [
+          "AGG"
+        ],
+        "result": "MATCH",
+        "mysql_s": 0.118478,
+        "sqltiny_s": 0.032919,
+        "ratio": 0.28,
+        "delta_s": -0.0856,
+        "delta_pct_of_total": 0.0,
+        "rank_by_delta": 37,
+        "rank_by_ratio": 28,
+        "optimization_priority": 33.4
+      },
+      {
+        "category": "基础",
+        "query": "SELECT title, COUNT(*) FROM titles GROUP BY title ORDER BY title",
+        "pattern": [
+          "AGG",
+          "GROUP_BY"
+        ],
+        "result": "MATCH",
+        "mysql_s": 0.230994,
+        "sqltiny_s": 0.137173,
+        "ratio": 0.59,
+        "delta_s": -0.0938,
+        "delta_pct_of_total": 0.0,
+        "rank_by_delta": 38,
+        "rank_by_ratio": 27,
+        "optimization_priority": 33.6
+      },
+      {
+        "category": "基础",
+        "query": "SELECT AVG(salary) FROM salaries",
+        "pattern": [
+          "AGG"
+        ],
+        "result": "MATCH",
+        "mysql_s": 0.618211,
+        "sqltiny_s": 0.477773,
+        "ratio": 0.77,
+        "delta_s": -0.1404,
         "delta_pct_of_total": 0.0,
         "rank_by_delta": 39,
-        "rank_by_ratio": 28,
-        "optimization_priority": 34.6
+        "rank_by_ratio": 25,
+        "optimization_priority": 33.4
       }
     ],
     "top_bottlenecks": [
       {
         "rank": 1,
-        "category": "复杂",
-        "pattern": [
-          "AGG",
-          "GROUP_BY"
-        ],
-        "query": "SELECT CASE WHEN salary < 50000 THEN '1_low' WHEN salary < 90000 THEN '2_mid' ELSE '3_high' END AS band, COUNT(*) AS c FROM salaries GROUP BY band ORDER BY band",
-        "mysql_s": 0.666455,
-        "sqltiny_s": 3.551143,
-        "ratio": 5.33,
-        "delta_s": 2.8847,
-        "delta_pct_of_total": 20.0
-      },
-      {
-        "rank": 2,
         "category": "嵌套",
         "pattern": [
           "SUBQUERY",
           "AGG"
         ],
         "query": "SELECT COUNT(*) FROM employees e WHERE EXISTS (SELECT 1 FROM titles t WHERE t.emp_no=e.emp_no AND t.title='Senior Engineer')",
-        "mysql_s": 0.166322,
-        "sqltiny_s": 1.638282,
-        "ratio": 9.85,
-        "delta_s": 1.472,
-        "delta_pct_of_total": 10.2
+        "mysql_s": 0.233111,
+        "sqltiny_s": 2.086354,
+        "ratio": 8.95,
+        "delta_s": 1.8532,
+        "delta_pct_of_total": 17.6
       },
       {
-        "rank": 3,
+        "rank": 2,
         "category": "复杂",
         "pattern": [
           "JOIN",
@@ -869,40 +855,28 @@
           "HAVING"
         ],
         "query": "SELECT d.dept_name, COUNT(*) AS c, ROUND(AVG(s.salary),2) AS avg_sal FROM departments d JOIN dept_emp de ON d.dept_no=de.dept_no JOIN salaries s ON de.emp_no=s.emp_no GROUP BY d.dept_name HAVING AVG(s.salary) > 60000 ORDER BY avg_sal DESC LIMIT 5",
-        "mysql_s": 1.06244,
-        "sqltiny_s": 2.216678,
-        "ratio": 2.09,
-        "delta_s": 1.1542,
-        "delta_pct_of_total": 8.0
+        "mysql_s": 1.299169,
+        "sqltiny_s": 2.281095,
+        "ratio": 1.76,
+        "delta_s": 0.9819,
+        "delta_pct_of_total": 9.3
+      },
+      {
+        "rank": 3,
+        "category": "基础",
+        "pattern": [
+          "JOIN",
+          "AGG"
+        ],
+        "query": "SELECT COUNT(*) FROM employees e JOIN dept_emp de ON e.emp_no=de.emp_no JOIN departments d ON de.dept_no=d.dept_no WHERE d.dept_name='Development'",
+        "mysql_s": 0.163826,
+        "sqltiny_s": 1.078703,
+        "ratio": 6.58,
+        "delta_s": 0.9149,
+        "delta_pct_of_total": 8.7
       },
       {
         "rank": 4,
-        "category": "复杂",
-        "pattern": [
-          "DISTINCT"
-        ],
-        "query": "SELECT DISTINCT title FROM titles ORDER BY title LIMIT 3 OFFSET 2",
-        "mysql_s": 0.096553,
-        "sqltiny_s": 0.933371,
-        "ratio": 9.67,
-        "delta_s": 0.8368,
-        "delta_pct_of_total": 5.8
-      },
-      {
-        "rank": 5,
-        "category": "复杂",
-        "pattern": [
-          "WINDOW"
-        ],
-        "query": "SELECT emp_no, from_date, salary, ROW_NUMBER() OVER (PARTITION BY emp_no ORDER BY from_date DESC) AS rn FROM salaries WHERE emp_no <= 10010 ORDER BY emp_no, rn",
-        "mysql_s": 0.0,
-        "sqltiny_s": 0.801103,
-        "ratio": null,
-        "delta_s": 0.8011,
-        "delta_pct_of_total": 5.5
-      },
-      {
-        "rank": 6,
         "category": "WITH",
         "pattern": [
           "SUBQUERY",
@@ -911,43 +885,42 @@
           "GROUP_BY"
         ],
         "query": "WITH hs AS (SELECT emp_no, MAX(salary) AS ms FROM salaries GROUP BY emp_no) SELECT COUNT(*) FROM hs WHERE ms > 140000",
-        "mysql_s": 0.2995,
-        "sqltiny_s": 1.06852,
-        "ratio": 3.57,
-        "delta_s": 0.769,
-        "delta_pct_of_total": 5.3
+        "mysql_s": 0.42663,
+        "sqltiny_s": 1.196955,
+        "ratio": 2.81,
+        "delta_s": 0.7703,
+        "delta_pct_of_total": 7.3
       },
       {
-        "rank": 7,
-        "category": "基础",
+        "rank": 5,
+        "category": "复杂",
         "pattern": [
-          "JOIN",
-          "AGG"
-        ],
-        "query": "SELECT COUNT(*) FROM employees e JOIN dept_emp de ON e.emp_no=de.emp_no JOIN departments d ON de.dept_no=d.dept_no WHERE d.dept_name='Development'",
-        "mysql_s": 0.099384,
-        "sqltiny_s": 0.79734,
-        "ratio": 8.02,
-        "delta_s": 0.698,
-        "delta_pct_of_total": 4.8
-      },
-      {
-        "rank": 8,
-        "category": "基础",
-        "pattern": [
-          "JOIN",
           "AGG",
           "GROUP_BY"
         ],
-        "query": "SELECT d.dept_name, AVG(s.salary) FROM departments d JOIN dept_emp de ON d.dept_no=de.dept_no JOIN salaries s ON de.emp_no=s.emp_no GROUP BY d.dept_name ORDER BY d.dept_name",
-        "mysql_s": 1.72149,
-        "sqltiny_s": 2.360297,
-        "ratio": 1.37,
-        "delta_s": 0.6388,
-        "delta_pct_of_total": 4.4
+        "query": "SELECT YEAR(hire_date) AS y, COUNT(*) AS c FROM employees GROUP BY y ORDER BY y",
+        "mysql_s": 0.142868,
+        "sqltiny_s": 0.823764,
+        "ratio": 5.77,
+        "delta_s": 0.6809,
+        "delta_pct_of_total": 6.5
       },
       {
-        "rank": 9,
+        "rank": 6,
+        "category": "复杂",
+        "pattern": [
+          "AGG",
+          "GROUP_BY"
+        ],
+        "query": "SELECT CASE WHEN salary < 50000 THEN '1_low' WHEN salary < 90000 THEN '2_mid' ELSE '3_high' END AS band, COUNT(*) AS c FROM salaries GROUP BY band ORDER BY band",
+        "mysql_s": 0.901825,
+        "sqltiny_s": 1.531977,
+        "ratio": 1.7,
+        "delta_s": 0.6302,
+        "delta_pct_of_total": 6.0
+      },
+      {
+        "rank": 7,
         "category": "基础",
         "pattern": [
           "JOIN",
@@ -955,25 +928,53 @@
           "GROUP_BY"
         ],
         "query": "SELECT t.title, COUNT(*) FROM employees e JOIN titles t ON e.emp_no=t.emp_no GROUP BY t.title ORDER BY t.title",
-        "mysql_s": 0.509702,
-        "sqltiny_s": 1.074961,
-        "ratio": 2.11,
-        "delta_s": 0.5653,
-        "delta_pct_of_total": 3.9
+        "mysql_s": 0.674665,
+        "sqltiny_s": 1.280181,
+        "ratio": 1.9,
+        "delta_s": 0.6055,
+        "delta_pct_of_total": 5.7
+      },
+      {
+        "rank": 8,
+        "category": "复杂",
+        "pattern": [
+          "DISTINCT"
+        ],
+        "query": "SELECT DISTINCT title FROM titles ORDER BY title LIMIT 3 OFFSET 2",
+        "mysql_s": 0.222731,
+        "sqltiny_s": 0.781845,
+        "ratio": 3.51,
+        "delta_s": 0.5591,
+        "delta_pct_of_total": 5.3
+      },
+      {
+        "rank": 9,
+        "category": "复杂",
+        "pattern": [
+          "AGG",
+          "GROUP_BY",
+          "HAVING"
+        ],
+        "query": "SELECT de.dept_no, COUNT(DISTINCT de.emp_no) AS c FROM dept_emp de GROUP BY de.dept_no HAVING COUNT(DISTINCT de.emp_no) > 20000 ORDER BY de.dept_no",
+        "mysql_s": 0.109699,
+        "sqltiny_s": 0.644516,
+        "ratio": 5.88,
+        "delta_s": 0.5348,
+        "delta_pct_of_total": 5.1
       },
       {
         "rank": 10,
-        "category": "基础",
+        "category": "嵌套",
         "pattern": [
-          "AGG",
-          "GROUP_BY"
+          "SUBQUERY",
+          "AGG"
         ],
-        "query": "SELECT gender, COUNT(*) FROM employees GROUP BY gender ORDER BY gender",
-        "mysql_s": 0.06561,
-        "sqltiny_s": 0.467303,
-        "ratio": 7.12,
-        "delta_s": 0.4017,
-        "delta_pct_of_total": 2.8
+        "query": "SELECT COUNT(*) FROM employees WHERE emp_no NOT IN (SELECT emp_no FROM dept_manager)",
+        "mysql_s": 0.058606,
+        "sqltiny_s": 0.551813,
+        "ratio": 9.42,
+        "delta_s": 0.4932,
+        "delta_pct_of_total": 4.7
       }
     ]
   },
@@ -988,13 +989,13 @@
       "result": "MATCH",
       "mysql_ok": true,
       "sqltiny_ok": true,
-      "mysql_s": 0.0,
-      "sqltiny_s": 0.016466,
+      "mysql_s": 0.118478,
+      "sqltiny_s": 0.032919,
       "mysql_err": null,
       "sqltiny_err": null,
-      "delta_s": 0.0165,
-      "ratio": null,
-      "delta_pct_of_total": 0.1
+      "delta_s": -0.0856,
+      "ratio": 0.28,
+      "delta_pct_of_total": 0.0
     },
     {
       "category": "基础",
@@ -1007,19 +1008,130 @@
       "result": "MATCH",
       "mysql_ok": true,
       "sqltiny_ok": true,
-      "mysql_s": 0.06561,
-      "sqltiny_s": 0.467303,
+      "mysql_s": 0.102971,
+      "sqltiny_s": 0.093536,
       "mysql_err": null,
       "sqltiny_err": null,
-      "delta_s": 0.4017,
-      "ratio": 7.12,
-      "delta_pct_of_total": 2.8
+      "delta_s": -0.0094,
+      "ratio": 0.91,
+      "delta_pct_of_total": 0.0
     },
     {
       "category": "基础",
       "query": "SELECT * FROM employees WHERE emp_no=10001",
       "pattern": [
         "SCAN"
+      ],
+      "expect_diff": false,
+      "result": "MATCH",
+      "mysql_ok": true,
+      "sqltiny_ok": true,
+      "mysql_s": 0.001733,
+      "sqltiny_s": 0.0,
+      "mysql_err": null,
+      "sqltiny_err": null,
+      "delta_s": -0.0017,
+      "ratio": 0.0,
+      "delta_pct_of_total": 0.0
+    },
+    {
+      "category": "基础",
+      "query": "SELECT COUNT(*) FROM employees WHERE first_name='Parto'",
+      "pattern": [
+        "AGG"
+      ],
+      "expect_diff": false,
+      "result": "MATCH",
+      "mysql_ok": true,
+      "sqltiny_ok": true,
+      "mysql_s": 0.050256,
+      "sqltiny_s": 0.075936,
+      "mysql_err": null,
+      "sqltiny_err": null,
+      "delta_s": 0.0257,
+      "ratio": 1.51,
+      "delta_pct_of_total": 0.2
+    },
+    {
+      "category": "基础",
+      "query": "SELECT dept_name, COUNT(*) AS c FROM departments d JOIN dept_emp de ON d.dept_no=de.dept_no GROUP BY d.dept_name ORDER BY d.dept_name",
+      "pattern": [
+        "JOIN",
+        "AGG",
+        "GROUP_BY"
+      ],
+      "expect_diff": false,
+      "result": "MATCH",
+      "mysql_ok": true,
+      "sqltiny_ok": true,
+      "mysql_s": 0.205534,
+      "sqltiny_s": 0.270699,
+      "mysql_err": null,
+      "sqltiny_err": null,
+      "delta_s": 0.0652,
+      "ratio": 1.32,
+      "delta_pct_of_total": 0.6
+    },
+    {
+      "category": "基础",
+      "query": "SELECT SUM(salary) FROM salaries",
+      "pattern": [
+        "AGG"
+      ],
+      "expect_diff": false,
+      "result": "MATCH",
+      "mysql_ok": true,
+      "sqltiny_ok": true,
+      "mysql_s": 0.643368,
+      "sqltiny_s": 0.562952,
+      "mysql_err": null,
+      "sqltiny_err": null,
+      "delta_s": -0.0804,
+      "ratio": 0.88,
+      "delta_pct_of_total": 0.0
+    },
+    {
+      "category": "基础",
+      "query": "SELECT COUNT(*) FROM salaries WHERE salary > 100000",
+      "pattern": [
+        "AGG"
+      ],
+      "expect_diff": false,
+      "result": "MATCH",
+      "mysql_ok": true,
+      "sqltiny_ok": true,
+      "mysql_s": 0.400768,
+      "sqltiny_s": 0.44407,
+      "mysql_err": null,
+      "sqltiny_err": null,
+      "delta_s": 0.0433,
+      "ratio": 1.11,
+      "delta_pct_of_total": 0.4
+    },
+    {
+      "category": "基础",
+      "query": "SELECT title, COUNT(*) FROM titles GROUP BY title ORDER BY title",
+      "pattern": [
+        "AGG",
+        "GROUP_BY"
+      ],
+      "expect_diff": false,
+      "result": "MATCH",
+      "mysql_ok": true,
+      "sqltiny_ok": true,
+      "mysql_s": 0.230994,
+      "sqltiny_s": 0.137173,
+      "mysql_err": null,
+      "sqltiny_err": null,
+      "delta_s": -0.0938,
+      "ratio": 0.59,
+      "delta_pct_of_total": 0.0
+    },
+    {
+      "category": "基础",
+      "query": "SELECT e.first_name, e.last_name, s.salary, s.from_date FROM employees e JOIN salaries s ON e.emp_no=s.emp_no WHERE e.emp_no=10001 ORDER BY s.from_date",
+      "pattern": [
+        "JOIN"
       ],
       "expect_diff": false,
       "result": "MATCH",
@@ -1035,117 +1147,6 @@
     },
     {
       "category": "基础",
-      "query": "SELECT COUNT(*) FROM employees WHERE first_name='Parto'",
-      "pattern": [
-        "AGG"
-      ],
-      "expect_diff": false,
-      "result": "MATCH",
-      "mysql_ok": true,
-      "sqltiny_ok": true,
-      "mysql_s": 0.028942,
-      "sqltiny_s": 0.048357,
-      "mysql_err": null,
-      "sqltiny_err": null,
-      "delta_s": 0.0194,
-      "ratio": 1.67,
-      "delta_pct_of_total": 0.1
-    },
-    {
-      "category": "基础",
-      "query": "SELECT dept_name, COUNT(*) AS c FROM departments d JOIN dept_emp de ON d.dept_no=de.dept_no GROUP BY d.dept_name ORDER BY d.dept_name",
-      "pattern": [
-        "JOIN",
-        "AGG",
-        "GROUP_BY"
-      ],
-      "expect_diff": false,
-      "result": "MATCH",
-      "mysql_ok": true,
-      "sqltiny_ok": true,
-      "mysql_s": 0.083,
-      "sqltiny_s": 0.163842,
-      "mysql_err": null,
-      "sqltiny_err": null,
-      "delta_s": 0.0808,
-      "ratio": 1.97,
-      "delta_pct_of_total": 0.6
-    },
-    {
-      "category": "基础",
-      "query": "SELECT SUM(salary) FROM salaries",
-      "pattern": [
-        "AGG"
-      ],
-      "expect_diff": false,
-      "result": "MATCH",
-      "mysql_ok": true,
-      "sqltiny_ok": true,
-      "mysql_s": 0.230099,
-      "sqltiny_s": 0.307061,
-      "mysql_err": null,
-      "sqltiny_err": null,
-      "delta_s": 0.077,
-      "ratio": 1.33,
-      "delta_pct_of_total": 0.5
-    },
-    {
-      "category": "基础",
-      "query": "SELECT COUNT(*) FROM salaries WHERE salary > 100000",
-      "pattern": [
-        "AGG"
-      ],
-      "expect_diff": false,
-      "result": "MATCH",
-      "mysql_ok": true,
-      "sqltiny_ok": true,
-      "mysql_s": 0.192028,
-      "sqltiny_s": 0.304203,
-      "mysql_err": null,
-      "sqltiny_err": null,
-      "delta_s": 0.1122,
-      "ratio": 1.58,
-      "delta_pct_of_total": 0.8
-    },
-    {
-      "category": "基础",
-      "query": "SELECT title, COUNT(*) FROM titles GROUP BY title ORDER BY title",
-      "pattern": [
-        "AGG",
-        "GROUP_BY"
-      ],
-      "expect_diff": false,
-      "result": "MATCH",
-      "mysql_ok": true,
-      "sqltiny_ok": true,
-      "mysql_s": 0.158464,
-      "sqltiny_s": 0.534311,
-      "mysql_err": null,
-      "sqltiny_err": null,
-      "delta_s": 0.3758,
-      "ratio": 3.37,
-      "delta_pct_of_total": 2.6
-    },
-    {
-      "category": "基础",
-      "query": "SELECT e.first_name, e.last_name, s.salary, s.from_date FROM employees e JOIN salaries s ON e.emp_no=s.emp_no WHERE e.emp_no=10001 ORDER BY s.from_date",
-      "pattern": [
-        "JOIN"
-      ],
-      "expect_diff": false,
-      "result": "MATCH",
-      "mysql_ok": true,
-      "sqltiny_ok": true,
-      "mysql_s": 0.002017,
-      "sqltiny_s": 0.001648,
-      "mysql_err": null,
-      "sqltiny_err": null,
-      "delta_s": -0.0004,
-      "ratio": 0.82,
-      "delta_pct_of_total": 0.0
-    },
-    {
-      "category": "基础",
       "query": "SELECT t.title, COUNT(*) FROM employees e JOIN titles t ON e.emp_no=t.emp_no GROUP BY t.title ORDER BY t.title",
       "pattern": [
         "JOIN",
@@ -1156,13 +1157,13 @@
       "result": "MATCH",
       "mysql_ok": true,
       "sqltiny_ok": true,
-      "mysql_s": 0.509702,
-      "sqltiny_s": 1.074961,
+      "mysql_s": 0.674665,
+      "sqltiny_s": 1.280181,
       "mysql_err": null,
       "sqltiny_err": null,
-      "delta_s": 0.5653,
-      "ratio": 2.11,
-      "delta_pct_of_total": 3.9
+      "delta_s": 0.6055,
+      "ratio": 1.9,
+      "delta_pct_of_total": 5.7
     },
     {
       "category": "基础",
@@ -1174,13 +1175,13 @@
       "result": "MATCH",
       "mysql_ok": true,
       "sqltiny_ok": true,
-      "mysql_s": 0.253776,
-      "sqltiny_s": 0.270007,
+      "mysql_s": 0.618211,
+      "sqltiny_s": 0.477773,
       "mysql_err": null,
       "sqltiny_err": null,
-      "delta_s": 0.0162,
-      "ratio": 1.06,
-      "delta_pct_of_total": 0.1
+      "delta_s": -0.1404,
+      "ratio": 0.77,
+      "delta_pct_of_total": 0.0
     },
     {
       "category": "基础",
@@ -1193,13 +1194,13 @@
       "result": "MATCH",
       "mysql_ok": true,
       "sqltiny_ok": true,
-      "mysql_s": 0.099384,
-      "sqltiny_s": 0.79734,
+      "mysql_s": 0.163826,
+      "sqltiny_s": 1.078703,
       "mysql_err": null,
       "sqltiny_err": null,
-      "delta_s": 0.698,
-      "ratio": 8.02,
-      "delta_pct_of_total": 4.8
+      "delta_s": 0.9149,
+      "ratio": 6.58,
+      "delta_pct_of_total": 8.7
     },
     {
       "category": "基础",
@@ -1213,13 +1214,13 @@
       "result": "MATCH",
       "mysql_ok": true,
       "sqltiny_ok": true,
-      "mysql_s": 1.72149,
-      "sqltiny_s": 2.360297,
+      "mysql_s": 2.265383,
+      "sqltiny_s": 2.509561,
       "mysql_err": null,
       "sqltiny_err": null,
-      "delta_s": 0.6388,
-      "ratio": 1.37,
-      "delta_pct_of_total": 4.4
+      "delta_s": 0.2442,
+      "ratio": 1.11,
+      "delta_pct_of_total": 2.3
     },
     {
       "category": "基础",
@@ -1231,12 +1232,12 @@
       "result": "MATCH",
       "mysql_ok": true,
       "sqltiny_ok": true,
-      "mysql_s": 0.044714,
-      "sqltiny_s": 0.034938,
+      "mysql_s": 0.079461,
+      "sqltiny_s": 0.050485,
       "mysql_err": null,
       "sqltiny_err": null,
-      "delta_s": -0.0098,
-      "ratio": 0.78,
+      "delta_s": -0.029,
+      "ratio": 0.64,
       "delta_pct_of_total": 0.0
     },
     {
@@ -1251,12 +1252,12 @@
       "mysql_ok": true,
       "sqltiny_ok": true,
       "mysql_s": 0.0,
-      "sqltiny_s": 0.35892,
+      "sqltiny_s": 0.489712,
       "mysql_err": null,
       "sqltiny_err": null,
-      "delta_s": 0.3589,
+      "delta_s": 0.4897,
       "ratio": null,
-      "delta_pct_of_total": 2.5
+      "delta_pct_of_total": 4.6
     },
     {
       "category": "嵌套",
@@ -1269,13 +1270,13 @@
       "result": "MATCH",
       "mysql_ok": true,
       "sqltiny_ok": true,
-      "mysql_s": 0.032862,
-      "sqltiny_s": 0.387622,
+      "mysql_s": 0.058606,
+      "sqltiny_s": 0.551813,
       "mysql_err": null,
       "sqltiny_err": null,
-      "delta_s": 0.3548,
-      "ratio": 11.8,
-      "delta_pct_of_total": 2.5
+      "delta_s": 0.4932,
+      "ratio": 9.42,
+      "delta_pct_of_total": 4.7
     },
     {
       "category": "嵌套",
@@ -1288,12 +1289,12 @@
       "mysql_ok": true,
       "sqltiny_ok": true,
       "mysql_s": 0.0,
-      "sqltiny_s": 0.366676,
+      "sqltiny_s": 0.439144,
       "mysql_err": null,
       "sqltiny_err": null,
-      "delta_s": 0.3667,
+      "delta_s": 0.4391,
       "ratio": null,
-      "delta_pct_of_total": 2.5
+      "delta_pct_of_total": 4.2
     },
     {
       "category": "嵌套",
@@ -1307,12 +1308,12 @@
       "mysql_ok": true,
       "sqltiny_ok": true,
       "mysql_s": 0.0,
-      "sqltiny_s": 0.200663,
+      "sqltiny_s": 0.161387,
       "mysql_err": null,
       "sqltiny_err": null,
-      "delta_s": 0.2007,
+      "delta_s": 0.1614,
       "ratio": null,
-      "delta_pct_of_total": 1.4
+      "delta_pct_of_total": 1.5
     },
     {
       "category": "嵌套",
@@ -1326,12 +1327,12 @@
       "mysql_ok": true,
       "sqltiny_ok": true,
       "mysql_s": 0.0,
-      "sqltiny_s": 0.317723,
+      "sqltiny_s": 0.411969,
       "mysql_err": null,
       "sqltiny_err": null,
-      "delta_s": 0.3177,
+      "delta_s": 0.412,
       "ratio": null,
-      "delta_pct_of_total": 2.2
+      "delta_pct_of_total": 3.9
     },
     {
       "category": "嵌套",
@@ -1344,13 +1345,13 @@
       "result": "MATCH",
       "mysql_ok": true,
       "sqltiny_ok": true,
-      "mysql_s": 0.484125,
-      "sqltiny_s": 0.770033,
+      "mysql_s": 0.687797,
+      "sqltiny_s": 1.054084,
       "mysql_err": null,
       "sqltiny_err": null,
-      "delta_s": 0.2859,
-      "ratio": 1.59,
-      "delta_pct_of_total": 2.0
+      "delta_s": 0.3663,
+      "ratio": 1.53,
+      "delta_pct_of_total": 3.5
     },
     {
       "category": "嵌套",
@@ -1363,13 +1364,13 @@
       "result": "MATCH",
       "mysql_ok": true,
       "sqltiny_ok": true,
-      "mysql_s": 0.0,
-      "sqltiny_s": 0.083444,
+      "mysql_s": 0.005299,
+      "sqltiny_s": 0.0,
       "mysql_err": null,
       "sqltiny_err": null,
-      "delta_s": 0.0834,
-      "ratio": null,
-      "delta_pct_of_total": 0.6
+      "delta_s": -0.0053,
+      "ratio": 0.0,
+      "delta_pct_of_total": 0.0
     },
     {
       "category": "嵌套",
@@ -1382,13 +1383,13 @@
       "result": "MATCH",
       "mysql_ok": true,
       "sqltiny_ok": true,
-      "mysql_s": 0.166322,
-      "sqltiny_s": 1.638282,
+      "mysql_s": 0.233111,
+      "sqltiny_s": 2.086354,
       "mysql_err": null,
       "sqltiny_err": null,
-      "delta_s": 1.472,
-      "ratio": 9.85,
-      "delta_pct_of_total": 10.2
+      "delta_s": 1.8532,
+      "ratio": 8.95,
+      "delta_pct_of_total": 17.6
     },
     {
       "category": "嵌套",
@@ -1400,13 +1401,13 @@
       "result": "MATCH",
       "mysql_ok": true,
       "sqltiny_ok": true,
-      "mysql_s": 0.0,
-      "sqltiny_s": 0.083425,
+      "mysql_s": 0.001151,
+      "sqltiny_s": 0.002509,
       "mysql_err": null,
       "sqltiny_err": null,
-      "delta_s": 0.0834,
-      "ratio": null,
-      "delta_pct_of_total": 0.6
+      "delta_s": 0.0014,
+      "ratio": 2.18,
+      "delta_pct_of_total": 0.0
     },
     {
       "category": "嵌套",
@@ -1420,13 +1421,13 @@
       "result": "MATCH",
       "mysql_ok": true,
       "sqltiny_ok": true,
-      "mysql_s": 0.067272,
-      "sqltiny_s": 0.076745,
+      "mysql_s": 0.094908,
+      "sqltiny_s": 0.086167,
       "mysql_err": null,
       "sqltiny_err": null,
-      "delta_s": 0.0095,
-      "ratio": 1.14,
-      "delta_pct_of_total": 0.1
+      "delta_s": -0.0087,
+      "ratio": 0.91,
+      "delta_pct_of_total": 0.0
     },
     {
       "category": "WITH",
@@ -1442,13 +1443,13 @@
       "result": "MATCH",
       "mysql_ok": true,
       "sqltiny_ok": true,
-      "mysql_s": 0.032935,
-      "sqltiny_s": 0.066699,
+      "mysql_s": 0.04533,
+      "sqltiny_s": 0.076669,
       "mysql_err": null,
       "sqltiny_err": null,
-      "delta_s": 0.0338,
-      "ratio": 2.03,
-      "delta_pct_of_total": 0.2
+      "delta_s": 0.0313,
+      "ratio": 1.69,
+      "delta_pct_of_total": 0.3
     },
     {
       "category": "WITH",
@@ -1463,13 +1464,13 @@
       "result": "MATCH",
       "mysql_ok": true,
       "sqltiny_ok": true,
-      "mysql_s": 0.2995,
-      "sqltiny_s": 1.06852,
+      "mysql_s": 0.42663,
+      "sqltiny_s": 1.196955,
       "mysql_err": null,
       "sqltiny_err": null,
-      "delta_s": 0.769,
-      "ratio": 3.57,
-      "delta_pct_of_total": 5.3
+      "delta_s": 0.7703,
+      "ratio": 2.81,
+      "delta_pct_of_total": 7.3
     },
     {
       "category": "WITH",
@@ -1485,13 +1486,13 @@
       "result": "MATCH",
       "mysql_ok": true,
       "sqltiny_ok": true,
-      "mysql_s": 0.07044,
-      "sqltiny_s": 0.072492,
+      "mysql_s": 0.066936,
+      "sqltiny_s": 0.083325,
       "mysql_err": null,
       "sqltiny_err": null,
-      "delta_s": 0.0021,
-      "ratio": 1.03,
-      "delta_pct_of_total": 0.0
+      "delta_s": 0.0164,
+      "ratio": 1.24,
+      "delta_pct_of_total": 0.2
     },
     {
       "category": "WITH",
@@ -1500,105 +1501,6 @@
         "SUBQUERY",
         "CTE",
         "AGG",
-        "UNION"
-      ],
-      "expect_diff": false,
-      "result": "MATCH",
-      "mysql_ok": true,
-      "sqltiny_ok": true,
-      "mysql_s": 0.001017,
-      "sqltiny_s": 0.000802,
-      "mysql_err": null,
-      "sqltiny_err": null,
-      "delta_s": -0.0002,
-      "ratio": 0.79,
-      "delta_pct_of_total": 0.0
-    },
-    {
-      "category": "复杂",
-      "query": "SELECT de.dept_no, COUNT(DISTINCT de.emp_no) AS c FROM dept_emp de GROUP BY de.dept_no HAVING COUNT(DISTINCT de.emp_no) > 20000 ORDER BY de.dept_no",
-      "pattern": [
-        "AGG",
-        "GROUP_BY",
-        "HAVING"
-      ],
-      "expect_diff": false,
-      "result": "MATCH",
-      "mysql_ok": true,
-      "sqltiny_ok": true,
-      "mysql_s": 0.117822,
-      "sqltiny_s": 0.466778,
-      "mysql_err": null,
-      "sqltiny_err": null,
-      "delta_s": 0.349,
-      "ratio": 3.96,
-      "delta_pct_of_total": 2.4
-    },
-    {
-      "category": "复杂",
-      "query": "SELECT CASE WHEN salary < 50000 THEN '1_low' WHEN salary < 90000 THEN '2_mid' ELSE '3_high' END AS band, COUNT(*) AS c FROM salaries GROUP BY band ORDER BY band",
-      "pattern": [
-        "AGG",
-        "GROUP_BY"
-      ],
-      "expect_diff": false,
-      "result": "MATCH",
-      "mysql_ok": true,
-      "sqltiny_ok": true,
-      "mysql_s": 0.666455,
-      "sqltiny_s": 3.551143,
-      "mysql_err": null,
-      "sqltiny_err": null,
-      "delta_s": 2.8847,
-      "ratio": 5.33,
-      "delta_pct_of_total": 20.0
-    },
-    {
-      "category": "复杂",
-      "query": "SELECT d.dept_name, COUNT(*) AS c, ROUND(AVG(s.salary),2) AS avg_sal FROM departments d JOIN dept_emp de ON d.dept_no=de.dept_no JOIN salaries s ON de.emp_no=s.emp_no GROUP BY d.dept_name HAVING AVG(s.salary) > 60000 ORDER BY avg_sal DESC LIMIT 5",
-      "pattern": [
-        "JOIN",
-        "AGG",
-        "GROUP_BY",
-        "HAVING"
-      ],
-      "expect_diff": false,
-      "result": "MATCH",
-      "mysql_ok": true,
-      "sqltiny_ok": true,
-      "mysql_s": 1.06244,
-      "sqltiny_s": 2.216678,
-      "mysql_err": null,
-      "sqltiny_err": null,
-      "delta_s": 1.1542,
-      "ratio": 2.09,
-      "delta_pct_of_total": 8.0
-    },
-    {
-      "category": "复杂",
-      "query": "SELECT COUNT(*) FROM employees e LEFT JOIN dept_manager dm ON e.emp_no=dm.emp_no WHERE dm.emp_no IS NULL",
-      "pattern": [
-        "JOIN",
-        "LEFT_JOIN",
-        "AGG"
-      ],
-      "expect_diff": false,
-      "result": "MATCH",
-      "mysql_ok": true,
-      "sqltiny_ok": true,
-      "mysql_s": 0.166308,
-      "sqltiny_s": 0.434741,
-      "mysql_err": null,
-      "sqltiny_err": null,
-      "delta_s": 0.2684,
-      "ratio": 2.61,
-      "delta_pct_of_total": 1.9
-    },
-    {
-      "category": "复杂",
-      "query": "SELECT dept_no FROM departments WHERE dept_no <= 'd004' UNION SELECT dept_no FROM departments WHERE dept_no >= 'd006' ORDER BY dept_no",
-      "pattern": [
-        "SUBQUERY",
         "UNION"
       ],
       "expect_diff": false,
@@ -1615,6 +1517,105 @@
     },
     {
       "category": "复杂",
+      "query": "SELECT de.dept_no, COUNT(DISTINCT de.emp_no) AS c FROM dept_emp de GROUP BY de.dept_no HAVING COUNT(DISTINCT de.emp_no) > 20000 ORDER BY de.dept_no",
+      "pattern": [
+        "AGG",
+        "GROUP_BY",
+        "HAVING"
+      ],
+      "expect_diff": false,
+      "result": "MATCH",
+      "mysql_ok": true,
+      "sqltiny_ok": true,
+      "mysql_s": 0.109699,
+      "sqltiny_s": 0.644516,
+      "mysql_err": null,
+      "sqltiny_err": null,
+      "delta_s": 0.5348,
+      "ratio": 5.88,
+      "delta_pct_of_total": 5.1
+    },
+    {
+      "category": "复杂",
+      "query": "SELECT CASE WHEN salary < 50000 THEN '1_low' WHEN salary < 90000 THEN '2_mid' ELSE '3_high' END AS band, COUNT(*) AS c FROM salaries GROUP BY band ORDER BY band",
+      "pattern": [
+        "AGG",
+        "GROUP_BY"
+      ],
+      "expect_diff": false,
+      "result": "MATCH",
+      "mysql_ok": true,
+      "sqltiny_ok": true,
+      "mysql_s": 0.901825,
+      "sqltiny_s": 1.531977,
+      "mysql_err": null,
+      "sqltiny_err": null,
+      "delta_s": 0.6302,
+      "ratio": 1.7,
+      "delta_pct_of_total": 6.0
+    },
+    {
+      "category": "复杂",
+      "query": "SELECT d.dept_name, COUNT(*) AS c, ROUND(AVG(s.salary),2) AS avg_sal FROM departments d JOIN dept_emp de ON d.dept_no=de.dept_no JOIN salaries s ON de.emp_no=s.emp_no GROUP BY d.dept_name HAVING AVG(s.salary) > 60000 ORDER BY avg_sal DESC LIMIT 5",
+      "pattern": [
+        "JOIN",
+        "AGG",
+        "GROUP_BY",
+        "HAVING"
+      ],
+      "expect_diff": false,
+      "result": "MATCH",
+      "mysql_ok": true,
+      "sqltiny_ok": true,
+      "mysql_s": 1.299169,
+      "sqltiny_s": 2.281095,
+      "mysql_err": null,
+      "sqltiny_err": null,
+      "delta_s": 0.9819,
+      "ratio": 1.76,
+      "delta_pct_of_total": 9.3
+    },
+    {
+      "category": "复杂",
+      "query": "SELECT COUNT(*) FROM employees e LEFT JOIN dept_manager dm ON e.emp_no=dm.emp_no WHERE dm.emp_no IS NULL",
+      "pattern": [
+        "JOIN",
+        "LEFT_JOIN",
+        "AGG"
+      ],
+      "expect_diff": false,
+      "result": "MATCH",
+      "mysql_ok": true,
+      "sqltiny_ok": true,
+      "mysql_s": 0.179028,
+      "sqltiny_s": 0.556279,
+      "mysql_err": null,
+      "sqltiny_err": null,
+      "delta_s": 0.3773,
+      "ratio": 3.11,
+      "delta_pct_of_total": 3.6
+    },
+    {
+      "category": "复杂",
+      "query": "SELECT dept_no FROM departments WHERE dept_no <= 'd004' UNION SELECT dept_no FROM departments WHERE dept_no >= 'd006' ORDER BY dept_no",
+      "pattern": [
+        "SUBQUERY",
+        "UNION"
+      ],
+      "expect_diff": false,
+      "result": "MATCH",
+      "mysql_ok": true,
+      "sqltiny_ok": true,
+      "mysql_s": 0.001537,
+      "sqltiny_s": 0.0,
+      "mysql_err": null,
+      "sqltiny_err": null,
+      "delta_s": -0.0015,
+      "ratio": 0.0,
+      "delta_pct_of_total": 0.0
+    },
+    {
+      "category": "复杂",
       "query": "SELECT 'employees' AS tbl, COUNT(*) AS c FROM employees UNION ALL SELECT 'salaries', COUNT(*) FROM salaries UNION ALL SELECT 'titles', COUNT(*) FROM titles",
       "pattern": [
         "SUBQUERY",
@@ -1625,13 +1626,13 @@
       "result": "MATCH",
       "mysql_ok": true,
       "sqltiny_ok": true,
-      "mysql_s": 0.066458,
-      "sqltiny_s": 0.284602,
+      "mysql_s": 0.185981,
+      "sqltiny_s": 0.552395,
       "mysql_err": null,
       "sqltiny_err": null,
-      "delta_s": 0.2181,
-      "ratio": 4.28,
-      "delta_pct_of_total": 1.5
+      "delta_s": 0.3664,
+      "ratio": 2.97,
+      "delta_pct_of_total": 3.5
     },
     {
       "category": "复杂",
@@ -1643,13 +1644,13 @@
       "result": "MATCH",
       "mysql_ok": true,
       "sqltiny_ok": true,
-      "mysql_s": 0.096553,
-      "sqltiny_s": 0.933371,
+      "mysql_s": 0.222731,
+      "sqltiny_s": 0.781845,
       "mysql_err": null,
       "sqltiny_err": null,
-      "delta_s": 0.8368,
-      "ratio": 9.67,
-      "delta_pct_of_total": 5.8
+      "delta_s": 0.5591,
+      "ratio": 3.51,
+      "delta_pct_of_total": 5.3
     },
     {
       "category": "复杂",
@@ -1661,13 +1662,13 @@
       "result": "MATCH",
       "mysql_ok": true,
       "sqltiny_ok": true,
-      "mysql_s": 0.0,
-      "sqltiny_s": 0.097081,
+      "mysql_s": 0.007052,
+      "sqltiny_s": 0.0,
       "mysql_err": null,
       "sqltiny_err": null,
-      "delta_s": 0.0971,
-      "ratio": null,
-      "delta_pct_of_total": 0.7
+      "delta_s": -0.0071,
+      "ratio": 0.0,
+      "delta_pct_of_total": 0.0
     },
     {
       "category": "复杂",
@@ -1680,13 +1681,13 @@
       "result": "MATCH",
       "mysql_ok": true,
       "sqltiny_ok": true,
-      "mysql_s": 0.216381,
-      "sqltiny_s": 0.384308,
+      "mysql_s": 0.708625,
+      "sqltiny_s": 0.646906,
       "mysql_err": null,
       "sqltiny_err": null,
-      "delta_s": 0.1679,
-      "ratio": 1.78,
-      "delta_pct_of_total": 1.2
+      "delta_s": -0.0617,
+      "ratio": 0.91,
+      "delta_pct_of_total": 0.0
     },
     {
       "category": "复杂",
@@ -1699,12 +1700,12 @@
       "mysql_ok": true,
       "sqltiny_ok": true,
       "mysql_s": 0.0,
-      "sqltiny_s": 0.801103,
+      "sqltiny_s": 0.012766,
       "mysql_err": null,
       "sqltiny_err": null,
-      "delta_s": 0.8011,
+      "delta_s": 0.0128,
       "ratio": null,
-      "delta_pct_of_total": 5.5
+      "delta_pct_of_total": 0.1
     },
     {
       "category": "复杂",
@@ -1717,13 +1718,13 @@
       "result": "MATCH",
       "mysql_ok": true,
       "sqltiny_ok": true,
-      "mysql_s": 0.06662,
-      "sqltiny_s": 0.419076,
+      "mysql_s": 0.142868,
+      "sqltiny_s": 0.823764,
       "mysql_err": null,
       "sqltiny_err": null,
-      "delta_s": 0.3525,
-      "ratio": 6.29,
-      "delta_pct_of_total": 2.4
+      "delta_s": 0.6809,
+      "ratio": 5.77,
+      "delta_pct_of_total": 6.5
     }
   ]
 }

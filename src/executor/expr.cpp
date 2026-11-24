@@ -331,9 +331,10 @@ types::Value Executor::eval(const ast::Expression& e, const ExecContext& ctx) co
 
         case ast::ExprKind::Subquery: {
             if (!ctx.exec || !e.subquery_stmt) return types::Value::make_null();
+            if (e.subquery_exists)
+                return types::Value::make_bool(ctx.exec->exists_subquery(e, ctx));
             const auto* rows = ctx.exec->subquery_rows(e, ctx);
             if (!rows) return types::Value::make_null();
-            if (e.subquery_exists) return types::Value::make_bool(!rows->empty());
             if (rows->empty() || (*rows)[0].empty()) return types::Value::make_null();
             // 标量子查询只能返回一行(MySQL 1242)
             if (rows->size() > 1) {

@@ -2,9 +2,9 @@
 
 > 🌐 语言: [English](./README.en.md) · **简体中文**
 
-> **当前版本 `v2.2.1`(2026-11-21)** · 版本号统一维护在 `CMakeLists.txt`(`project(SQLTiny VERSION 2.2.1)`)、`vcpkg.json`(`version-string`)与 `src/main.cpp` 启动横幅。协议层对外仍伪装为 `5.7.0-SQLTiny` 以兼容 MySQL 客户端,与产品版本无关。
+> **当前版本 `v2.2.2`(2026-11-24)** · 版本号统一维护在 `CMakeLists.txt`(`project(SQLTiny VERSION 2.2.2)`)、`vcpkg.json`(`version-string`)与 `src/main.cpp` 启动横幅。协议层对外仍伪装为 `5.7.0-SQLTiny` 以兼容 MySQL 客户端,与产品版本无关。
 >
-> v2.2.1 新增 **MSVC AddressSanitizer 构建**(`windows-asan` preset),并支撑同级测试集的 Hypothesis 状态化模糊测试,内容见下文「v2.2.1 更新内容」。
+> v2.2.2 交付 **benchmark TOP5 查询性能优化**(CASE 流式分组 / EXISTS 首行即停 / 融合 JOIN 裸列直取 / DISTINCT 提前去重 / PK 上界范围扫描),内容见下文「v2.2.2 更新内容」。
 
 **SQLTiny** 是用现代 C++20 从零重写的轻量级关系型数据库,核心设计灵感来自 [HSQLDB](http://hsqldb.org/),额外暴露 **MySQL Wire Protocol**——标准 MySQL 客户端(`mysql` CLI、Navicat、DBeaver、Connector/J、PyMySQL、DBX/dbExpress)直接连接。
 
@@ -40,6 +40,24 @@
 
 ---
 
+## 🆕 v2.2.2 更新内容（benchmark TOP5 查询优化，2026-11-24）
+
+按 `benchmark/employees_query_detail.csv` 的 `rank_by_delta` 前 5 项做定向优化，以 `tests/benchmark/compare_employees.py`（MySQL 3306 vs SQLTiny 3307，employees 300024 / salaries 2844047）做同条件对比：
+
+| 查询（CSV rank） | v2.2.1 Release | v2.2.2 Release | 手段 |
+|---|---:|---:|---|
+| #1 CASE WHEN + GROUP BY 别名 + ORDER BY | 7.02s | **2.59s** | 流式聚合支持 CASE 分组键与输出列排序，避免 284 万行物化 |
+| #2 EXISTS 相关子查询 COUNT | 4.11s | 4.12s | 首行即停 + 完整 WHERE 校验（防止误判），语义保持、耗时持平 |
+| #3 三表 JOIN + HAVING + ROUND(AVG) | 4.26s | **3.63s** | 融合 JOIN 聚合裸列参数直读行内偏移，免去每行 `ExecContext` + `eval` |
+| #4 DISTINCT + ORDER BY + LIMIT/OFFSET | 2.00s | **0.81s** | ORDER BY 仅引用输出列时先去重再排序（44 万行排序 → 7 行） |
+| #5 ROW_NUMBER + `emp_no<=10010` | 1.62s | **0.02s** | 整数 PK 上界下推 B+Tree 范围扫描（复合主键开区间处理，不漏 `(hi,...)` 整组） |
+
+复杂类总耗时 18.90s → 10.92s（-42%）。实现落在 `executor.cpp/h`、`expr.cpp`、`storage/table.cpp/h`（+215/-25 行）。
+
+**验证**：`compare_employees.py` 两版均 **39/39 MATCH，fails=0**；sqllogictest 逻辑套件 **1184 / PASS 1132 / GAP 52 / FAIL 0**（与基线一致）；`smoke_m6_hsqldb_matrix.cpp` 新增 TOP5 语义回归 **105 PASS / 0 FAIL**；Python 套件 5 脚本全通过。
+
+---
+
 ## 🆕 v2.2.1 更新内容（MSVC ASan 构建，2026-11-21）
 
 不改变 SQL 语义与协议行为;新增可选的 **MSVC AddressSanitizer** 构建,并支撑外部逻辑测试套件中的 Hypothesis 有状态模糊测试。
@@ -68,7 +86,6 @@
 - `--dump -` 写 stdout，引擎与导入导出日志改走 stderr，可直接重定向为纯 SQL 文件
 
 **验证**：新增 `smoke_cli_io` **40 checks / 0 FAIL**（注释、转义、`DELIMITER`、`LOCK TABLES` 跳过、dump→import 往返、默认值/自增游标）；手工验证 mysqldump 风格脚本导入、`--dump -` 重定向、`--import-then-serve` 服务启动。
-
 ---
 
 ## 🆕 v2.1.0 更新内容（benchmark TOP 查询优化，2026-11-16）

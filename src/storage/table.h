@@ -72,6 +72,12 @@ public:
     void for_each_by_pk_prefix(const types::Value& first_pk_value, uint64_t querySCN,
                                const RowCallback& cb, uint64_t readerTxn = 0) const;
 
+    /// 按主键首列范围遍历 [lo, hi] / [lo, hi),利用 PK B+Tree 有序叶子链。
+    /// 仅回调 MVCC 可见行;谓词仍由调用方逐行复核以保证语义。
+    void for_each_by_pk_range(const types::Value& lo, types::Value hi,
+                              bool inclusive_hi, uint64_t querySCN,
+                              const RowCallback& cb, uint64_t readerTxn = 0) const;
+
     /// 所有行 id (只返回物理存在且可见的)
     std::vector<int64_t> all_row_ids(uint64_t querySCN = 0,
                                      uint64_t readerTxn = 0) const;
