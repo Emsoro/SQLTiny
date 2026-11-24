@@ -139,6 +139,15 @@ private:
     // 子查询结果行(非相关则按 AST 节点缓存;相关则每次重算)
     const std::vector<storage::Row>* subquery_rows(const ast::Expression& e,
                                                    const ExecContext& ctx) const;
+    /// 相关 EXISTS 半连接快路径:t.pk = outer.col 时把内表按本地谓物化成候选键集合。
+    /// 命中返回 true,found 为本行是否有匹配;不满足安全判据返回 false 走原执行路径。
+    bool try_exists_semi_join(const ast::Expression& e, const ExecContext& ctx, bool& found);
+    struct ExistsSemiJoin {
+        bool built = false;
+        std::unordered_set<std::string> keys;
+    };
+    // 与 sq_cache_ 同口径:按 Subquery 表达式节点键控,顶层语句开始时清空
+    std::unordered_map<const void*, ExistsSemiJoin> exists_sj_cache_;
     // WITH 子句物化(含递归 CTE 不动点迭代),失败返回 ok=false
     ResultSet materialize_ctes(const std::vector<ast::SelectStmt::CteDef>& defs, CteMap& ctes);
     ResultSet exec_show_tables(bool full = false, const std::string& db_name = "",

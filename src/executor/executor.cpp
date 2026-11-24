@@ -190,7 +190,10 @@ std::string Executor::default_db() const {
 
 ResultSet Executor::execute(const ast::Statement& stmt) {
     // 顶层语句开始时清空子查询缓存(缓存键是 AST 节点指针,跨语句会失效)
-    if (exec_depth_ == 0) { sq_cache_.clear(); eval_error_.clear(); eval_errno_ = 0; }
+    if (exec_depth_ == 0) {
+        sq_cache_.clear(); exists_sj_cache_.clear();
+        eval_error_.clear(); eval_errno_ = 0;
+    }
     struct DepthGuard {
         int& d;
         explicit DepthGuard(int& x) : d(x) { ++d; }
@@ -1002,7 +1005,166 @@ ResultSet Executor::execute_sub(const ast::Statement& stmt, const ExecContext* o
     return r;
 }
 
+bool Executor::try_exists_semi_join(const ast::Expression& e, const ExecContext& ctx,
+                                     bool& found) {
+    found = false;
+    auto* sel = e.subquery_stmt ? e.subquery_stmt->select_.get() : nullptr;
+    if (!sel || !sel->where) return false;
+    // 外层列在调用方的当前行(ctx)上求值;ctx.outer 是更外一层,不应在此使用
+    // 只处理「单表 + 无 WITH/JOIN/GROUP/HAVING/DISTINCT/ORDER/LIMIT/集合」的最常见相关 EXISTS
+    if (sel->from_tables.size() != 1 || !sel->joins.empty() || !sel->ctes.empty() ||
+        !sel->group_by.empty() || sel->having || sel->distinct ||
+        !sel->order_by.empty() || sel->offset || sel->limit ||
+        sel->set_op != ast::SelectSetOp::None || sel->set_right ||
+        (!sel->from_derived.empty() && sel->from_derived[0])) return false;
+    const std::string& tname = sel->from_tables[0];
+    auto* tbl = catalog_.get_table(tname, default_db());
+    if (!tbl) return false;
+    // 存在逻辑删除历史时,索引扫描不再等价于全表扫描,回退原路径保 MVCC 语义
+    const auto& def = tbl->def();
+    if (tbl->has_dead_rows() || def.primary_key_cols.empty() ||
+        def.primary_key_cols[0].empty()) return false;
+    int pk_off = def.column_index(def.primary_key_cols[0][0]);
+    if (pk_off < 0) return false;
+
+    std::map<std::string, int> ci;
+    for (size_t i = 0; i < def.columns.size(); ++i) {
+        ci[def.columns[i].name] = static_cast<int>(i);
+        ci[tname + "." + def.columns[i].name] = static_cast<int>(i);
+    }
+    for (auto& [orig, alias] : sel->from_aliases) {
+        if (alias.empty() || _stricmp(orig.c_str(), tname.c_str()) != 0) continue;
+        for (size_t i = 0; i < def.columns.size(); ++i)
+            ci[alias + "." + def.columns[i].name] = static_cast<int>(i);
+    }
+    auto find_col = [&](const ast::Expression& x) -> int {
+        if (x.kind != ast::ExprKind::Column) return -1;
+        std::string key = x.table_name.empty() ? x.column_name
+                                               : (x.table_name + "." + x.column_name);
+        auto it = ci.find(key);
+        if (it != ci.end()) return it->second;
+        for (auto& [k, v] : ci) if (_stricmp(k.c_str(), key.c_str()) == 0) return v;
+        if (x.table_name.empty())
+            for (auto& [k, v] : ci) {
+                auto d = k.find('.');
+                if (d != std::string::npos &&
+                    _stricmp(k.c_str() + d + 1, x.column_name.c_str()) == 0) return v;
+            }
+        return -1;
+    };
+    std::vector<const ast::Expression*> conj;
+    std::function<void(const ast::Expression&)> split_and =
+        [&](const ast::Expression& x) {
+            if (x.kind == ast::ExprKind::BinaryOp && x.binop == ast::BinOp::And &&
+                x.lhs && x.rhs) { split_and(*x.lhs); split_and(*x.rhs); }
+            else conj.push_back(&x);
+        };
+    split_and(*sel->where);
+
+    // 找一个内表 PK 首列 = 外层列 的等值项;其余谓词必须只引用内表列
+    const ast::Expression* outer_col = nullptr;
+    std::vector<const ast::Expression*> local;
+    for (auto* c : conj) {
+        if (c->kind == ast::ExprKind::BinaryOp && c->binop == ast::BinOp::Eq &&
+            c->lhs && c->rhs) {
+            int l = find_col(*c->lhs), r = find_col(*c->rhs);
+            if (l == pk_off && r < 0 && c->rhs->kind == ast::ExprKind::Column &&
+                !c->rhs->table_name.empty()) {
+                outer_col = c->rhs.get(); continue;
+            }
+            if (r == pk_off && l < 0 && c->lhs->kind == ast::ExprKind::Column &&
+                !c->lhs->table_name.empty()) {
+                outer_col = c->lhs.get(); continue;
+            }
+        }
+        local.push_back(c);
+    }
+    if (!outer_col) return false;
+    std::function<bool(const ast::Expression&)> local_only =
+        [&](const ast::Expression& x) -> bool {
+        switch (x.kind) {
+            case ast::ExprKind::Literal: return true;
+            case ast::ExprKind::Column: return find_col(x) >= 0;
+            case ast::ExprKind::BinaryOp:
+                return x.lhs && x.rhs && local_only(*x.lhs) && local_only(*x.rhs);
+            case ast::ExprKind::UnaryOp: return x.operand && local_only(*x.operand);
+            case ast::ExprKind::FunctionCall:
+                for (auto& a : x.func_args) if (a && !local_only(*a)) return false;
+                return true;
+            default: return false;   // Subquery / Case / Placeholder / Star:保守回退
+        }
+    };
+    for (auto* c : local) if (!local_only(*c)) return false;
+
+    auto& sj = exists_sj_cache_[&e];
+    if (!sj.built) {
+        struct LocalPred {
+            int off = -1;
+            types::Value lit;
+            ast::BinOp op = ast::BinOp::Eq;
+            bool lit_left = false;
+            const ast::Expression* full = nullptr;
+        };
+        std::vector<LocalPred> lps;
+        for (auto* c : local) {
+            LocalPred p;
+            if (c->kind == ast::ExprKind::BinaryOp && c->lhs && c->rhs) {
+                bool cmp = c->binop == ast::BinOp::Eq || c->binop == ast::BinOp::Ne ||
+                           c->binop == ast::BinOp::Lt || c->binop == ast::BinOp::Gt ||
+                           c->binop == ast::BinOp::Le || c->binop == ast::BinOp::Ge;
+                int l = find_col(*c->lhs), r = find_col(*c->rhs);
+                if (cmp && l >= 0 && c->rhs->kind == ast::ExprKind::Literal)
+                    p = {l, c->rhs->literal, c->binop, false, nullptr};
+                else if (cmp && r >= 0 && c->lhs->kind == ast::ExprKind::Literal)
+                    p = {r, c->lhs->literal, c->binop, true, nullptr};
+            }
+            if (p.off < 0 && !p.full) p.full = c;
+            lps.push_back(std::move(p));
+        }
+        uint64_t scn = query_scn(session_), rtxn = reader_txn(session_);
+        tbl->for_each_visible(scn, [&](int64_t, const storage::Row& row) {
+            for (auto& p : lps) {
+                if (p.full) {
+                    ExecContext rc{catalog_, tname, {}, {}};
+                    rc.exec = this; rc.row_ref = &row; rc.idx_ref = &ci;
+                    if (!to_bool(eval(*p.full, rc))) return true;
+                    continue;
+                }
+                if (p.off >= static_cast<int>(row.size())) return true;
+                const types::Value& l = p.lit_left ? p.lit : row[p.off];
+                const types::Value& r = p.lit_left ? row[p.off] : p.lit;
+                if (l.is_null() || r.is_null()) return true;
+                int cv = compare_mysql(l, r);
+                bool ok = false;
+                switch (p.op) {
+                    case ast::BinOp::Eq: ok = cv == 0; break;
+                    case ast::BinOp::Ne: ok = cv != 0; break;
+                    case ast::BinOp::Lt: ok = cv < 0; break;
+                    case ast::BinOp::Gt: ok = cv > 0; break;
+                    case ast::BinOp::Le: ok = cv <= 0; break;
+                    case ast::BinOp::Ge: ok = cv >= 0; break;
+                    default: break;
+                }
+                if (!ok) return true;
+            }
+            auto k = in_hash_key(row[pk_off]);
+            if (!k.empty()) sj.keys.insert(std::move(k));
+            return true;
+        }, rtxn);
+        sj.built = true;
+    }
+    // 外层列在调用方的当前行上求值;标记相关性,避免外层把结果当常量缓存
+    types::Value ov = eval(*outer_col, ctx);
+    if (ctx.outer_used) *ctx.outer_used = true;
+    if (ov.is_null()) return true;              // NULL 不可能等于内表主键
+    std::string k = in_hash_key(ov);
+    found = !k.empty() && sj.keys.find(k) != sj.keys.end();
+    return true;
+}
+
 bool Executor::exists_subquery(const ast::Expression& e, const ExecContext& ctx) {
+    bool semi_found = false;
+    if (try_exists_semi_join(e, ctx, semi_found)) return semi_found;
     if (!e.subquery_stmt || !e.subquery_stmt->select_) return false;
     const auto& sel = *e.subquery_stmt->select_;
     // 保守判据:无连接/聚合/分组/排序/去重/分页/集合运算的简单查询才走首行即停;
@@ -1138,7 +1300,7 @@ ResultSet Executor::materialize_ctes(const std::vector<ast::SelectStmt::CteDef>&
             work->insert(row); return true;
         });
         for (int iter = 0; iter < 10000; ++iter) {
-            sq_cache_.clear();   // CTE 内容逐轮变化,子查询缓存必须失效
+            sq_cache_.clear(); exists_sj_cache_.clear();   // CTE 内容逐轮变化,子查询缓存必须失效
             CteMap iter_ctes = ctes;
             iter_ctes[key] = work;   // 递归项只看到上一轮结果
             ResultSet delta = exec_select(*rec, nullptr, nullptr, &iter_ctes);
@@ -2013,6 +2175,78 @@ ResultSet Executor::exec_select_body(const ast::SelectStmt& s, const ExecContext
             };
         return rec(e);
     };
+    // ---- 小维度表 WHERE 谓词反传:在早前 JOIN 的右表探测处提前剪枝 ----
+    // 典型场景: e JOIN de ON e.emp_no=de.emp_no JOIN departments d ON de.dept_no=d.dept_no
+    //           WHERE d.dept_name='Development'
+    // 原计划按书写顺序: 扫 e 探测 de 得到 33 万行,再逐行探测 9 行的 d 并过滤 dept_name。
+    // 这里把 d 按本地谓词先滤成 1 行,取其 join 键(d005),反传到等值列 de.dept_no,
+    // 在 de 的探测回调里提前跳过,中间行 33 万 → 8.5 万。仅 INNER 等值 JOIN 且
+    // 小表无逻辑删除历史时启用;最终 after_where 仍完整复核,语义不变。
+    std::vector<std::unordered_map<int, std::unordered_set<std::string>>> injected_right_keys;
+    if (s.joins.size() >= 2 && s.where) {
+        injected_right_keys.resize(s.joins.size());
+        std::vector<const ast::Expression*> wconj;
+        std::function<void(const ast::Expression&)> split_w =
+            [&](const ast::Expression& x) {
+                if (x.kind == ast::ExprKind::BinaryOp && x.binop == ast::BinOp::And &&
+                    x.lhs && x.rhs) { split_w(*x.lhs); split_w(*x.rhs); }
+                else wconj.push_back(&x);
+            };
+        split_w(*s.where);
+        uint64_t dscn = query_scn(session_), drtxn = reader_txn(session_);
+        for (size_t j = 1; j < s.joins.size(); ++j) {
+            const auto& p = join_plans[j];
+            if (p.kind != ast::JoinKind::Inner || !p.pure_equi || !p.equi.valid) continue;
+            auto* jt = resolve_table(s.joins[j].table_name);
+            if (!jt || jt->has_dead_rows() || jt->row_count() > 4096) continue;
+            const auto& slot = slots[j + 1];
+            int lo = slot.col_offset, hi = lo + static_cast<int>(slot.def->columns.size());
+            std::vector<const ast::Expression*> local;
+            for (auto* c : wconj) if (cols_in_range(*c, lo, hi)) local.push_back(c);
+            if (local.empty()) continue;
+            std::map<std::string, int> rci;
+            for (int i = 0; i < slot.def->columns.size(); ++i) {
+                const auto& bn = slot.def->columns[i].name;
+                rci[bn] = i; rci[slot.real_name + "." + bn] = i;
+                if (!slot.alias.empty()) rci[slot.alias + "." + bn] = i;
+            }
+            std::unordered_set<std::string> keys;
+            jt->for_each_visible(dscn, [&](int64_t, const storage::Row& r) {
+                ExecContext rc{catalog_, s.joins[j].table_name, {}, {}};
+                rc.exec = this; rc.outer = outer; rc.outer_used = outer_used; rc.ctes = ctes;
+                rc.row_ref = &r; rc.idx_ref = &rci;
+                for (auto* c : local) if (!to_bool(eval(*c, rc))) return true;
+                int kc = p.equi.right_col;   // extract_equi 返回的是右表内局部下标
+                if (kc >= 0 && kc < static_cast<int>(r.size())) {
+                    auto k = in_hash_key(r[kc]);
+                    if (!k.empty()) keys.insert(std::move(k));
+                }
+                return true;
+            }, drtxn);
+            // 左等价列若落在更早一个 INNER JOIN 的右表范围内,就在那里按 key 过滤
+            int lc = p.equi.left_col;
+            for (size_t k = 0; k < j; ++k) {
+                const auto& kslot = slots[k + 1];
+                int klo = kslot.col_offset;
+                int khi = klo + static_cast<int>(kslot.def->columns.size());
+                if (lc >= klo && lc < khi && join_plans[k].kind == ast::JoinKind::Inner &&
+                    join_plans[k].equi.valid) {
+                    injected_right_keys[k][lc - klo] = keys;
+                    break;
+                }
+            }
+        }
+    }
+    auto pass_injected = [&](size_t ji, const storage::Row& r) -> bool {
+        if (ji >= injected_right_keys.size()) return true;
+        for (auto& [off, keys] : injected_right_keys[ji]) {
+            if (off < 0 || off >= static_cast<int>(r.size())) return false;
+            auto k = in_hash_key(r[off]);
+            if (k.empty() || keys.find(k) == keys.end()) return false;
+        }
+        return true;
+    };
+
     std::vector<const ast::Expression*> fused_left_preds, fused_right_preds;  // WHERE 按表侧拆分
     // P3: 允许 HAVING(聚合下推后在产出结果上过滤)、允许标量函数包裹聚合(ROUND(AVG(x),2))
     if (has_agg && !s.distinct && !s.joins.empty()) {
@@ -2530,8 +2764,25 @@ ResultSet Executor::exec_select_body(const ast::SelectStmt& s, const ExecContext
                         !s.having && !s.distinct && stream_order_ok &&
                         !s.offset && !s.limit && !pk_probe_ok;
     if (stream_group) {
-        // GROUP BY:简单列引用走裸列偏移;CASE 表达式(含 SELECT 别名解析后的同指针)
-        // 走逐行 eval 生成分组键 —— salaries 的 CASE band 分组不再物化 284 万行
+        // GROUP BY:简单列引用走裸列偏移;CASE / 确定性标量函数(如 YEAR(hire_date))
+        // 走逐行 eval 生成分组键 —— 避免 30 万行整行物化后再按表达式分桶。
+        // 标量函数只放开日期抽取白名单,且参数必须是列/字面量,防止 NOW/RAND 等
+        // 非确定性表达式改变分组语义。
+        auto scalar_group_key = [&](const ast::Expression& x) -> bool {
+            if (contains_agg(x)) return false;
+            if (x.kind == ast::ExprKind::Case) return true;
+            if (x.kind != ast::ExprKind::FunctionCall || x.is_window || x.func_distinct)
+                return false;
+            static const std::unordered_set<std::string> kDateFns = {
+                "year", "month", "day", "hour", "minute", "second",
+                "quarter", "week", "dayofweek", "dayofyear", "last_day", "date"
+            };
+            if (!kDateFns.count(ci_lower(x.func_name))) return false;
+            for (auto& a : x.func_args)
+                if (a && a->kind != ast::ExprKind::Column &&
+                    a->kind != ast::ExprKind::Literal) return false;
+            return true;
+        };
         std::vector<int> gkey_off;
         std::vector<const ast::Expression*> gkey_expr;
         for (auto* ge : group_exprs) {
@@ -2544,7 +2795,7 @@ ResultSet Executor::exec_select_body(const ast::SelectStmt& s, const ExecContext
                     stream_group = false; break;
                 }
                 gkey_off.push_back(it->second);
-            } else if (ge->kind == ast::ExprKind::Case && !contains_agg(*ge)) {
+            } else if (scalar_group_key(*ge)) {
                 gkey_off.push_back(-1);
             } else { stream_group = false; break; }
             gkey_expr.push_back(ge);
@@ -2836,7 +3087,8 @@ ResultSet Executor::exec_select_body(const ast::SelectStmt& s, const ExecContext
             std::unordered_map<std::string, std::vector<size_t>> fr_buckets;
             if (!plan.idx_probe) {
                 jtbl->for_each_visible(sqscn, [&](int64_t, const storage::Row& row) {
-                    fr_right.push_back(row); return true;
+                    if (pass_injected(ji, row)) fr_right.push_back(row);
+                    return true;
                 }, rtxn);
                 for (size_t ri = 0; ri < fr_right.size(); ++ri) {
                     if (rcol < 0 || rcol >= static_cast<int>(fr_right[ri].size())) continue;
@@ -2917,6 +3169,7 @@ ResultSet Executor::exec_select_body(const ast::SelectStmt& s, const ExecContext
                 if (plan.idx_probe) {
                     jtbl->for_each_by_pk_prefix(keyv, sqscn,
                         [&](int64_t, const storage::Row& r) {
+                            if (!pass_injected(ji, r)) return true;
                             if (rcol < 0 || rcol >= static_cast<int>(r.size())) return true;
                             if (!keyv.sql_equals(r[rcol])) return true;
                             if (!pass_right_preds(r)) return true;     // 索引已过滤的键不受影响
@@ -2996,7 +3249,10 @@ ResultSet Executor::exec_select_body(const ast::SelectStmt& s, const ExecContext
         std::vector<storage::Row> right_rows;
         std::unordered_map<std::string, std::vector<size_t>> buckets;
         if (!plan.idx_probe) {
-            jtbl->for_each_visible(sqscn, [&](int64_t, const storage::Row& row) { right_rows.push_back(row); return true; }, rtxn);
+            jtbl->for_each_visible(sqscn, [&](int64_t, const storage::Row& row) {
+                if (pass_injected(ji, row)) right_rows.push_back(row);
+                return true;
+            }, rtxn);
             if (plan.hash_join) {
                 for (size_t ri = 0; ri < right_rows.size(); ++ri) {
                     if (plan.equi.right_col < 0 ||
@@ -3032,6 +3288,7 @@ ResultSet Executor::exec_select_body(const ast::SelectStmt& s, const ExecContext
                 if (!keyv.is_null()) {
                     jtbl->for_each_by_pk_prefix(keyv, sqscn,
                         [&](int64_t, const storage::Row& r) {
+                            if (!pass_injected(ji, r)) return true;
                             if (plan.equi.right_col < 0 ||
                                 plan.equi.right_col >= static_cast<int>(r.size()) ||
                                 !keyv.sql_equals(r[plan.equi.right_col])) return true;
