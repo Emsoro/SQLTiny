@@ -1,6 +1,6 @@
 {
   "name": "sqltiny",
-  "version-string": "2.2.2",
+  "version-string": "2.2.3",
   "dependencies": [
     "fmt"
   ]

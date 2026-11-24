@@ -2,9 +2,9 @@
 
 > 🌐 语言: [English](./README.en.md) · **简体中文**
 
-> **当前版本 `v2.2.2`(2026-11-24)** · 版本号统一维护在 `CMakeLists.txt`(`project(SQLTiny VERSION 2.2.2)`)、`vcpkg.json`(`version-string`)与 `src/main.cpp` 启动横幅。协议层对外仍伪装为 `5.7.0-SQLTiny` 以兼容 MySQL 客户端,与产品版本无关。
+> **当前版本 `v2.2.3`(2026-11-25)** · 版本号统一维护在 `CMakeLists.txt`(`project(SQLTiny VERSION 2.2.3)`)、`vcpkg.json`(`version-string`)与 `src/main.cpp` 启动横幅。协议层对外仍伪装为 `5.7.0-SQLTiny` 以兼容 MySQL 客户端,与产品版本无关。
 >
-> v2.2.2 交付 **benchmark TOP5 查询性能优化**(CASE 流式分组 / EXISTS 首行即停 / 融合 JOIN 裸列直取 / DISTINCT 提前去重 / PK 上界范围扫描),内容见下文「v2.2.2 更新内容」。
+> v2.2.3 交付 **employees benchmark 两轮定向优化**：TOP3（`optimization_priority` 前三项）与其后的 `rank_by_delta` 第 3/4/6 项，内容见下文「v2.2.3 更新内容」。
 
 **SQLTiny** 是用现代 C++20 从零重写的轻量级关系型数据库,核心设计灵感来自 [HSQLDB](http://hsqldb.org/),额外暴露 **MySQL Wire Protocol**——标准 MySQL 客户端(`mysql` CLI、Navicat、DBeaver、Connector/J、PyMySQL、DBX/dbExpress)直接连接。
 
@@ -37,6 +37,36 @@
 > 🔒 **锁分层**: Catalog.mu_(DDL) → Table.mu_ shared_lock(SELECT 多读者并行) / unique_lock(DML 独占) → RowLockMap(行级冲突检测) → TransactionManager.writeLock_(提交边界) → WalManager.mu_(WAL 文件读写)
 >
 > 🧊 **MVCC**: SELECT 完全不加锁,`for_each_visible(querySCN, readerTxn)` 按 `createSCN/deleteSCN` 与 `pendingTxn` 过滤;未提交行只对所属事务可见,commit 才 `finalize_commit` 对外发布
+
+---
+
+## 🆕 v2.2.3 更新内容（employees benchmark 两轮定向优化，2026-11-25）
+
+按 `benchmark/employees_query_detail.csv` 分两轮定向优化，Release 构建、MySQL 3306 vs SQLTiny 3307（`tests/benchmark/compare_employees.py`，employees 300024 / salaries 2844047）同条件对比。
+
+**第一轮：`optimization_priority` 前三项**
+
+| 项 | 源 CSV | 优化前 → 后 | 手段 |
+|---|---:|---:|---|
+| #1 `EXISTS` 相关子查询 `COUNT(*)` | 1.4 | 2.086s → **0.702s**（8.95x → 4.68x） | 相关 EXISTS 半连接物化：内表 PK = 外层列时一次扫描建候选键集合，每行只做哈希判定 |
+| #2 三表 JOIN + `WHERE d.dept_name='Development'` | 3.0 | 1.079s → **0.435s**（6.58x → 4.37x） | 小维度表 WHERE 过滤键反传：先滤 departments 得 `dept_no=d005`，在 dept_emp 探测处提前剪枝（中间行 33 万 → 8.5 万） |
+| #3 `YEAR(hire_date)` 分组 `COUNT` | 5.0 | 0.824s → **0.442s**（5.77x → 3.94x） | 流式分组支持 `YEAR/MONTH/DAY` 等确定性日期函数分组键（白名单 + 列/字面量参数），避免整行物化 |
+
+两轮合计：39 条查询总差距 **10.55s → 5.56s（-47%）**，总倍数 1.97x → 1.62x。
+
+**第二轮：`rank_by_delta` 第 3/4/6 项**（同机交错 A/B，上一版 vs 本版 Release）
+
+| 项 | 加速 | 手段 |
+|---|---:|---|
+| #3 `EXISTS` 半连接 | **1.05–1.13x** | 整数主键改 `int64_t` 集合，外层列预解析为裸列下标，省逐行 `to_string` + map 查找 |
+| #4 `DISTINCT title + ORDER BY + LIMIT` | **1.05–1.08x** | 投影阶段即时去重（只保留唯一值 Row），单字符串列用 `string_view` 键 |
+| #6 `COUNT(DISTINCT de.emp_no) + GROUP BY + HAVING` | **1.36–2.28x** | 分组列 / DISTINCT 参数预解析为行内偏移，整数走 `int64_t` 集合；GROUP BY 分桶免去逐行 `build_ctx + eval` |
+
+其余 10 条守卫查询 0.97–1.05x，无回退。`WITH hs` 曾出现 0.47x 抖动，重跑 0.95–1.00x，确认为机器负载噪声。
+
+实现落在 `src/executor/executor.cpp/.h`（两轮合计 +352/-27 行）；benchmark 产物已更新到 `benchmark/employees_*`。
+
+**验证**：两轮 `compare_employees.py` 均 **39/39 MATCH，fails=0**；CTest Release **13/13**；SQLTinySLT **1184 / PASS 1133 / GAP 51 / FAIL 0**、协议 **42/42**、持久化 **15/15**、fuzz PASS。
 
 ---
 
@@ -597,6 +627,8 @@ SQL 语法:`SET SESSION TRANSACTION ISOLATION LEVEL <级别>`(会话默认)、`S
 | **聚合下推增强 (v2.0.9)** | ✅ | 标量函数包裹聚合(ROUND(AVG))与 HAVING 下推;3 表 JOIN+聚合+HAVING 查询 18.7s→~5s;SLT **PASS 1132 / GAP 52 / FAIL 0** |
 | **benchmark TOP 查询优化 (v2.1.0)** | ✅ | 单表 GROUP BY 流式聚合、非相关标量子查询常量折叠、IN 候选集 hash 索引;rank1 10.3s→1.15s / rank2 8.17s→0.77s / rank20 0.67s→0.43s;SLT **PASS 1132 / GAP 52 / FAIL 0** |
 | **命令行导入 / dump 导出 (v2.2.0)** | ✅ | `--import` 导入 SQL/mysqldump 脚本(注释、`DELIMITER`、`LOCK TABLES` 跳过、错误继续策略);`--dump` 导出 MySQL 风格建库/建表/多行 INSERT(库表过滤、只结构/只数据、批大小);`smoke_cli_io` 40/40 |
+| **benchmark TOP5 查询优化 (v2.2.2)** | ✅ | CASE 流式分组 / EXISTS 首行即停 / 融合 JOIN 裸列直取 / DISTINCT 提前去重 / PK 上界范围扫描;复杂类总耗时 18.90s→10.92s(-42%) |
+| **benchmark 两轮定向优化 (v2.2.3)** | ✅ | EXISTS 半连接物化 + 整数键、小维度表过滤键反传、日期函数流式分组、DISTINCT 投影期去重、COUNT(DISTINCT) 裸列偏移;39 条总差距 10.55s→5.56s(-47%),39/39 MATCH |
 | **后续** | 📋 | 等待队列/死锁检测 → 存储过程 · caching_sha2_password / SSL · 复制 |
 
 ---
@@ -669,10 +701,10 @@ FROM users u INNER JOIN orders o ON o.user_id = u.id;
 | 产物 | 类型 | 说明 |
 |---|---|---|
 | `build/Debug/sqltiny.lib` | 静态库 | 引擎核心,嵌入式进程内调用 |
-| `build/Debug/sqltiny_server.exe` | 可执行 | MySQL 协议 TCP 服务器(v2.2.1) |
+| `build/Debug/sqltiny_server.exe` | 可执行 | MySQL 协议 TCP 服务器(v2.2.3) |
 | `build/Release/sqltiny_server.exe` | 可执行(发布版) | 同上,Release 版约 **0.9 MB** 单文件(静态 CRT + fmt 静态链接,无 dll 依赖,可直接拷贝部署);Debug 版约 4.8 MB |
 
-**`sqltiny_server.exe` 文件信息(v2.2.1)**:
+**`sqltiny_server.exe` 文件信息(v2.2.3)**:
 
 | 属性 | 值 |
 |---|---|

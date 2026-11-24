@@ -1,40 +1,40 @@
 ﻿rank_by_delta,category,pattern,result,mysql_s,sqltiny_s,ratio,delta_s,delta_pct_of_total,rank_by_ratio,optimization_priority,query
-1,复杂,"['JOIN', 'AGG', 'GROUP_BY', 'HAVING']",MATCH,1.467145,2.201664,1.5,0.7345,13.2,17,7.4,"SELECT d.dept_name, COUNT(*) AS c, ROUND(AVG(s.salary),2) AS avg_sal FROM departments d JOIN dept_emp de ON d.dept_no=de.dept_no JOIN salaries s ON de.emp_no=s.emp_no GROUP BY d.dept_name HAVING AVG(s.salary) > 60000 ORDER BY avg_sal DESC LIMIT 5"
-2,WITH,"['SUBQUERY', 'CTE', 'AGG', 'GROUP_BY']",MATCH,0.294121,0.846194,2.88,0.5521,9.9,7,4.0,"WITH hs AS (SELECT emp_no, MAX(salary) AS ms FROM salaries GROUP BY emp_no) SELECT COUNT(*) FROM hs WHERE ms > 140000"
-3,嵌套,"['SUBQUERY', 'AGG']",MATCH,0.150015,0.701663,4.68,0.5516,9.9,4,3.4,SELECT COUNT(*) FROM employees e WHERE EXISTS (SELECT 1 FROM titles t WHERE t.emp_no=e.emp_no AND t.title='Senior Engineer')
-4,复杂,['DISTINCT'],MATCH,0.116631,0.643809,5.52,0.5272,9.5,2,3.2,SELECT DISTINCT title FROM titles ORDER BY title LIMIT 3 OFFSET 2
-5,复杂,"['AGG', 'GROUP_BY']",MATCH,0.640502,1.10043,1.72,0.4599,8.3,10,7.0,"SELECT CASE WHEN salary < 50000 THEN '1_low' WHEN salary < 90000 THEN '2_mid' ELSE '3_high' END AS band, COUNT(*) AS c FROM salaries GROUP BY band ORDER BY band"
-6,复杂,"['AGG', 'GROUP_BY', 'HAVING']",MATCH,0.08281,0.450796,5.44,0.368,6.6,3,4.8,"SELECT de.dept_no, COUNT(DISTINCT de.emp_no) AS c FROM dept_emp de GROUP BY de.dept_no HAVING COUNT(DISTINCT de.emp_no) > 20000 ORDER BY de.dept_no"
-7,基础,"['JOIN', 'AGG']",MATCH,0.099642,0.435233,4.37,0.3356,6.0,5,6.2,SELECT COUNT(*) FROM employees e JOIN dept_emp de ON e.emp_no=de.emp_no JOIN departments d ON de.dept_no=d.dept_no WHERE d.dept_name='Development'
-8,复杂,"['AGG', 'GROUP_BY']",MATCH,0.112311,0.44207,3.94,0.3298,5.9,6,7.2,"SELECT YEAR(hire_date) AS y, COUNT(*) AS c FROM employees GROUP BY y ORDER BY y"
-9,嵌套,"['SUBQUERY', 'AGG']",MATCH,0.0,0.31854,,0.3185,5.7,30,17.4,SELECT COUNT(*) FROM employees WHERE emp_no IN (SELECT emp_no FROM dept_manager)
-10,复杂,"['JOIN', 'LEFT_JOIN', 'AGG']",MATCH,0.460569,0.774863,1.68,0.3143,5.7,12,10.8,SELECT COUNT(*) FROM employees e LEFT JOIN dept_manager dm ON e.emp_no=dm.emp_no WHERE dm.emp_no IS NULL
-11,基础,"['JOIN', 'AGG', 'GROUP_BY']",MATCH,0.532393,0.818262,1.54,0.2859,5.1,16,13.0,"SELECT t.title, COUNT(*) FROM employees e JOIN titles t ON e.emp_no=t.emp_no GROUP BY t.title ORDER BY t.title"
-12,复杂,"['AGG', 'BETWEEN']",MATCH,0.398084,0.666019,1.67,0.2679,4.8,13,12.4,SELECT COUNT(*) FROM salaries WHERE salary BETWEEN 60000 AND 70000
-13,嵌套,['SUBQUERY'],MATCH,0.0,0.267007,,0.267,4.8,31,20.2,"SELECT emp_no, first_name, last_name FROM employees WHERE emp_no IN (SELECT emp_no FROM dept_manager WHERE dept_no='d005') ORDER BY emp_no"
-14,嵌套,"['SUBQUERY', 'AGG']",MATCH,0.0,0.266329,,0.2663,4.8,33,21.6,SELECT COUNT(*) FROM employees WHERE emp_no IN (SELECT emp_no FROM dept_manager WHERE dept_no IN (SELECT dept_no FROM departments WHERE dept_name='Development'))
-15,嵌套,"['SUBQUERY', 'AGG']",MATCH,0.042292,0.284115,6.72,0.2418,4.3,1,9.4,SELECT COUNT(*) FROM employees WHERE emp_no NOT IN (SELECT emp_no FROM dept_manager)
-16,嵌套,"['SUBQUERY', 'AGG']",MATCH,0.471155,0.650428,1.38,0.1793,3.2,18,16.8,SELECT COUNT(*) FROM salaries WHERE salary > (SELECT AVG(salary) FROM salaries)
-17,嵌套,"['SUBQUERY', 'AGG']",MATCH,0.0,0.101031,,0.101,1.8,32,23.0,SELECT COUNT(*) FROM employees WHERE emp_no <= 10050 AND emp_no IN (SELECT emp_no FROM dept_emp WHERE dept_no='d001')
-18,基础,['AGG'],MATCH,0.183311,0.283983,1.55,0.1007,1.8,15,16.8,SELECT COUNT(*) FROM salaries WHERE salary > 100000
-19,基础,"['JOIN', 'AGG', 'GROUP_BY']",MATCH,0.083138,0.150411,1.81,0.0673,1.2,9,15.0,"SELECT dept_name, COUNT(*) AS c FROM departments d JOIN dept_emp de ON d.dept_no=de.dept_no GROUP BY d.dept_name ORDER BY d.dept_name"
-20,WITH,"['JOIN', 'SUBQUERY', 'CTE', 'AGG', 'GROUP_BY']",MATCH,0.030267,0.051564,1.7,0.0213,0.4,11,16.4,"WITH dc AS (SELECT dept_no, COUNT(*) AS c FROM dept_emp GROUP BY dept_no) SELECT d.dept_name, dc.c FROM dc JOIN departments d ON d.dept_no=dc.dept_no ORDER BY d.dept_name"
-21,WITH,"['JOIN', 'SUBQUERY', 'CTE', 'AGG', 'GROUP_BY']",MATCH,0.03245,0.051178,1.58,0.0187,0.3,14,18.2,"WITH a AS (SELECT dept_no, COUNT(*) AS c FROM dept_emp GROUP BY dept_no), b AS (SELECT dept_no, dept_name FROM departments) SELECT b.dept_name, a.c FROM a JOIN b ON a.dept_no=b.dept_no ORDER BY b.dept_name"
-22,基础,['AGG'],MATCH,0.017069,0.034188,2.0,0.0171,0.3,8,16.4,SELECT COUNT(*) FROM employees WHERE first_name='Parto'
-23,基础,['AGG'],MATCH,0.016341,0.017741,1.09,0.0014,0.0,19,21.4,SELECT COUNT(*) FROM employees
-24,嵌套,['SUBQUERY'],MATCH,0.0,0.000856,,0.0009,0.0,35,28.4,SELECT e.emp_no FROM employees e WHERE e.emp_no <= 10050 AND e.emp_no IN (SELECT de.emp_no FROM dept_emp de WHERE de.emp_no=e.emp_no AND de.dept_no='d005') ORDER BY e.emp_no
-25,基础,['JOIN'],MATCH,0.0,0.000844,,0.0008,0.0,29,26.6,"SELECT e.first_name, e.last_name, s.salary, s.from_date FROM employees e JOIN salaries s ON e.emp_no=s.emp_no WHERE e.emp_no=10001 ORDER BY s.from_date"
-26,基础,['SCAN'],MATCH,0.0,0.0,,0.0,0.0,28,26.8,SELECT * FROM employees WHERE emp_no=10001
-27,嵌套,"['SUBQUERY', 'AGG']",MATCH,0.0,0.0,,0.0,0.0,34,29.8,"SELECT e.emp_no, e.first_name, (SELECT MAX(s.salary) FROM salaries s WHERE s.emp_no=e.emp_no) AS max_sal FROM employees e WHERE e.emp_no <= 10010 ORDER BY e.emp_no"
-28,WITH,"['SUBQUERY', 'CTE', 'AGG', 'UNION']",MATCH,0.0,0.0,,0.0,0.0,36,31.2,"WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n < 100) SELECT COUNT(*) AS c, SUM(n) AS s FROM seq"
-29,复杂,['JOIN'],MATCH,0.0,0.0,,0.0,0.0,38,32.6,"SELECT a.emp_no, a.dept_no AS d1, b.dept_no AS d2 FROM dept_emp a JOIN dept_emp b ON a.emp_no=b.emp_no AND a.dept_no < b.dept_no WHERE a.emp_no <= 10100 ORDER BY a.emp_no LIMIT 20"
-30,复杂,['WINDOW'],MATCH,0.0,0.0,,0.0,0.0,39,33.6,"SELECT emp_no, from_date, salary, ROW_NUMBER() OVER (PARTITION BY emp_no ORDER BY from_date DESC) AS rn FROM salaries WHERE emp_no <= 10010 ORDER BY emp_no, rn"
-31,复杂,"['SUBQUERY', 'UNION']",MATCH,0.002012,0.0,0.0,-0.002,0.0,37,33.4,SELECT dept_no FROM departments WHERE dept_no <= 'd004' UNION SELECT dept_no FROM departments WHERE dept_no >= 'd006' ORDER BY dept_no
-32,基础,"['AGG', 'GROUP_BY']",MATCH,0.05813,0.04983,0.86,-0.0083,0.0,21,27.6,"SELECT gender, COUNT(*) FROM employees GROUP BY gender ORDER BY gender"
-33,嵌套,"['SUBQUERY', 'AGG', 'GROUP_BY']",MATCH,0.070003,0.050921,0.73,-0.0191,0.0,23,29.0,"SELECT x.dept_no, x.c FROM (SELECT dept_no, COUNT(*) AS c FROM dept_emp GROUP BY dept_no) x ORDER BY x.dept_no"
-34,基础,['AGG'],MATCH,0.067562,0.034266,0.51,-0.0333,0.0,27,31.2,"SELECT MIN(hire_date), MAX(hire_date) FROM employees"
-35,基础,"['AGG', 'GROUP_BY']",MATCH,0.165954,0.08944,0.54,-0.0765,0.0,26,31.4,"SELECT title, COUNT(*) FROM titles GROUP BY title ORDER BY title"
-36,复杂,"['SUBQUERY', 'AGG', 'UNION']",MATCH,0.562218,0.450393,0.8,-0.1118,0.0,22,30.4,"SELECT 'employees' AS tbl, COUNT(*) AS c FROM employees UNION ALL SELECT 'salaries', COUNT(*) FROM salaries UNION ALL SELECT 'titles', COUNT(*) FROM titles"
-37,基础,['AGG'],MATCH,0.399391,0.284036,0.71,-0.1154,0.0,24,31.8,SELECT SUM(salary) FROM salaries
-38,基础,['AGG'],MATCH,0.432652,0.28448,0.66,-0.1482,0.0,25,32.8,SELECT AVG(salary) FROM salaries
-39,基础,"['JOIN', 'AGG', 'GROUP_BY']",MATCH,2.021467,1.767649,0.87,-0.2538,0.0,20,31.4,"SELECT d.dept_name, AVG(s.salary) FROM departments d JOIN dept_emp de ON d.dept_no=de.dept_no JOIN salaries s ON de.emp_no=s.emp_no GROUP BY d.dept_name ORDER BY d.dept_name"
+1,嵌套,"['SUBQUERY', 'AGG']",MATCH,0.0,0.318184,,0.3182,0.0,31,13.0,SELECT COUNT(*) FROM employees WHERE emp_no IN (SELECT emp_no FROM dept_manager)
+2,嵌套,['SUBQUERY'],MATCH,0.0,0.263093,,0.2631,0.0,32,14.0,"SELECT emp_no, first_name, last_name FROM employees WHERE emp_no IN (SELECT emp_no FROM dept_manager WHERE dept_no='d005') ORDER BY emp_no"
+3,嵌套,"['SUBQUERY', 'AGG']",MATCH,0.0,0.250642,,0.2506,0.0,33,15.0,SELECT COUNT(*) FROM employees WHERE emp_no IN (SELECT emp_no FROM dept_manager WHERE dept_no IN (SELECT dept_no FROM departments WHERE dept_name='Development'))
+4,嵌套,"['SUBQUERY', 'AGG']",MATCH,0.482473,0.720345,1.49,0.2379,0.0,3,3.6,SELECT COUNT(*) FROM employees e WHERE EXISTS (SELECT 1 FROM titles t WHERE t.emp_no=e.emp_no AND t.title='Senior Engineer')
+5,嵌套,"['SUBQUERY', 'AGG']",MATCH,0.116927,0.285433,2.44,0.1685,0.0,2,3.8,SELECT COUNT(*) FROM employees WHERE emp_no NOT IN (SELECT emp_no FROM dept_manager)
+6,嵌套,"['SUBQUERY', 'AGG']",MATCH,0.001896,0.104838,55.29,0.1029,0.0,1,4.0,SELECT COUNT(*) FROM employees WHERE emp_no <= 10050 AND emp_no IN (SELECT emp_no FROM dept_emp WHERE dept_no='d001')
+7,基础,"['JOIN', 'AGG']",MATCH,0.331661,0.433692,1.31,0.102,0.0,5,6.2,SELECT COUNT(*) FROM employees e JOIN dept_emp de ON e.emp_no=de.emp_no JOIN departments d ON de.dept_no=d.dept_no WHERE d.dept_name='Development'
+8,复杂,"['SUBQUERY', 'AGG', 'UNION']",MATCH,0.197462,0.285291,1.44,0.0878,0.0,4,6.4,"SELECT 'employees' AS tbl, COUNT(*) AS c FROM employees UNION ALL SELECT 'salaries', COUNT(*) FROM salaries UNION ALL SELECT 'titles', COUNT(*) FROM titles"
+9,复杂,"['AGG', 'GROUP_BY', 'HAVING']",MATCH,0.265664,0.331784,1.25,0.0661,0.0,6,7.8,"SELECT de.dept_no, COUNT(DISTINCT de.emp_no) AS c FROM dept_emp de GROUP BY de.dept_no HAVING COUNT(DISTINCT de.emp_no) > 20000 ORDER BY de.dept_no"
+10,复杂,['DISTINCT'],MATCH,0.288754,0.336285,1.16,0.0475,0.0,8,9.2,SELECT DISTINCT title FROM titles ORDER BY title LIMIT 3 OFFSET 2
+11,复杂,"['AGG', 'GROUP_BY']",MATCH,0.184389,0.216841,1.18,0.0325,0.0,7,9.4,"SELECT YEAR(hire_date) AS y, COUNT(*) AS c FROM employees GROUP BY y ORDER BY y"
+12,复杂,['WINDOW'],MATCH,0.0,0.001377,,0.0014,0.0,39,22.8,"SELECT emp_no, from_date, salary, ROW_NUMBER() OVER (PARTITION BY emp_no ORDER BY from_date DESC) AS rn FROM salaries WHERE emp_no <= 10010 ORDER BY emp_no, rn"
+13,基础,['JOIN'],MATCH,0.0,0.000773,,0.0008,0.0,30,19.8,"SELECT e.first_name, e.last_name, s.salary, s.from_date FROM employees e JOIN salaries s ON e.emp_no=s.emp_no WHERE e.emp_no=10001 ORDER BY s.from_date"
+14,基础,['SCAN'],MATCH,0.0,0.0,,0.0,0.0,29,20.0,SELECT * FROM employees WHERE emp_no=10001
+15,嵌套,"['SUBQUERY', 'AGG']",MATCH,0.0,0.0,,0.0,0.0,34,22.6,"SELECT e.emp_no, e.first_name, (SELECT MAX(s.salary) FROM salaries s WHERE s.emp_no=e.emp_no) AS max_sal FROM employees e WHERE e.emp_no <= 10010 ORDER BY e.emp_no"
+16,嵌套,['SUBQUERY'],MATCH,0.0,0.0,,0.0,0.0,35,23.6,SELECT e.emp_no FROM employees e WHERE e.emp_no <= 10050 AND e.emp_no IN (SELECT de.emp_no FROM dept_emp de WHERE de.emp_no=e.emp_no AND de.dept_no='d005') ORDER BY e.emp_no
+17,WITH,"['SUBQUERY', 'CTE', 'AGG', 'UNION']",MATCH,0.0,0.0,,0.0,0.0,36,24.6,"WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n < 100) SELECT COUNT(*) AS c, SUM(n) AS s FROM seq"
+18,复杂,['JOIN'],MATCH,0.0,0.0,,0.0,0.0,38,26.0,"SELECT a.emp_no, a.dept_no AS d1, b.dept_no AS d2 FROM dept_emp a JOIN dept_emp b ON a.emp_no=b.emp_no AND a.dept_no < b.dept_no WHERE a.emp_no <= 10100 ORDER BY a.emp_no LIMIT 20"
+19,复杂,"['SUBQUERY', 'UNION']",MATCH,0.000386,0.0,0.0,-0.0004,0.0,37,26.2,SELECT dept_no FROM departments WHERE dept_no <= 'd004' UNION SELECT dept_no FROM departments WHERE dept_no >= 'd006' ORDER BY dept_no
+20,基础,['AGG'],MATCH,0.032292,0.022068,0.68,-0.0102,0.0,11,16.4,SELECT COUNT(*) FROM employees
+21,基础,['AGG'],MATCH,0.067219,0.034109,0.51,-0.0331,0.0,16,19.0,"SELECT MIN(hire_date), MAX(hire_date) FROM employees"
+22,WITH,"['JOIN', 'SUBQUERY', 'CTE', 'AGG', 'GROUP_BY']",MATCH,0.099355,0.058071,0.58,-0.0413,0.0,13,18.4,"WITH a AS (SELECT dept_no, COUNT(*) AS c FROM dept_emp GROUP BY dept_no), b AS (SELECT dept_no, dept_name FROM departments) SELECT b.dept_name, a.c FROM a JOIN b ON a.dept_no=b.dept_no ORDER BY b.dept_name"
+23,基础,['AGG'],MATCH,0.082676,0.036423,0.44,-0.0463,0.0,19,21.4,SELECT COUNT(*) FROM employees WHERE first_name='Parto'
+24,WITH,"['JOIN', 'SUBQUERY', 'CTE', 'AGG', 'GROUP_BY']",MATCH,0.133965,0.052216,0.39,-0.0817,0.0,22,23.2,"WITH dc AS (SELECT dept_no, COUNT(*) AS c FROM dept_emp GROUP BY dept_no) SELECT d.dept_name, dc.c FROM dc JOIN departments d ON d.dept_no=dc.dept_no ORDER BY d.dept_name"
+25,嵌套,"['SUBQUERY', 'AGG', 'GROUP_BY']",MATCH,0.132156,0.043422,0.33,-0.0887,0.0,24,24.6,"SELECT x.dept_no, x.c FROM (SELECT dept_no, COUNT(*) AS c FROM dept_emp GROUP BY dept_no) x ORDER BY x.dept_no"
+26,复杂,"['JOIN', 'LEFT_JOIN', 'AGG']",MATCH,0.498257,0.406936,0.82,-0.0913,0.0,9,19.2,SELECT COUNT(*) FROM employees e LEFT JOIN dept_manager dm ON e.emp_no=dm.emp_no WHERE dm.emp_no IS NULL
+27,基础,"['JOIN', 'AGG', 'GROUP_BY']",MATCH,0.24938,0.151637,0.61,-0.0977,0.0,12,21.0,"SELECT dept_name, COUNT(*) AS c FROM departments d JOIN dept_emp de ON d.dept_no=de.dept_no GROUP BY d.dept_name ORDER BY d.dept_name"
+28,基础,"['AGG', 'GROUP_BY']",MATCH,0.180523,0.051129,0.28,-0.1294,0.0,26,27.2,"SELECT gender, COUNT(*) FROM employees GROUP BY gender ORDER BY gender"
+29,基础,['AGG'],MATCH,0.616642,0.299539,0.49,-0.3171,0.0,17,24.2,SELECT COUNT(*) FROM salaries WHERE salary > 100000
+30,WITH,"['SUBQUERY', 'CTE', 'AGG', 'GROUP_BY']",MATCH,1.232937,0.891211,0.72,-0.3417,0.0,10,22.0,"WITH hs AS (SELECT emp_no, MAX(salary) AS ms FROM salaries GROUP BY emp_no) SELECT COUNT(*) FROM hs WHERE ms > 140000"
+31,基础,"['AGG', 'GROUP_BY']",MATCH,0.499505,0.094447,0.19,-0.4051,0.0,28,29.8,"SELECT title, COUNT(*) FROM titles GROUP BY title ORDER BY title"
+32,复杂,"['AGG', 'BETWEEN']",MATCH,0.732545,0.316482,0.43,-0.4161,0.0,20,27.2,SELECT COUNT(*) FROM salaries WHERE salary BETWEEN 60000 AND 70000
+33,基础,['AGG'],MATCH,0.927449,0.295307,0.32,-0.6321,0.0,25,29.8,SELECT AVG(salary) FROM salaries
+34,基础,['AGG'],MATCH,1.033186,0.283541,0.27,-0.7496,0.0,27,31.2,SELECT SUM(salary) FROM salaries
+35,基础,"['JOIN', 'AGG', 'GROUP_BY']",MATCH,1.652882,0.816989,0.49,-0.8359,0.0,18,28.2,"SELECT t.title, COUNT(*) FROM employees e JOIN titles t ON e.emp_no=t.emp_no GROUP BY t.title ORDER BY t.title"
+36,复杂,"['AGG', 'GROUP_BY']",MATCH,1.983473,1.117522,0.56,-0.866,0.0,14,27.2,"SELECT CASE WHEN salary < 50000 THEN '1_low' WHEN salary < 90000 THEN '2_mid' ELSE '3_high' END AS band, COUNT(*) AS c FROM salaries GROUP BY band ORDER BY band"
+37,嵌套,"['SUBQUERY', 'AGG']",MATCH,1.632233,0.634817,0.39,-0.9974,0.0,21,30.6,SELECT COUNT(*) FROM salaries WHERE salary > (SELECT AVG(salary) FROM salaries)
+38,复杂,"['JOIN', 'AGG', 'GROUP_BY', 'HAVING']",MATCH,3.400563,1.784258,0.52,-1.6163,0.0,15,28.8,"SELECT d.dept_name, COUNT(*) AS c, ROUND(AVG(s.salary),2) AS avg_sal FROM departments d JOIN dept_emp de ON d.dept_no=de.dept_no JOIN salaries s ON de.emp_no=s.emp_no GROUP BY d.dept_name HAVING AVG(s.salary) > 60000 ORDER BY avg_sal DESC LIMIT 5"
+39,基础,"['JOIN', 'AGG', 'GROUP_BY']",MATCH,4.983706,1.86899,0.38,-3.1147,0.0,23,32.6,"SELECT d.dept_name, AVG(s.salary) FROM departments d JOIN dept_emp de ON d.dept_no=de.dept_no JOIN salaries s ON de.emp_no=s.emp_no GROUP BY d.dept_name ORDER BY d.dept_name"

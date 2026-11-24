@@ -1,8 +1,8 @@
 # SQLTiny — Lightweight Embedded Database · MySQL Protocol Compatible
 
-> **Current version `v2.2.1` (2026-11-21)** · The version number is maintained in `CMakeLists.txt` (`project(SQLTiny VERSION 2.2.1)`), `vcpkg.json` (`version-string`) and the startup banner in `src/main.cpp`. The wire protocol still reports `5.7.0-SQLTiny` for MySQL client compatibility — that string is unrelated to the product version.
+> **Current version `v2.2.3` (2026-11-25)** · The version number is maintained in `CMakeLists.txt` (`project(SQLTiny VERSION 2.2.3)`), `vcpkg.json` (`version-string`) and the startup banner in `src/main.cpp`. The wire protocol still reports `5.7.0-SQLTiny` for MySQL client compatibility — that string is unrelated to the product version.
 >
-> v2.2.1 adds an optional **MSVC AddressSanitizer build** (`windows-asan` preset) and backs the stateful Hypothesis fuzzing in the sibling test suite. See "What's new in v2.2.1" below.
+> v2.2.3 delivers **two targeted rounds of employees benchmark optimizations**: the top 3 by `optimization_priority`, then ranks 3/4/6 by `rank_by_delta`. See "What's new in v2.2.3" below.
 
 **SQLTiny** is a lightweight relational database written from scratch in modern C++20, with its core design inspired by [HSQLDB](http://hsqldb.org/). It additionally exposes the **MySQL Wire Protocol**, so standard MySQL clients (`mysql` CLI, Navicat, DBeaver, Connector/J, PyMySQL, DBX/dbExpress) can connect directly.
 
@@ -40,7 +40,37 @@
 
 ---
 
-## 🆕 What's new in v2.2.1 (MSVC ASan build, 2026-11-21)
+## 🆕 What's new in v2.2.3 (employees benchmark: two targeted rounds, 2026-11-25)
+
+Two optimization rounds driven by `benchmark/employees_query_detail.csv`, measured with a Release build and `tests/benchmark/compare_employees.py` (MySQL 3306 vs SQLTiny 3307, employees 300024 / salaries 2844047).
+
+**Round 1 — top 3 by `optimization_priority`**
+
+| Item | Source CSV | Before → after | Technique |
+|---|---:|---:|---|
+| #1 correlated `EXISTS` `COUNT(*)` | 1.4 | 2.086s → **0.702s** (8.95x → 4.68x) | Semi-join materialization: when inner PK = outer column, build a candidate-key set in one scan and reduce each row to a hash probe |
+| #2 3-table JOIN + `WHERE d.dept_name='Development'` | 3.0 | 1.079s → **0.435s** (6.58x → 4.37x) | Push the small dimension's filter key back into the earlier join: filter `departments` to one row and prune at the `dept_emp` probe (331k → 85k intermediate rows) |
+| #3 `YEAR(hire_date)` grouping | 5.0 | 0.824s → **0.442s** (5.77x → 3.94x) | Streaming grouping accepts deterministic date functions (`YEAR/MONTH/DAY`, allowlisted, column/literal args), avoiding whole-row materialization |
+
+Across both rounds, total delta over the 39 queries drops **10.55s → 5.56s (-47%)**, overall ratio 1.97x → 1.62x.
+
+**Round 2 — ranks 3/4/6 by `rank_by_delta`** (interleaved A/B, previous vs current, Release)
+
+| Item | Speedup | Technique |
+|---|---:|---|
+| #3 `EXISTS` semi-join | **1.05–1.13x** | Integer PKs use an `int64_t` key set; the outer column is resolved once to a bare row offset, removing per-row `to_string` and map lookup |
+| #4 `DISTINCT title + ORDER BY + LIMIT` | **1.05–1.08x** | Deduplicate during projection (only unique rows are kept); `string_view` keys for single string columns |
+| #6 `COUNT(DISTINCT de.emp_no) + GROUP BY + HAVING` | **1.36–2.28x** | Resolve grouping / DISTINCT arguments to bare row offsets, use `int64_t` sets for integers, and skip per-row `build_ctx + eval` while bucketing |
+
+The other 10 guard queries stay at 0.97–1.05x (no regression). A transient 0.47x reading for `WITH hs` reproduced at 0.95–1.00x and was confirmed as machine-load noise.
+
+Implementation is in `src/executor/executor.cpp/.h` (+352/-27 lines across both rounds); benchmark artifacts are updated in `benchmark/employees_*`.
+
+**Validation**: both rounds **39/39 MATCH, fails=0**; CTest Release **13/13**; SQLTinySLT **1184 / PASS 1133 / GAP 51 / FAIL 0**, protocol **42/42**, persistence **15/15**, fuzz PASS.
+
+---
+
+## 🆕 What's new in v2.2.2 (benchmark TOP5 query optimizations, 2026-11-24)
 
 No SQL semantics or protocol behavior changes; adds an optional **MSVC AddressSanitizer** build and backs the stateful Hypothesis fuzzing in the external test suite.
 
@@ -560,10 +590,10 @@ cmake --build --preset windows-asan --target sqltiny_server
 | Artifact | Type | Description |
 |---|---|---|
 | `build/Debug/sqltiny.lib` | static library | Engine core, for in-process embedding |
-| `build/Debug/sqltiny_server.exe` | executable | MySQL protocol TCP server (v2.2.1) |
+| `build/Debug/sqltiny_server.exe` | executable | MySQL protocol TCP server (v2.2.3) |
 | `build/Release/sqltiny_server.exe` | executable (release) | Same, Release build is about **0.9 MB** in a single file (static CRT + static fmt, no DLL dependencies, copy-and-run); Debug build is about 4.8 MB |
 
-**`sqltiny_server.exe` file info (v2.2.1)**:
+**`sqltiny_server.exe` file info (v2.2.3)**:
 
 | Property | Value |
 |---|---|

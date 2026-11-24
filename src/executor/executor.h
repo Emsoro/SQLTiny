@@ -144,6 +144,10 @@ private:
     bool try_exists_semi_join(const ast::Expression& e, const ExecContext& ctx, bool& found);
     struct ExistsSemiJoin {
         bool built = false;
+        bool int_mode = false;     // 内表 PK 为整数族时走无字符串键路径
+        bool off_tried = false;
+        int outer_off = -1;        // 外层列在调用方当前行的裸列下标
+        std::unordered_set<int64_t> int_keys;
         std::unordered_set<std::string> keys;
     };
     // 与 sq_cache_ 同口径:按 Subquery 表达式节点键控,顶层语句开始时清空

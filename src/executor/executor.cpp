@@ -10,6 +10,8 @@
 #include <map>
 #include <unordered_map>
 #include <unordered_set>
+#include <string_view>
+#include <optional>
 #include <iterator>
 
 namespace sqltiny::executor {
@@ -1098,6 +1100,8 @@ bool Executor::try_exists_semi_join(const ast::Expression& e, const ExecContext&
 
     auto& sj = exists_sj_cache_[&e];
     if (!sj.built) {
+        sj.int_mode = pk_off < static_cast<int>(def.columns.size()) &&
+                      types::is_integer(def.columns[pk_off].type.type);
         struct LocalPred {
             int off = -1;
             types::Value lit;
@@ -1147,18 +1151,45 @@ bool Executor::try_exists_semi_join(const ast::Expression& e, const ExecContext&
                 }
                 if (!ok) return true;
             }
-            auto k = in_hash_key(row[pk_off]);
-            if (!k.empty()) sj.keys.insert(std::move(k));
+            // 整数主键走裸 int64 键:省掉每行 try_to_double + fmt::format + 堆字符串
+            if (sj.int_mode) {
+                if (row[pk_off].is_int()) sj.int_keys.insert(row[pk_off].v_int);
+            } else {
+                auto k = in_hash_key(row[pk_off]);
+                if (!k.empty()) sj.keys.insert(std::move(k));
+            }
             return true;
         }, rtxn);
         sj.built = true;
     }
     // 外层列在调用方的当前行上求值;标记相关性,避免外层把结果当常量缓存
-    types::Value ov = eval(*outer_col, ctx);
+    types::Value ov;
+    if (!sj.off_tried) {
+        sj.off_tried = true;
+        const auto& ci_outer = ctx.idx_ref ? *ctx.idx_ref : ctx.col_index;
+        std::string ok = outer_col->table_name.empty()
+                             ? outer_col->column_name
+                             : (outer_col->table_name + "." + outer_col->column_name);
+        auto it = ci_outer.find(ok);
+        if (it == ci_outer.end())
+            for (auto& [k, v] : ci_outer)
+                if (_stricmp(k.c_str(), ok.c_str()) == 0) { sj.outer_off = v; break; }
+        else sj.outer_off = it->second;
+    }
+    const storage::Row& orow = ctx.row_ref ? *ctx.row_ref : ctx.current_row;
+    if (sj.outer_off >= 0 && sj.outer_off < static_cast<int>(orow.size()))
+        ov = orow[sj.outer_off];                 // 已解析裸列下标:免去一次 map 查找
+    else
+        ov = eval(*outer_col, ctx);
     if (ctx.outer_used) *ctx.outer_used = true;
     if (ov.is_null()) return true;              // NULL 不可能等于内表主键
-    std::string k = in_hash_key(ov);
-    found = !k.empty() && sj.keys.find(k) != sj.keys.end();
+    if (sj.int_mode) {
+        if (!ov.is_int()) return false;          // 跨类型比较交回旧路径保语义
+        found = sj.int_keys.find(ov.v_int) != sj.int_keys.end();
+    } else {
+        std::string k = in_hash_key(ov);
+        found = !k.empty() && sj.keys.find(k) != sj.keys.end();
+    }
     return true;
 }
 
@@ -3543,13 +3574,33 @@ ResultSet Executor::exec_select_body(const ast::SelectStmt& s, const ExecContext
         std::unordered_map<std::string, size_t> bucket_index;
 
         // 生成每个 flat row 的分组 key (使用别名/位置解析后的分组表达式)
+        // 分组列为简单列时预解析裸偏移,免去每行 build_ctx + eval。
+        std::vector<int> gk_off;
+        for (auto* ge : group_exprs) {
+            int off = -1;
+            if (ge && ge->kind == ast::ExprKind::Column) {
+                std::string key = ge->table_name.empty() ? ge->column_name
+                                                         : (ge->table_name + "." + ge->column_name);
+                auto it = base_col_index.find(key);
+                if (it != base_col_index.end() && it->second >= 0 && it->second < total_cols)
+                    off = it->second;
+            }
+            gk_off.push_back(off);
+        }
         auto group_key_str = [&](const storage::Row& flat) -> std::string {
             if (group_exprs.empty()) return "";   // 空 group_by = 单组 (MySQL 允许,等效全表一组)
-            auto ctx = build_ctx(flat);
             std::string k;
-            for (auto* ge : group_exprs) {
-                auto v = eval(*ge, ctx);
-                k += v.to_string() + "\x01";
+            std::optional<ExecContext> ctx_holder;
+            for (size_t i = 0; i < group_exprs.size(); ++i) {
+                types::Value v;
+                if (gk_off[i] >= 0 && gk_off[i] < static_cast<int>(flat.size()))
+                    v = flat[gk_off[i]];
+                else {
+                    if (!ctx_holder) ctx_holder.emplace(build_ctx(flat));
+                    v = eval(*group_exprs[i], *ctx_holder);
+                }
+                k += v.to_string();
+                k.push_back('\x01');
             }
             return k;
         };
@@ -3600,11 +3651,38 @@ ResultSet Executor::exec_select_body(const ast::SelectStmt& s, const ExecContext
             types::Value best;
             std::string gcat;
             bool gcat_any = false;
+            // COUNT(DISTINCT col):单列参数为裸列时按行内偏移直取,避免整桶每行
+            // 构造 ExecContext + map 查找;整数值走 int64 集合省掉 to_string 分配。
+            // 首值非整型时一次性把已有 int 键转成字符串键,混合类型语义不变。
+            int dcol_off = -1;
+            if (fe.func_distinct && fe.func_args[0]->kind == ast::ExprKind::Column) {
+                const auto& dc = *fe.func_args[0];
+                std::string dkey = dc.table_name.empty() ? dc.column_name
+                                                         : (dc.table_name + "." + dc.column_name);
+                auto dit = base_col_index.find(dkey);
+                if (dit != base_col_index.end() && dit->second >= 0 &&
+                    dit->second < total_cols) dcol_off = dit->second;
+            }
             std::unordered_set<std::string> dseen;
+            std::unordered_set<int64_t> dseen_int;
+            bool distinct_int = dcol_off >= 0;
             for (auto& row : brows) {
-                auto v = eval(*fe.func_args[0], build_ctx(row));
+                types::Value v;
+                if (dcol_off >= 0 && dcol_off < static_cast<int>(row.size()))
+                    v = row[dcol_off];
+                else
+                    v = eval(*fe.func_args[0], build_ctx(row));
                 if (v.is_null()) continue;
-                if (fe.func_distinct && !dseen.insert(v.to_string()).second) continue;
+                if (fe.func_distinct) {
+                    if (distinct_int && !v.is_int()) {
+                        for (int64_t iv : dseen_int)
+                            dseen.insert(types::Value::make_int(iv).to_string());
+                        dseen_int.clear(); distinct_int = false;
+                    }
+                    bool dup = distinct_int ? !dseen_int.insert(v.v_int).second
+                                            : !dseen.insert(v.to_string()).second;
+                    if (dup) continue;
+                }
                 if (low == "count") { ++c; continue; }
                 if (low == "group_concat") {
                     if (gcat_any) gcat.push_back(',');
@@ -3817,9 +3895,28 @@ ResultSet Executor::exec_select_body(const ast::SelectStmt& s, const ExecContext
         return r;
     }
     // 先投影(ORDER BY 别名/位置需要投影值)
+    // DISTINCT 且投影列都是简单列/常量时,投影阶段即时去重:
+    // 原路径先物化 44 万行 Row 再去重,这里只保留唯一值的少量 Row。
+    bool distinct_inline = s.distinct && !s.columns.empty();
+    if (distinct_inline)
+        for (auto& [ce, _] : s.columns)
+            if (!ce || (ce->kind != ast::ExprKind::Column &&
+                        ce->kind != ast::ExprKind::Literal)) {
+                distinct_inline = false; break;
+            }
     std::vector<storage::Row> projected;
-    projected.reserve(after_where.size());
-    for (auto& row : after_where) projected.push_back(compute_row(row));
+    if (distinct_inline) {
+        std::unordered_set<std::string> seen;
+        seen.reserve(1024);
+        for (auto& row : after_where) {
+            auto out = compute_row(row);
+            if (seen.insert(row_dedup_key(out)).second)
+                projected.push_back(std::move(out));
+        }
+    } else {
+        projected.reserve(after_where.size());
+        for (auto& row : after_where) projected.push_back(compute_row(row));
+    }
     if (!eval_error_.empty()) return take_eval_error();
 
     // 窗口函数:PARTITION BY 分组 → 组内 ORDER BY 排序 → 填值
@@ -3937,17 +4034,32 @@ ResultSet Executor::exec_select_body(const ast::SelectStmt& s, const ExecContext
 
     // DISTINCT 下推: ORDER BY 全部引用输出列时先去重再排序。
     // 原实现先对 44 万行全排序再去重成 7 行; 下推后只对 7 行排序。
-    bool distinct_pre = s.distinct;
+    bool distinct_pre = s.distinct && !distinct_inline;
     if (distinct_pre) {
         for (auto& [oe, _] : s.order_by)
             if (order_output_index(*oe) < 0) { distinct_pre = false; break; }
     }
     if (distinct_pre) {
         std::vector<storage::Row> dedup;
-        std::unordered_set<std::string> seen;
-        seen.reserve(projected.size());
-        for (auto& row : projected)
-            if (seen.insert(row_dedup_key(row)).second) dedup.push_back(std::move(row));
+        // 单字符串列(如 DISTINCT title)直接复用行内 string 作键:
+        // 免去 44 万次 to_string 拼接 + 堆字符串分配,桶数按唯一值规模预留。
+        bool sv_ok = !projected.empty() && projected[0].size() == 1 &&
+                     projected[0][0].is_string();
+        if (sv_ok)
+            for (auto& row : projected)
+                if (!row[0].is_string()) { sv_ok = false; break; }
+        if (sv_ok) {
+            std::unordered_set<std::string_view> seen;
+            seen.reserve(1024);
+            for (auto& row : projected)
+                if (seen.insert(std::string_view(row[0].v_str)).second)
+                    dedup.push_back(std::move(row));
+        } else {
+            std::unordered_set<std::string> seen;
+            seen.reserve(projected.size() < 1024 ? projected.size() : 1024);
+            for (auto& row : projected)
+                if (seen.insert(row_dedup_key(row)).second) dedup.push_back(std::move(row));
+        }
         projected = std::move(dedup);
     }
 
